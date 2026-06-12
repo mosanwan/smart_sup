@@ -27,9 +27,22 @@
 
 固件工程使用 PlatformIO 起步：
 
-```powershell
+```bash
 cd firmware/esp32
 pio run
+```
+
+Ubuntu 首次使用时需要确认本机已安装 PlatformIO，并且当前用户有串口权限：
+
+```bash
+python3 -m pip install --user platformio
+sudo usermod -aG dialout "$USER"
+```
+
+加入 `dialout` 组后需要重新登录终端会话。ESP32 连接后可用下面命令查看串口名：
+
+```bash
+pio device list
 ```
 
 默认固件只做安全的 ESC PWM 输出骨架：上电保持未解锁，需要明确解锁后才允许输出高于空闲值的油门。
