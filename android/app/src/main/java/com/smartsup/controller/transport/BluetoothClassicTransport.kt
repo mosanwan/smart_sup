@@ -89,11 +89,19 @@ class BluetoothClassicTransport(
     }
 
     override suspend fun send(command: ControlCommand) = withContext(Dispatchers.IO) {
-        val line = "ARM=${if (command.armed) 1 else 0};L=${command.leftThrottlePercent};R=${command.rightThrottlePercent}\n"
-        val stream = outputStream ?: error("蓝牙输出流未连接")
-        stream.write(line.toByteArray(Charsets.US_ASCII))
-        stream.flush()
+        writeAsciiLine("ARM=${if (command.armed) 1 else 0};L=${command.leftThrottlePercent};R=${command.rightThrottlePercent}")
+    }
+
+    override suspend fun sendRawLine(line: String) = withContext(Dispatchers.IO) {
+        writeAsciiLine(line)
+    }
+
+    private fun writeAsciiLine(line: String) {
         val visibleLine = line.trim()
+        require(visibleLine.isNotEmpty()) { "蓝牙命令不能为空" }
+        val stream = outputStream ?: error("蓝牙输出流未连接")
+        stream.write("$visibleLine\n".toByteArray(Charsets.US_ASCII))
+        stream.flush()
         Log.d(TAG, "tx $visibleLine")
         if (visibleLine != lastVisibleCommandLine) {
             lastVisibleCommandLine = visibleLine

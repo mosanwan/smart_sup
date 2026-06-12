@@ -23,8 +23,8 @@ android {
         applicationId = "com.smartsup.controller"
         minSdk = 26
         targetSdk = 36
-        versionCode = 3
-        versionName = "0.2.1"
+        versionCode = 4
+        versionName = "0.2.2"
         buildConfigField("String", "GITHUB_REPOSITORY", "\"mosanwan/smart_sup\"")
     }
 

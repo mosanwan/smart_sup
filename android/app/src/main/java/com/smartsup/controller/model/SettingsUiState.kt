@@ -15,6 +15,7 @@ data class SettingsUiState(
     val rightEscReversed: Boolean = false,
     val rampLimitEnabled: Boolean = true,
     val githubToken: String = "",
+    val esp32UnitIdInput: String = "000",
     val deviceNamePrefix: String = "SmartSUP-",
     val message: String = "在 App 内扫描并连接 SmartSUP ESP32 设备",
 )

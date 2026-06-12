@@ -10,6 +10,7 @@ interface ControlTransport {
     suspend fun connect()
     suspend fun disconnect()
     suspend fun send(command: ControlCommand)
+    suspend fun sendRawLine(line: String)
     suspend fun uploadFirmware(
         firmware: ByteArray,
         md5Hex: String,
