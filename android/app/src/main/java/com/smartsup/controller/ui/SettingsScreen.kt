@@ -17,15 +17,12 @@ import androidx.compose.material3.CardDefaults
 import androidx.compose.material3.HorizontalDivider
 import androidx.compose.material3.MaterialTheme
 import androidx.compose.material3.OutlinedButton
-import androidx.compose.material3.OutlinedTextField
 import androidx.compose.material3.Slider
 import androidx.compose.material3.Switch
 import androidx.compose.material3.Text
 import androidx.compose.runtime.Composable
 import androidx.compose.ui.Modifier
-import androidx.compose.ui.text.input.KeyboardType
 import androidx.compose.ui.text.font.FontWeight
-import androidx.compose.foundation.text.KeyboardOptions
 import androidx.compose.ui.unit.dp
 import com.smartsup.controller.BuildConfig
 import com.smartsup.controller.model.BluetoothDeviceInfo
@@ -52,8 +49,6 @@ fun SettingsScreen(
     onRampLimitChange: (Boolean) -> Unit,
     onLeftEscReversedChange: (Boolean) -> Unit,
     onRightEscReversedChange: (Boolean) -> Unit,
-    onEsp32UnitIdInputChange: (String) -> Unit,
-    onWriteEsp32UnitId: () -> Unit,
     onCheckUpdates: () -> Unit,
     onInstallAppUpdate: () -> Unit,
     onUpdateEsp32FromGitHub: () -> Unit,
@@ -82,8 +77,6 @@ fun SettingsScreen(
             onConnectSaved = onConnectSaved,
             onConnectDevice = onConnectDevice,
             onDisconnect = onDisconnect,
-            onEsp32UnitIdInputChange = onEsp32UnitIdInputChange,
-            onWriteEsp32UnitId = onWriteEsp32UnitId,
         )
 
         UpdateSettingsCard(
@@ -128,10 +121,7 @@ private fun BluetoothCard(
     onConnectSaved: () -> Unit,
     onConnectDevice: (BluetoothDeviceInfo) -> Unit,
     onDisconnect: () -> Unit,
-    onEsp32UnitIdInputChange: (String) -> Unit,
-    onWriteEsp32UnitId: () -> Unit,
 ) {
-    val connected = controlState.connectionState == ConnectionState.Connected
     Card(
         colors = CardDefaults.cardColors(containerColor = MaterialTheme.colorScheme.surface),
         modifier = Modifier.fillMaxWidth(),
@@ -147,30 +137,8 @@ private fun BluetoothCard(
             SettingsRow("连接", connectionText(controlState.connectionState))
             SettingsRow("已保存", settingsState.savedDevice?.name ?: "无")
             Text(settingsState.message, color = MaterialTheme.colorScheme.primary)
-            HorizontalDivider()
-            Text("设备编号", style = MaterialTheme.typography.titleSmall)
-            Row(
-                modifier = Modifier.fillMaxWidth(),
-                horizontalArrangement = Arrangement.spacedBy(8.dp),
-            ) {
-                OutlinedTextField(
-                    value = settingsState.esp32UnitIdInput,
-                    onValueChange = onEsp32UnitIdInputChange,
-                    enabled = connected,
-                    singleLine = true,
-                    label = { Text("000-999") },
-                    keyboardOptions = KeyboardOptions(keyboardType = KeyboardType.Number),
-                    modifier = Modifier.weight(1f),
-                )
-                Button(
-                    onClick = onWriteEsp32UnitId,
-                    enabled = connected && settingsState.esp32UnitIdInput.length == 3,
-                ) {
-                    Text("写入")
-                }
-            }
             Text(
-                "需要 ESP32 已运行 v0.2.2 或更新固件；写入后蓝牙名会变为 ${settingsState.deviceNamePrefix}xxx 并自动重启。",
+                "设备编号是出厂首次刷入时固定的硬件编号，App 只按 ${settingsState.deviceNamePrefix} 前缀发现设备。",
                 style = MaterialTheme.typography.bodySmall,
                 color = MaterialTheme.colorScheme.onSurfaceVariant,
             )

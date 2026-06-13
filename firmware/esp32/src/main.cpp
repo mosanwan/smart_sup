@@ -2,6 +2,9 @@
 #include "BluetoothSerial.h"
 #include <Preferences.h>
 #include <Update.h>
+#if __has_include("factory_unit_id.h")
+#include "factory_unit_id.h"
+#endif
 
 namespace {
 BluetoothSerial SerialBT;
@@ -16,6 +19,10 @@ constexpr char NVS_NAMESPACE[] = "smart_sup";
 constexpr char NVS_UNIT_ID_KEY[] = "unit_id";
 constexpr uint16_t DEFAULT_UNIT_ID = 0;
 constexpr uint16_t MAX_UNIT_ID = 999;
+#ifndef SMART_SUP_FACTORY_UNIT_ID
+#define SMART_SUP_FACTORY_UNIT_ID -1
+#endif
+constexpr int FACTORY_UNIT_ID = SMART_SUP_FACTORY_UNIT_ID;
 
 constexpr uint8_t LEFT_ESC_CHANNEL = 0;
 constexpr uint8_t RIGHT_ESC_CHANNEL = 1;
@@ -35,7 +42,6 @@ constexpr size_t BT_RX_BUFFER_SIZE = 96;
 constexpr size_t SERIAL_RX_BUFFER_SIZE = 96;
 constexpr size_t OTA_BUFFER_SIZE = 512;
 constexpr size_t BT_DEVICE_NAME_SIZE = 16;
-constexpr uint32_t ID_RESTART_DELAY_MS = 800;
 
 bool armed = false;
 uint16_t leftPulseUs = ESC_NEUTRAL_US;
@@ -58,8 +64,8 @@ uint32_t otaLastProgressMs = 0;
 bool nvsReady = false;
 uint16_t unitId = DEFAULT_UNIT_ID;
 char btDeviceName[BT_DEVICE_NAME_SIZE] = {};
-bool restartPending = false;
-uint32_t restartAtMs = 0;
+bool unitIdProvisioned = false;
+const char* unitIdSource = "FALLBACK";
 
 void printPaddedUnitId(Print& output, uint16_t id) {
   if (id < 100) {
@@ -75,35 +81,45 @@ void formatBluetoothName() {
   snprintf(btDeviceName, sizeof(btDeviceName), "%s%03u", BT_DEVICE_NAME_PREFIX, unitId);
 }
 
+bool isValidUnitId(int id) {
+  return id >= 0 && id <= MAX_UNIT_ID;
+}
+
+void applyUnitId(uint16_t id, const char* source, bool provisioned) {
+  unitId = id;
+  unitIdSource = source;
+  unitIdProvisioned = provisioned;
+  formatBluetoothName();
+}
+
 void loadUnitId() {
   nvsReady = preferences.begin(NVS_NAMESPACE, false);
   if (!nvsReady) {
-    unitId = DEFAULT_UNIT_ID;
-    formatBluetoothName();
+    if (isValidUnitId(FACTORY_UNIT_ID)) {
+      applyUnitId(static_cast<uint16_t>(FACTORY_UNIT_ID), "FACTORY_VOLATILE", false);
+    } else {
+      applyUnitId(DEFAULT_UNIT_ID, "FALLBACK", false);
+    }
     Serial.println("NVS start failed; using default unit id");
     return;
   }
 
-  const uint32_t stored = preferences.getUInt(NVS_UNIT_ID_KEY, DEFAULT_UNIT_ID);
-  if (stored > MAX_UNIT_ID) {
-    unitId = DEFAULT_UNIT_ID;
-    preferences.putUInt(NVS_UNIT_ID_KEY, unitId);
-  } else {
-    unitId = static_cast<uint16_t>(stored);
+  if (preferences.isKey(NVS_UNIT_ID_KEY)) {
+    const uint32_t stored = preferences.getUInt(NVS_UNIT_ID_KEY, DEFAULT_UNIT_ID);
+    if (stored <= MAX_UNIT_ID) {
+      applyUnitId(static_cast<uint16_t>(stored), "NVS", true);
+      return;
+    }
+    Serial.println("Stored unit id invalid; ignoring NVS value");
   }
-  formatBluetoothName();
-}
 
-void printIdentity(Print& output) {
-  output.print("ID;VALUE=");
-  printPaddedUnitId(output, unitId);
-  output.print(";BT=");
-  output.println(btDeviceName);
-}
+  if (isValidUnitId(FACTORY_UNIT_ID)) {
+    applyUnitId(static_cast<uint16_t>(FACTORY_UNIT_ID), "FACTORY", true);
+    preferences.putUInt(NVS_UNIT_ID_KEY, unitId);
+    return;
+  }
 
-void scheduleRestart() {
-  restartPending = true;
-  restartAtMs = millis() + ID_RESTART_DELAY_MS;
+  applyUnitId(DEFAULT_UNIT_ID, "FALLBACK", false);
 }
 
 uint32_t pulseUsToDuty(uint16_t pulseUs) {
@@ -237,83 +253,30 @@ bool parseArmToken(const char* token, bool& outArmed) {
   return false;
 }
 
-bool parseUnitIdToken(const char* token, const char* prefix, uint16_t& outValue) {
-  const size_t prefixLen = strlen(prefix);
-  if (strncmp(token, prefix, prefixLen) != 0) {
-    return false;
-  }
-
-  char* end = nullptr;
-  const long parsed = strtol(token + prefixLen, &end, 10);
-  if (end == token + prefixLen || *end != '\0' || parsed < 0 || parsed > MAX_UNIT_ID) {
-    return false;
-  }
-
-  outValue = static_cast<uint16_t>(parsed);
-  return true;
+void printIdentity(Print& output) {
+  output.print("ID;VALUE=");
+  printPaddedUnitId(output, unitId);
+  output.print(";BT=");
+  output.print(btDeviceName);
+  output.print(";SRC=");
+  output.print(unitIdSource);
+  output.print(";PROVISIONED=");
+  output.println(unitIdProvisioned ? 1 : 0);
 }
 
-bool applyIdentityLine(char* line, Print& response, const char* source) {
+bool applyIdentityLine(char* line, Print& response) {
   if (strcmp(line, "ID?") == 0 || strcmp(line, "ID") == 0) {
     printIdentity(response);
     return true;
   }
 
-  if (strncmp(line, "ID_SET", 6) != 0) {
-    return false;
-  }
-
-  if (otaInProgress) {
-    response.println("ID;ERR=OTA_BUSY");
-    Serial.println("ID set rejected: OTA busy");
+  if (strncmp(line, "ID_SET", 6) == 0) {
+    response.println("ID;ERR=FACTORY_ONLY");
+    Serial.println("ID set rejected: factory provisioning only");
     return true;
   }
 
-  if (!nvsReady) {
-    response.println("ID;ERR=NVS_UNAVAILABLE");
-    Serial.println("ID set rejected: NVS unavailable");
-    return true;
-  }
-
-  bool sawUnitId = false;
-  uint16_t nextUnitId = DEFAULT_UNIT_ID;
-
-  char* token = strtok(line, ";");
-  while (token != nullptr) {
-    if (strcmp(token, "ID_SET") == 0) {
-      // Header marker.
-    } else if (parseUnitIdToken(token, "VALUE=", nextUnitId) || parseUnitIdToken(token, "ID=", nextUnitId)) {
-      sawUnitId = true;
-    }
-    token = strtok(nullptr, ";");
-  }
-
-  if (!sawUnitId) {
-    response.println("ID;ERR=BAD_VALUE");
-    Serial.println("ID set rejected: bad value");
-    return true;
-  }
-
-  forceNeutralAndDisarm();
-  preferences.putUInt(NVS_UNIT_ID_KEY, nextUnitId);
-  unitId = nextUnitId;
-  formatBluetoothName();
-
-  response.print("ID;OK;VALUE=");
-  printPaddedUnitId(response, unitId);
-  response.print(";BT=");
-  response.print(btDeviceName);
-  response.println(";RESTART=1");
-
-  Serial.print("Unit id set from ");
-  Serial.print(source);
-  Serial.print("; id=");
-  printPaddedUnitId(Serial, unitId);
-  Serial.print("; bt=");
-  Serial.println(btDeviceName);
-
-  scheduleRestart();
-  return true;
+  return false;
 }
 
 void beginOta(char* line) {
@@ -443,7 +406,7 @@ void applyBluetoothLine(char* line) {
     beginOta(line);
     return;
   }
-  if (applyIdentityLine(line, SerialBT, "BT")) {
+  if (applyIdentityLine(line, SerialBT)) {
     return;
   }
 
@@ -486,7 +449,7 @@ void applyBluetoothLine(char* line) {
 }
 
 void applySerialLine(char* line) {
-  if (applyIdentityLine(line, Serial, "SERIAL")) {
+  if (applyIdentityLine(line, Serial)) {
     return;
   }
 
@@ -586,19 +549,9 @@ void publishBluetoothStatus(uint32_t now) {
   SerialBT.print(";ID=");
   printPaddedUnitId(SerialBT, unitId);
   SerialBT.print(";BT=");
-  SerialBT.println(btDeviceName);
-}
-
-void handlePendingRestart(uint32_t now) {
-  if (!restartPending || now < restartAtMs) {
-    return;
-  }
-
-  forceNeutralAndDisarm();
-  Serial.println("Restarting to apply unit id");
-  SerialBT.println("STATUS;ARMED=0;RESTART=ID_APPLY");
-  delay(100);
-  ESP.restart();
+  SerialBT.print(btDeviceName);
+  SerialBT.print(";ID_SRC=");
+  SerialBT.println(unitIdSource);
 }
 }  // namespace
 
@@ -626,7 +579,11 @@ void setup() {
   Serial.print("Smart SUP controller booted; state=DISARMED; id=");
   printPaddedUnitId(Serial, unitId);
   Serial.print("; bt=");
-  Serial.println(btDeviceName);
+  Serial.print(btDeviceName);
+  Serial.print("; id_src=");
+  Serial.print(unitIdSource);
+  Serial.print("; provisioned=");
+  Serial.println(unitIdProvisioned ? 1 : 0);
 }
 
 void loop() {
@@ -635,7 +592,6 @@ void loop() {
 
   const uint32_t now = millis();
   handleOtaTimeout(now);
-  handlePendingRestart(now);
   if (otaInProgress) {
     digitalWrite(STATUS_LED_PIN, (now / 100) % 2);
     return;

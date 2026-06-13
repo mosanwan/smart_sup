@@ -84,8 +84,6 @@ fun AppScreen(viewModel: ControlViewModel) {
                 onRampLimitChange = viewModel::setRampLimitEnabled,
                 onLeftEscReversedChange = viewModel::setLeftEscReversed,
                 onRightEscReversedChange = viewModel::setRightEscReversed,
-                onEsp32UnitIdInputChange = viewModel::setEsp32UnitIdInput,
-                onWriteEsp32UnitId = viewModel::writeEsp32UnitId,
                 onCheckUpdates = viewModel::checkForUpdates,
                 onInstallAppUpdate = viewModel::installLatestAppUpdate,
                 onUpdateEsp32FromGitHub = viewModel::downloadAndUploadLatestEsp32Firmware,

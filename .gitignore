@@ -1,4 +1,5 @@
 .pio/
+firmware/esp32/src/factory_unit_id.h
 android/.gradle/
 android/local.properties
 android/**/build/

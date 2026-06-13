@@ -28,7 +28,6 @@ import com.smartsup.controller.update.AppUpdateInstaller
 import com.smartsup.controller.update.GitHubReleaseClient
 import java.io.File
 import java.security.MessageDigest
-import java.util.Locale
 import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.flow.StateFlow
 import kotlinx.coroutines.flow.asStateFlow
@@ -393,71 +392,6 @@ class ControlViewModel(application: Application) : AndroidViewModel(application)
         preferences.edit().putBoolean(KEY_RIGHT_ESC_REVERSED, enabled).apply()
         mutableSettingsState.update { it.copy(rightEscReversed = enabled) }
         lockForDirectionChange("右 ESC 方向${if (enabled) "已反转" else "已恢复"}")
-    }
-
-    fun setEsp32UnitIdInput(value: String) {
-        val digits = value.filter { it.isDigit() }.take(3)
-        mutableSettingsState.update { it.copy(esp32UnitIdInput = digits) }
-    }
-
-    fun writeEsp32UnitId() {
-        val state = mutableSettingsState.value
-        val unitId = state.esp32UnitIdInput.toIntOrNull()
-        val nextTransport = transport
-        if (unitId == null || unitId !in 0..999) {
-            mutableSettingsState.update { it.copy(message = "ESP32 编号必须在 000-999 之间") }
-            return
-        }
-        if (nextTransport == null || mutableUiState.value.connectionState != ConnectionState.Connected) {
-            mutableSettingsState.update { it.copy(message = "请先连接 ESP32，再写入编号") }
-            return
-        }
-
-        val paddedUnitId = String.format(Locale.US, "%03d", unitId)
-        val nextName = "$SMART_SUP_DEVICE_PREFIX$paddedUnitId"
-        viewModelScope.launch {
-            commandHeartbeatJob?.cancel()
-            mutableUiState.update {
-                it.copy(
-                    armed = false,
-                    leftThrottlePercent = 0,
-                    rightThrottlePercent = 0,
-                    selectedGear = ThrottleGear.Neutral,
-                    statusMessage = "正在写入 ESP32 编号，推进输出回空挡",
-                )
-            }
-
-            runCatching {
-                nextTransport.send(ControlCommand.Idle)
-                nextTransport.sendRawLine("ID_SET;VALUE=$paddedUnitId")
-            }.onSuccess {
-                preferences.edit().putString(KEY_DEVICE_NAME, nextName).apply()
-                mutableSettingsState.update {
-                    it.copy(
-                        savedDevice = it.savedDevice?.copy(name = nextName),
-                        message = "已写入 ESP32 编号 $paddedUnitId，设备将重启为 $nextName",
-                    )
-                }
-                mutableUiState.update {
-                    it.copy(
-                        connectionState = ConnectionState.Disconnected,
-                        statusMessage = "ESP32 正在重启，请稍后重新扫描 $nextName",
-                    )
-                }
-                delay(1200)
-                runCatching { nextTransport.disconnect() }
-                transport = null
-                telemetryJob?.cancel()
-                refreshBluetoothDevices()
-            }.onFailure { error ->
-                mutableSettingsState.update {
-                    it.copy(message = "写入 ESP32 编号失败：${error.message ?: "未知错误"}")
-                }
-                if (mutableUiState.value.connectionState == ConnectionState.Connected) {
-                    startCommandHeartbeat()
-                }
-            }
-        }
     }
 
     fun setGitHubToken(token: String) {

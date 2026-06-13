@@ -45,6 +45,14 @@ sudo usermod -aG dialout "$USER"
 pio device list
 ```
 
+ESP32 出厂硬件编号用项目台账分配，并在第一次 USB 刷入时固定到 NVS/flash：
+
+```bash
+tools/provision_esp32_unit.py --flash --port /dev/ttyUSB0
+```
+
+编号流程见 [ESP32 出厂编号刷入流程](docs/esp32_factory_provisioning.md)。
+
 默认固件只做安全的 ESC PWM 输出骨架：上电保持未解锁，需要明确解锁后才允许输出高于空闲值的油门。
 
 ## 接线图

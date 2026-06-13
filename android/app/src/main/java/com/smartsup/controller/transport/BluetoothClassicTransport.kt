@@ -92,10 +92,6 @@ class BluetoothClassicTransport(
         writeAsciiLine("ARM=${if (command.armed) 1 else 0};L=${command.leftThrottlePercent};R=${command.rightThrottlePercent}")
     }
 
-    override suspend fun sendRawLine(line: String) = withContext(Dispatchers.IO) {
-        writeAsciiLine(line)
-    }
-
     private fun writeAsciiLine(line: String) {
         val visibleLine = line.trim()
         require(visibleLine.isNotEmpty()) { "蓝牙命令不能为空" }

@@ -38,13 +38,6 @@ class MockControlTransport : ControlTransport {
         )
     }
 
-    override suspend fun sendRawLine(line: String) {
-        telemetryState.value = telemetryState.value.copy(
-            controllerMessage = "模拟原始命令：${line.trim()}",
-            lastSentCommand = line.trim(),
-        )
-    }
-
     override suspend fun uploadFirmware(
         firmware: ByteArray,
         md5Hex: String,
