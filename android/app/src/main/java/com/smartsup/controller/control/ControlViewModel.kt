@@ -15,17 +15,27 @@ import androidx.lifecycle.AndroidViewModel
 import androidx.lifecycle.viewModelScope
 import com.smartsup.controller.BuildConfig
 import com.smartsup.controller.model.BluetoothDeviceInfo
+import com.smartsup.controller.model.CommandSource
 import com.smartsup.controller.model.ConnectionState
 import com.smartsup.controller.model.ControlCommand
+import com.smartsup.controller.model.ControlCommandMode
 import com.smartsup.controller.model.ControlUiState
 import com.smartsup.controller.model.ReleaseInfo
 import com.smartsup.controller.model.SettingsUiState
 import com.smartsup.controller.model.ThrottleGear
 import com.smartsup.controller.model.UpdateUiState
+import com.smartsup.controller.model.VoiceAsrState
 import com.smartsup.controller.transport.BluetoothClassicTransport
 import com.smartsup.controller.transport.ControlTransport
 import com.smartsup.controller.update.AppUpdateInstaller
 import com.smartsup.controller.update.GitHubReleaseClient
+import com.smartsup.controller.voice.VoiceCommandEvaluation
+import com.smartsup.controller.voice.VoiceCommandAction
+import com.smartsup.controller.voice.VoiceCommandParser
+import com.smartsup.controller.voice.VoiceParseResult
+import com.smartsup.controller.voice.VoiceSampleMetadata
+import com.smartsup.controller.voice.VoiceSampleStore
+import com.smartsup.controller.voice.VoiceSampleTarget
 import java.io.File
 import java.security.MessageDigest
 import kotlinx.coroutines.flow.MutableStateFlow
@@ -51,6 +61,38 @@ class ControlViewModel(application: Application) : AndroidViewModel(application)
     private val appUpdateInstaller = AppUpdateInstaller(application)
     private var latestRelease: ReleaseInfo? = null
     private var downloadedApk: File? = null
+    private var activeTurnCommand: ControlCommand? = null
+    private var activeHeadingLockCommand: ControlCommand? = null
+    private var voiceTurnRequestCounter = 0
+    private var headingLockRequestCounter = 0
+    private var voiceSampleTargetIndex = 0
+    private var pendingVoiceSample: PendingVoiceSample? = null
+    private val voiceSampleTargets = listOf(
+        VoiceSampleTarget("开始声控", "开始声控", "本地状态：恢复执行语音控制命令"),
+        VoiceSampleTarget("停止声控", "停止声控", "SRC=VOICE;ARM=0;L=0;R=0"),
+        VoiceSampleTarget("停止", "停止", "SRC=VOICE;ARM=0;L=0;R=0"),
+        VoiceSampleTarget("前进一档", "前进一档", "SRC=VOICE;ARM=1;L=20;R=20"),
+        VoiceSampleTarget("前进二档", "前进二档", "SRC=VOICE;ARM=1;L=30;R=30"),
+        VoiceSampleTarget("后退一档", "后退一档", "SRC=VOICE;ARM=1;L=-15;R=-15"),
+        VoiceSampleTarget("左转", "左转", "SRC=VOICE;ARM=1;L=10;R=25"),
+        VoiceSampleTarget("右转", "右转", "SRC=VOICE;ARM=1;L=25;R=10"),
+        VoiceSampleTarget("左转 15 度", "左转十五度", "SRC=VOICE;ARM=1;MODE=TURN;DIR=LEFT;ANGLE=15"),
+        VoiceSampleTarget("左转 30 度", "左转三十度", "SRC=VOICE;ARM=1;MODE=TURN;DIR=LEFT;ANGLE=30"),
+        VoiceSampleTarget("左转 60 度", "左转六十度", "SRC=VOICE;ARM=1;MODE=TURN;DIR=LEFT;ANGLE=60"),
+        VoiceSampleTarget("右转 15 度", "右转十五度", "SRC=VOICE;ARM=1;MODE=TURN;DIR=RIGHT;ANGLE=15"),
+        VoiceSampleTarget("右转 30 度", "右转三十度", "SRC=VOICE;ARM=1;MODE=TURN;DIR=RIGHT;ANGLE=30"),
+        VoiceSampleTarget("右转 60 度", "右转六十度", "SRC=VOICE;ARM=1;MODE=TURN;DIR=RIGHT;ANGLE=60"),
+        VoiceSampleTarget("保持航向", "保持航向", "SRC=VOICE;ARM=1;MODE=HEADING_LOCK;HLOCK=1"),
+        VoiceSampleTarget("取消航向锁定", "取消航向锁定", "退出航向锁定"),
+    )
+
+    private data class PendingVoiceSample(
+        val target: VoiceSampleTarget,
+        val samples: FloatArray,
+        val asrText: String,
+        val parsedCommand: String,
+        val accepted: Boolean,
+    )
 
     private val discoveryReceiver = object : BroadcastReceiver() {
         override fun onReceive(context: Context, intent: Intent) {
@@ -83,6 +125,14 @@ class ControlViewModel(application: Application) : AndroidViewModel(application)
     val updateState: StateFlow<UpdateUiState> = mutableUpdateState.asStateFlow()
 
     init {
+        mutableUiState.update {
+            it.copy(
+                voiceSampleTargetLabel = voiceSampleTargets.first().label,
+                voiceSampleTargetText = voiceSampleTargets.first().spokenText,
+                voiceSampleExpectedCommand = voiceSampleTargets.first().expectedCommand,
+                voiceSampleDirectory = VoiceSampleStore.samplesDir(application).absolutePath,
+            )
+        }
         refreshBluetoothDevices()
     }
 
@@ -111,6 +161,7 @@ class ControlViewModel(application: Application) : AndroidViewModel(application)
                     armed = false,
                     leftThrottlePercent = 0,
                     rightThrottlePercent = 0,
+                    commandSource = CommandSource.App,
                     selectedGear = ThrottleGear.Neutral,
                     statusMessage = "正在连接 ${deviceInfo.name}",
                 )
@@ -122,6 +173,7 @@ class ControlViewModel(application: Application) : AndroidViewModel(application)
                 nextTransport.connect()
             }.onSuccess {
                 transport = nextTransport
+                clearAutonomousCommands()
                 collectTelemetry(nextTransport)
                 mutableUiState.update {
                     it.copy(
@@ -142,6 +194,7 @@ class ControlViewModel(application: Application) : AndroidViewModel(application)
                         armed = false,
                         leftThrottlePercent = 0,
                         rightThrottlePercent = 0,
+                        commandSource = CommandSource.App,
                         selectedGear = ThrottleGear.Neutral,
                         statusMessage = "连接失败：${error.message ?: "未知错误"}",
                     )
@@ -163,6 +216,7 @@ class ControlViewModel(application: Application) : AndroidViewModel(application)
             transport = null
             telemetryJob?.cancel()
             commandHeartbeatJob?.cancel()
+            clearAutonomousCommands()
             mutableUiState.value = ControlUiState(
                 statusMessage = "已断开，推进输出保持空闲",
             )
@@ -171,14 +225,22 @@ class ControlViewModel(application: Application) : AndroidViewModel(application)
     }
 
     fun setArmed(armed: Boolean) {
+        clearAutonomousCommands()
         mutableUiState.update {
             if (armed && it.connectionState == ConnectionState.Connected) {
-                it.copy(armed = true, statusMessage = "已解锁，请保持低功率测试")
+                it.copy(
+                    armed = true,
+                    commandSource = CommandSource.App,
+                    headingLockEnabled = false,
+                    statusMessage = "已解锁，请保持低功率测试",
+                )
             } else {
                 it.copy(
                     armed = false,
                     leftThrottlePercent = 0,
                     rightThrottlePercent = 0,
+                    commandSource = CommandSource.App,
+                    headingLockEnabled = false,
                     selectedGear = ThrottleGear.Neutral,
                     statusMessage = "已锁定，油门回空挡",
                 )
@@ -188,40 +250,63 @@ class ControlViewModel(application: Application) : AndroidViewModel(application)
     }
 
     fun setLeftThrottle(percent: Int) {
+        clearAutonomousCommands()
         mutableUiState.update {
-            it.copy(leftThrottlePercent = coerceSignedThrottle(percent))
+            it.copy(
+                leftThrottlePercent = coerceSignedThrottle(percent),
+                commandSource = CommandSource.App,
+                headingLockEnabled = false,
+            )
         }
         sendCurrentCommand()
     }
 
     fun setRightThrottle(percent: Int) {
+        clearAutonomousCommands()
         mutableUiState.update {
-            it.copy(rightThrottlePercent = coerceSignedThrottle(percent))
+            it.copy(
+                rightThrottlePercent = coerceSignedThrottle(percent),
+                commandSource = CommandSource.App,
+                headingLockEnabled = false,
+            )
         }
         sendCurrentCommand()
     }
 
     fun returnLeftThrottleToGear() {
+        clearAutonomousCommands()
         mutableUiState.update {
-            it.copy(leftThrottlePercent = coerceSignedThrottle(gearPercent(it.selectedGear)))
+            it.copy(
+                leftThrottlePercent = coerceSignedThrottle(gearPercent(it.selectedGear)),
+                commandSource = CommandSource.App,
+                headingLockEnabled = false,
+            )
         }
         sendCurrentCommand()
     }
 
     fun returnRightThrottleToGear() {
+        clearAutonomousCommands()
         mutableUiState.update {
-            it.copy(rightThrottlePercent = coerceSignedThrottle(gearPercent(it.selectedGear)))
+            it.copy(
+                rightThrottlePercent = coerceSignedThrottle(gearPercent(it.selectedGear)),
+                commandSource = CommandSource.App,
+                headingLockEnabled = false,
+            )
         }
         sendCurrentCommand()
     }
 
     fun setThrottleGear(gear: ThrottleGear) {
+        clearAutonomousCommands()
         val gearThrottle = coerceSignedThrottle(gearPercent(gear))
         mutableUiState.update {
             it.copy(
                 selectedGear = gear,
                 leftThrottlePercent = gearThrottle,
                 rightThrottlePercent = gearThrottle,
+                commandSource = CommandSource.App,
+                headingLockEnabled = false,
                 statusMessage = "当前档位：${gear.label} ${gearThrottle.signedPercentText()}",
             )
         }
@@ -240,11 +325,14 @@ class ControlViewModel(application: Application) : AndroidViewModel(application)
             it.copy(gearPercents = it.gearPercents + (gear to constrained))
         }
         if (mutableUiState.value.selectedGear == gear) {
+            clearAutonomousCommands()
             val gearThrottle = coerceSignedThrottle(constrained)
             mutableUiState.update {
                 it.copy(
                     leftThrottlePercent = gearThrottle,
                     rightThrottlePercent = gearThrottle,
+                    commandSource = CommandSource.App,
+                    headingLockEnabled = false,
                     statusMessage = "当前档位：${gear.label} ${gearThrottle.signedPercentText()}",
                 )
             }
@@ -253,11 +341,14 @@ class ControlViewModel(application: Application) : AndroidViewModel(application)
     }
 
     fun emergencyStop() {
+        clearAutonomousCommands()
         mutableUiState.update {
             it.copy(
                 armed = false,
                 leftThrottlePercent = 0,
                 rightThrottlePercent = 0,
+                commandSource = CommandSource.App,
+                headingLockEnabled = false,
                 selectedGear = ThrottleGear.Neutral,
                 statusMessage = "急停已触发，油门回空挡",
             )
@@ -365,6 +456,7 @@ class ControlViewModel(application: Application) : AndroidViewModel(application)
     }
 
     fun setMaxThrottlePercent(percent: Int) {
+        clearAutonomousCommands()
         val constrained = percent.coerceIn(5, 100)
         preferences.edit().putInt(KEY_MAX_THROTTLE, constrained).apply()
         mutableSettingsState.update { it.copy(maxThrottlePercent = constrained) }
@@ -372,9 +464,310 @@ class ControlViewModel(application: Application) : AndroidViewModel(application)
             it.copy(
                 leftThrottlePercent = it.leftThrottlePercent.coerceIn(-constrained, constrained),
                 rightThrottlePercent = it.rightThrottlePercent.coerceIn(-constrained, constrained),
+                commandSource = CommandSource.App,
+                headingLockEnabled = false,
             )
         }
         sendCurrentCommand()
+    }
+
+    fun enableHeadingLock() {
+        val state = mutableUiState.value
+        if (state.connectionState != ConnectionState.Connected) {
+            mutableUiState.update { it.copy(statusMessage = "航向锁定拒绝：未连接 ESP32") }
+            return
+        }
+        if (!state.armed) {
+            mutableUiState.update { it.copy(statusMessage = "航向锁定拒绝：请先手动解锁") }
+            return
+        }
+        if (state.telemetry.imuAvailable == false) {
+            mutableUiState.update { it.copy(statusMessage = "航向锁定拒绝：IMU 不可用") }
+            return
+        }
+
+        clearActiveTurnCommand()
+        val command = prepareRuntimeCommand(
+            command = ControlCommand(
+                armed = true,
+                source = CommandSource.App,
+                mode = ControlCommandMode.HeadingLock,
+                headingLockEnabled = true,
+                headingLockRequestId = 1,
+            ),
+            allocateHeadingLockRequestId = true,
+        )
+        activeHeadingLockCommand = command
+        mutableUiState.update {
+            it.copy(
+                commandSource = CommandSource.App,
+                headingLockEnabled = true,
+                statusMessage = "航向锁定已开启，目标为当前航向",
+            )
+        }
+        sendCurrentCommand()
+    }
+
+    fun cancelHeadingLock() {
+        clearActiveHeadingLockCommand()
+        mutableUiState.update {
+            it.copy(
+                commandSource = CommandSource.App,
+                headingLockEnabled = false,
+                statusMessage = "航向锁定已取消，回到手动控制",
+            )
+        }
+        sendCurrentCommand()
+    }
+
+    fun toggleVoiceControl() {
+        setVoiceControlEnabled(!mutableUiState.value.voiceControlEnabled)
+    }
+
+    fun setVoiceControlEnabled(enabled: Boolean) {
+        val shouldClearVoiceOutput = !enabled && mutableUiState.value.commandSource == CommandSource.Voice
+        if (shouldClearVoiceOutput) {
+            clearAutonomousCommands()
+        }
+        mutableUiState.update {
+            it.copy(
+                voiceControlEnabled = enabled,
+                voiceSamplingEnabled = if (enabled) it.voiceSamplingEnabled else false,
+                voiceAsrState = if (enabled) VoiceAsrState.Starting else VoiceAsrState.Stopped,
+                voiceAsrStatus = if (enabled) "Qwen ASR：初始化模型" else "Qwen ASR：已暂停",
+                armed = if (shouldClearVoiceOutput) false else it.armed,
+                leftThrottlePercent = if (shouldClearVoiceOutput) 0 else it.leftThrottlePercent,
+                rightThrottlePercent = if (shouldClearVoiceOutput) 0 else it.rightThrottlePercent,
+                commandSource = if (shouldClearVoiceOutput) CommandSource.App else it.commandSource,
+                headingLockEnabled = if (shouldClearVoiceOutput) false else it.headingLockEnabled,
+                selectedGear = if (shouldClearVoiceOutput) ThrottleGear.Neutral else it.selectedGear,
+                voiceResultMessage = if (enabled) "声控开启中" else "声控已关闭",
+                voiceCommandPreview = if (enabled) it.voiceCommandPreview else "声控关闭：不发送",
+                statusMessage = if (enabled) "声控开启中，等待 ASR 模型就绪" else "声控已关闭",
+            )
+        }
+        if (shouldClearVoiceOutput) {
+            sendCurrentCommand()
+        }
+    }
+
+    fun setVoiceAsrStatus(message: String) {
+        mutableUiState.update {
+            it.copy(
+                voiceAsrStatus = message,
+                voiceAsrState = voiceAsrStateFor(message, it.voiceControlEnabled || it.voiceSamplingEnabled),
+            )
+        }
+    }
+
+    fun markVoiceAsrStarting(message: String = "Qwen ASR：初始化模型") {
+        mutableUiState.update {
+            it.copy(
+                voiceAsrStatus = message,
+                voiceAsrState = VoiceAsrState.Starting,
+            )
+        }
+    }
+
+    fun markVoiceAsrStopped(message: String = "Qwen ASR：已暂停") {
+        mutableUiState.update {
+            it.copy(
+                voiceAsrStatus = message,
+                voiceAsrState = VoiceAsrState.Stopped,
+            )
+        }
+    }
+
+    fun setVoiceInputText(text: String) {
+        val preview = previewVoiceCommand(text)
+        mutableUiState.update {
+            it.copy(
+                voiceInputText = text,
+                voiceResultMessage = preview.message,
+                voiceCandidatePreview = preview.candidateLine,
+                voiceCommandPreview = preview.commandLine,
+            )
+        }
+    }
+
+    fun executeVoiceInput() {
+        val currentState = mutableUiState.value
+        if (currentState.voiceSamplingEnabled) {
+            mutableUiState.update {
+                it.copy(
+                    voiceResultMessage = "采样模式中，只记录样本，不发送控制命令",
+                    voiceCommandPreview = "采样模式：不发送",
+                    statusMessage = "语音采样模式：控制输出保持空闲",
+                )
+            }
+            return
+        }
+        val evaluation = VoiceCommandParser.evaluate(currentState.voiceInputText)
+        val candidateLine = formatCandidatePreview(evaluation)
+        when (val result = evaluation.result) {
+            is VoiceParseResult.Rejected -> {
+                mutableUiState.update {
+                    it.copy(
+                        voiceResultMessage = result.reason,
+                        voiceCandidatePreview = candidateLine,
+                        voiceCommandPreview = "不发送",
+                        statusMessage = "语音命令拒绝：${result.reason}",
+                    )
+                }
+            }
+            is VoiceParseResult.Accepted -> executeAcceptedVoiceCommand(result, candidateLine)
+        }
+    }
+
+    fun acceptVoiceRecognition(text: String) {
+        val recognizedText = text.trim()
+        if (recognizedText.isBlank()) {
+            return
+        }
+        if (mutableUiState.value.voiceSamplingEnabled) {
+            acceptVoiceSample(recognizedText, FloatArray(0))
+            return
+        }
+        setVoiceInputText(recognizedText)
+        executeVoiceInput()
+    }
+
+    fun acceptVoiceSample(text: String, samples: FloatArray) {
+        val recognizedText = text.trim()
+        if (recognizedText.isBlank()) {
+            return
+        }
+        if (!mutableUiState.value.voiceSamplingEnabled) {
+            acceptVoiceRecognition(recognizedText)
+            return
+        }
+
+        val preview = previewVoiceCommand(recognizedText)
+        val accepted = VoiceCommandParser.evaluate(recognizedText).result is VoiceParseResult.Accepted
+        val target = currentVoiceSampleTarget()
+        pendingVoiceSample = PendingVoiceSample(
+            target = target,
+            samples = samples,
+            asrText = recognizedText,
+            parsedCommand = preview.commandLine,
+            accepted = accepted,
+        )
+        mutableUiState.update {
+            it.copy(
+                voiceInputText = recognizedText,
+                voiceResultMessage = "采样完成，等待标记正确或失败",
+                voiceCandidatePreview = preview.candidateLine,
+                voiceCommandPreview = "采样模式：不发送",
+                voiceSamplePendingText = recognizedText,
+                voiceSamplePendingCommand = preview.commandLine,
+                voiceSampleLastMessage = "已录到待保存样本：${target.label}",
+                statusMessage = "语音采样模式：控制输出保持空闲",
+            )
+        }
+    }
+
+    fun setVoiceSamplingEnabled(enabled: Boolean) {
+        pendingVoiceSample = null
+        clearAutonomousCommands()
+        mutableUiState.update {
+            it.copy(
+                voiceSamplingEnabled = enabled,
+                armed = if (enabled) false else it.armed,
+                leftThrottlePercent = if (enabled) 0 else it.leftThrottlePercent,
+                rightThrottlePercent = if (enabled) 0 else it.rightThrottlePercent,
+                commandSource = CommandSource.App,
+                headingLockEnabled = false,
+                selectedGear = if (enabled) ThrottleGear.Neutral else it.selectedGear,
+                voiceSamplePendingText = "",
+                voiceSamplePendingCommand = "无待保存样本",
+                voiceSampleLastMessage = if (enabled) {
+                    "采样模式已开启：只录音，不发送控制命令"
+                } else {
+                    "采样模式已关闭"
+                },
+                voiceResultMessage = if (enabled) {
+                    "采样模式中，只记录样本，不发送控制命令"
+                } else {
+                    "语音控制待输入"
+                },
+                voiceCommandPreview = if (enabled) "采样模式：不发送" else "不发送",
+                statusMessage = if (enabled) {
+                    "语音采样模式：控制输出保持空闲"
+                } else {
+                    "语音采样模式已关闭"
+                },
+            )
+        }
+        if (enabled) {
+            sendIdle()
+        }
+    }
+
+    fun nextVoiceSampleTarget() {
+        pendingVoiceSample = null
+        voiceSampleTargetIndex = (voiceSampleTargetIndex + 1) % voiceSampleTargets.size
+        applyVoiceSampleTarget("已切换到下一条")
+    }
+
+    fun discardPendingVoiceSample() {
+        pendingVoiceSample = null
+        mutableUiState.update {
+            it.copy(
+                voiceSamplePendingText = "",
+                voiceSamplePendingCommand = "无待保存样本",
+                voiceSampleLastMessage = "已丢弃，重新说当前目标指令",
+            )
+        }
+    }
+
+    fun savePendingVoiceSample(correct: Boolean) {
+        val pending = pendingVoiceSample
+        if (pending == null) {
+            mutableUiState.update {
+                it.copy(voiceSampleLastMessage = "没有待保存样本")
+            }
+            return
+        }
+
+        viewModelScope.launch {
+            runCatching {
+                withContext(Dispatchers.IO) {
+                    VoiceSampleStore.save(
+                        context = getApplication(),
+                        samples = pending.samples,
+                        metadata = VoiceSampleMetadata(
+                            target = pending.target,
+                            asrText = pending.asrText,
+                            parsedCommand = pending.parsedCommand,
+                            accepted = pending.accepted,
+                            userJudgement = if (correct) "correct" else "failure",
+                            sampleRate = VoiceSampleStore.SAMPLE_RATE,
+                            sampleCount = pending.samples.size,
+                        ),
+                    )
+                }
+            }.onSuccess { jsonFile ->
+                pendingVoiceSample = null
+                voiceSampleTargetIndex = (voiceSampleTargetIndex + 1) % voiceSampleTargets.size
+                val nextTarget = currentVoiceSampleTarget()
+                mutableUiState.update {
+                    it.copy(
+                        voiceSampleSavedCount = it.voiceSampleSavedCount + 1,
+                        voiceSampleTargetLabel = nextTarget.label,
+                        voiceSampleTargetText = nextTarget.spokenText,
+                        voiceSampleExpectedCommand = nextTarget.expectedCommand,
+                        voiceSamplePendingText = "",
+                        voiceSamplePendingCommand = "无待保存样本",
+                        voiceSampleLastMessage = "已保存：${jsonFile.name}",
+                        voiceSampleDirectory = jsonFile.parentFile?.absolutePath.orEmpty(),
+                    )
+                }
+            }.onFailure { error ->
+                mutableUiState.update {
+                    it.copy(voiceSampleLastMessage = "保存失败：${error.message ?: "未知错误"}")
+                }
+            }
+        }
     }
 
     fun setRampLimitEnabled(enabled: Boolean) {
@@ -385,12 +778,14 @@ class ControlViewModel(application: Application) : AndroidViewModel(application)
     fun setLeftEscReversed(enabled: Boolean) {
         preferences.edit().putBoolean(KEY_LEFT_ESC_REVERSED, enabled).apply()
         mutableSettingsState.update { it.copy(leftEscReversed = enabled) }
+        clearAutonomousCommands()
         lockForDirectionChange("左 ESC 方向${if (enabled) "已反转" else "已恢复"}")
     }
 
     fun setRightEscReversed(enabled: Boolean) {
         preferences.edit().putBoolean(KEY_RIGHT_ESC_REVERSED, enabled).apply()
         mutableSettingsState.update { it.copy(rightEscReversed = enabled) }
+        clearAutonomousCommands()
         lockForDirectionChange("右 ESC 方向${if (enabled) "已反转" else "已恢复"}")
     }
 
@@ -573,6 +968,219 @@ class ControlViewModel(application: Application) : AndroidViewModel(application)
         }
     }
 
+    private data class VoicePreview(
+        val message: String,
+        val candidateLine: String,
+        val commandLine: String,
+    )
+
+    private fun previewVoiceCommand(text: String): VoicePreview {
+        val evaluation = VoiceCommandParser.evaluate(text)
+        return when (val result = evaluation.result) {
+            is VoiceParseResult.Rejected -> VoicePreview(
+                message = result.reason,
+                candidateLine = formatCandidatePreview(evaluation),
+                commandLine = "不发送",
+            )
+            is VoiceParseResult.Accepted -> VoicePreview(
+                message = "已识别：${result.label}",
+                candidateLine = formatCandidatePreview(evaluation),
+                commandLine = result.command?.let { formatCommandLine(prepareRuntimeCommand(it)) }
+                    ?: "本地声控状态切换",
+            )
+        }
+    }
+
+    private fun formatCandidatePreview(evaluation: VoiceCommandEvaluation): String {
+        if (evaluation.candidates.isEmpty()) {
+            return "无候选"
+        }
+        return evaluation.candidates
+            .take(3)
+            .joinToString(separator = "\n") { candidate ->
+                val commandLine = candidate.command
+                    ?.let { formatCommandLine(prepareRuntimeCommand(it)) }
+                    ?: "本地声控状态切换"
+                "${candidate.label} ${candidate.score}%（匹配：${candidate.matchedPhrase}）\n$commandLine"
+            }
+    }
+
+    private fun executeAcceptedVoiceCommand(
+        result: VoiceParseResult.Accepted,
+        candidateLine: String,
+    ) {
+        when (result.action) {
+            VoiceCommandAction.EnableVoiceControl -> {
+                mutableUiState.update {
+                    it.copy(
+                        voiceControlEnabled = true,
+                        voiceAsrState = VoiceAsrState.Starting,
+                        voiceAsrStatus = "Qwen ASR：初始化模型",
+                        voiceResultMessage = "声控已开启",
+                        voiceCandidatePreview = candidateLine,
+                        voiceCommandPreview = "本地声控状态切换",
+                        statusMessage = "语音控制：已开启声控",
+                    )
+                }
+                return
+            }
+            VoiceCommandAction.DisableVoiceControl -> {
+                clearAutonomousCommands()
+                mutableUiState.update {
+                    it.copy(
+                        voiceControlEnabled = false,
+                    )
+                }
+            }
+            VoiceCommandAction.Control -> {
+                if (!mutableUiState.value.voiceControlEnabled) {
+                    mutableUiState.update {
+                        it.copy(
+                            voiceResultMessage = "声控已停止，已忽略命令；请说“开始声控”恢复",
+                            voiceCandidatePreview = candidateLine,
+                            voiceCommandPreview = "不发送",
+                            statusMessage = "语音控制已停止，忽略非开始声控指令",
+                        )
+                    }
+                    return
+                }
+            }
+        }
+
+        val command = result.command ?: return
+        val state = mutableUiState.value
+        val runtimeCommand = prepareRuntimeCommand(
+            command = command,
+            allocateTurnRequestId = command.mode == ControlCommandMode.TurnAngle,
+            allocateHeadingLockRequestId = command.mode == ControlCommandMode.HeadingLock && command.headingLockEnabled,
+        )
+        val commandLine = formatCommandLine(runtimeCommand)
+
+        if (command.armed && state.connectionState != ConnectionState.Connected) {
+            mutableUiState.update {
+                it.copy(
+                    voiceResultMessage = "请先连接 ESP32",
+                    voiceCandidatePreview = candidateLine,
+                    voiceCommandPreview = commandLine,
+                    statusMessage = "语音命令拒绝：未连接 ESP32",
+                )
+            }
+            return
+        }
+
+        if (command.armed && !state.armed) {
+            mutableUiState.update {
+                it.copy(
+                    voiceResultMessage = "语音不能解锁，请先手动解锁",
+                    voiceCandidatePreview = candidateLine,
+                    voiceCommandPreview = commandLine,
+                    statusMessage = "语音命令拒绝：系统未解锁",
+                )
+            }
+            return
+        }
+
+        if (command.mode == ControlCommandMode.TurnAngle) {
+            clearActiveHeadingLockCommand()
+            activeTurnCommand = runtimeCommand
+            mutableUiState.update {
+                it.copy(
+                    commandSource = CommandSource.Voice,
+                    headingLockEnabled = false,
+                    selectedGear = ThrottleGear.Neutral,
+                    voiceResultMessage = "已执行：${result.label}",
+                    voiceCandidatePreview = candidateLine,
+                    voiceCommandPreview = commandLine,
+                    statusMessage = "语音控制：${result.label}",
+                )
+            }
+            sendCurrentCommand()
+            return
+        }
+
+        if (command.mode == ControlCommandMode.HeadingLock) {
+            clearActiveTurnCommand()
+            if (command.headingLockEnabled) {
+                activeHeadingLockCommand = runtimeCommand
+                mutableUiState.update {
+                    it.copy(
+                        commandSource = CommandSource.Voice,
+                        headingLockEnabled = true,
+                        selectedGear = ThrottleGear.Neutral,
+                        voiceResultMessage = "已执行：${result.label}",
+                        voiceCandidatePreview = candidateLine,
+                        voiceCommandPreview = commandLine,
+                        statusMessage = "语音控制：${result.label}",
+                    )
+                }
+            } else {
+                clearActiveHeadingLockCommand()
+                mutableUiState.update {
+                    it.copy(
+                        commandSource = CommandSource.Voice,
+                        headingLockEnabled = false,
+                        voiceResultMessage = "已执行：${result.label}",
+                        voiceCandidatePreview = candidateLine,
+                        voiceCommandPreview = commandLine,
+                        statusMessage = "语音控制：航向锁定已取消",
+                    )
+                }
+            }
+            sendCurrentCommand()
+            return
+        }
+
+        clearAutonomousCommands()
+        mutableUiState.update {
+            if (command.armed) {
+                it.copy(
+                    leftThrottlePercent = command.leftThrottlePercent,
+                    rightThrottlePercent = command.rightThrottlePercent,
+                    commandSource = CommandSource.Voice,
+                    headingLockEnabled = false,
+                    selectedGear = ThrottleGear.Neutral,
+                    voiceResultMessage = "已执行：${result.label}",
+                    voiceCandidatePreview = candidateLine,
+                    voiceCommandPreview = commandLine,
+                    statusMessage = "语音控制：${result.label}",
+                )
+            } else {
+                it.copy(
+                        armed = false,
+                        leftThrottlePercent = 0,
+                        rightThrottlePercent = 0,
+                    commandSource = CommandSource.Voice,
+                    headingLockEnabled = false,
+                        selectedGear = ThrottleGear.Neutral,
+                        voiceControlEnabled = result.action != VoiceCommandAction.DisableVoiceControl,
+                        voiceAsrState = if (result.action == VoiceCommandAction.DisableVoiceControl) {
+                            VoiceAsrState.Stopped
+                        } else {
+                            it.voiceAsrState
+                        },
+                        voiceAsrStatus = if (result.action == VoiceCommandAction.DisableVoiceControl) {
+                            "Qwen ASR：已暂停"
+                        } else {
+                            it.voiceAsrStatus
+                        },
+                        voiceResultMessage = if (result.action == VoiceCommandAction.DisableVoiceControl) {
+                        "已停止声控，推进输出回空挡"
+                    } else {
+                        "已执行：${result.label}"
+                    },
+                    voiceCandidatePreview = candidateLine,
+                    voiceCommandPreview = commandLine,
+                    statusMessage = if (result.action == VoiceCommandAction.DisableVoiceControl) {
+                        "语音控制：已停止声控并锁定"
+                    } else {
+                        "语音控制：停止并锁定"
+                    },
+                )
+            }
+        }
+        sendCurrentCommand()
+    }
+
     private fun sendCurrentCommand() {
         viewModelScope.launch {
             sendCommand(buildCurrentCommand())
@@ -599,11 +1207,14 @@ class ControlViewModel(application: Application) : AndroidViewModel(application)
             }
 
             commandHeartbeatJob?.cancel()
+            clearAutonomousCommands()
             mutableUiState.update {
                 it.copy(
                     armed = false,
                     leftThrottlePercent = 0,
                     rightThrottlePercent = 0,
+                    commandSource = CommandSource.App,
+                    headingLockEnabled = false,
                     selectedGear = ThrottleGear.Neutral,
                     statusMessage = "准备更新 ESP32 固件，推进输出回空挡",
                 )
@@ -649,7 +1260,19 @@ class ControlViewModel(application: Application) : AndroidViewModel(application)
 
     private fun buildCurrentCommand(): ControlCommand {
         val state = mutableUiState.value
+        if (state.voiceSamplingEnabled) {
+            return ControlCommand.Idle
+        }
         val settings = mutableSettingsState.value
+        val source = state.commandSource
+        val turnCommand = activeTurnCommand
+        if (state.canSendThrottle && turnCommand != null) {
+            return turnCommand
+        }
+        val headingLockCommand = activeHeadingLockCommand
+        if (state.canSendThrottle && headingLockCommand != null) {
+            return headingLockCommand
+        }
         return if (state.canSendThrottle) {
             ControlCommand(
                 leftThrottlePercent = applyEscDirection(
@@ -661,9 +1284,126 @@ class ControlViewModel(application: Application) : AndroidViewModel(application)
                     reversed = settings.rightEscReversed,
                 ),
                 armed = true,
+                source = source,
             )
         } else {
-            ControlCommand.Idle
+            ControlCommand(source = source)
+        }
+    }
+
+    private fun prepareRuntimeCommand(
+        command: ControlCommand,
+        allocateTurnRequestId: Boolean = false,
+        allocateHeadingLockRequestId: Boolean = false,
+    ): ControlCommand {
+        if (command.mode == ControlCommandMode.TurnAngle) {
+            val settings = mutableSettingsState.value
+            return command.copy(
+                turnRequestId = if (allocateTurnRequestId) nextTurnRequestId() else previewTurnRequestId(),
+                leftEscReversed = settings.leftEscReversed,
+                rightEscReversed = settings.rightEscReversed,
+            )
+        }
+        if (command.mode == ControlCommandMode.HeadingLock) {
+            val settings = mutableSettingsState.value
+            val requestedBasePercent = if (command.headingLockEnabled && command.headingLockBaseThrottlePercent == 0) {
+                currentAverageThrottlePercent()
+            } else {
+                command.headingLockBaseThrottlePercent
+            }
+            return command.copy(
+                headingLockRequestId = when {
+                    !command.headingLockEnabled -> null
+                    allocateHeadingLockRequestId -> nextHeadingLockRequestId()
+                    else -> previewHeadingLockRequestId()
+                },
+                headingLockBaseThrottlePercent = coerceHeadingLockBasePercent(requestedBasePercent),
+                leftEscReversed = settings.leftEscReversed,
+                rightEscReversed = settings.rightEscReversed,
+            )
+        }
+        if (!command.armed) {
+            return command.copy(leftThrottlePercent = 0, rightThrottlePercent = 0)
+        }
+        val settings = mutableSettingsState.value
+        return command.copy(
+            leftThrottlePercent = applyEscDirection(
+                percent = coerceSignedThrottle(command.leftThrottlePercent),
+                reversed = settings.leftEscReversed,
+            ),
+            rightThrottlePercent = applyEscDirection(
+                percent = coerceSignedThrottle(command.rightThrottlePercent),
+                reversed = settings.rightEscReversed,
+            ),
+        )
+    }
+
+    private fun formatCommandLine(command: ControlCommand): String {
+        return command.toWireLine()
+    }
+
+    private fun nextTurnRequestId(): Int {
+        voiceTurnRequestCounter = if (voiceTurnRequestCounter >= MAX_TURN_REQUEST_ID) {
+            1
+        } else {
+            voiceTurnRequestCounter + 1
+        }
+        return voiceTurnRequestCounter
+    }
+
+    private fun previewTurnRequestId(): Int {
+        return if (voiceTurnRequestCounter >= MAX_TURN_REQUEST_ID) {
+            1
+        } else {
+            voiceTurnRequestCounter + 1
+        }
+    }
+
+    private fun nextHeadingLockRequestId(): Int {
+        headingLockRequestCounter = if (headingLockRequestCounter >= MAX_TURN_REQUEST_ID) {
+            1
+        } else {
+            headingLockRequestCounter + 1
+        }
+        return headingLockRequestCounter
+    }
+
+    private fun previewHeadingLockRequestId(): Int {
+        return if (headingLockRequestCounter >= MAX_TURN_REQUEST_ID) {
+            1
+        } else {
+            headingLockRequestCounter + 1
+        }
+    }
+
+    private fun clearActiveTurnCommand() {
+        activeTurnCommand = null
+    }
+
+    private fun clearActiveHeadingLockCommand() {
+        activeHeadingLockCommand = null
+    }
+
+    private fun clearAutonomousCommands() {
+        clearActiveTurnCommand()
+        clearActiveHeadingLockCommand()
+    }
+
+    private fun currentVoiceSampleTarget(): VoiceSampleTarget {
+        return voiceSampleTargets[voiceSampleTargetIndex.coerceIn(0, voiceSampleTargets.lastIndex)]
+    }
+
+    private fun applyVoiceSampleTarget(messagePrefix: String) {
+        val target = currentVoiceSampleTarget()
+        mutableUiState.update {
+            it.copy(
+                voiceSampleTargetLabel = target.label,
+                voiceSampleTargetText = target.spokenText,
+                voiceSampleExpectedCommand = target.expectedCommand,
+                voiceSamplePendingText = "",
+                voiceSamplePendingCommand = "无待保存样本",
+                voiceSampleLastMessage = "$messagePrefix：${target.label}",
+            )
         }
     }
 
@@ -674,6 +1414,31 @@ class ControlViewModel(application: Application) : AndroidViewModel(application)
     private fun coerceSignedThrottle(percent: Int): Int {
         val limit = mutableSettingsState.value.maxThrottlePercent
         return percent.coerceIn(-limit, limit)
+    }
+
+    private fun voiceAsrStateFor(message: String, shouldRun: Boolean): VoiceAsrState {
+        if (!shouldRun) {
+            return VoiceAsrState.Stopped
+        }
+        return if (message.contains("模型已加载") || message.contains("开始监听")) {
+            VoiceAsrState.Ready
+        } else {
+            VoiceAsrState.Starting
+        }
+    }
+
+    private fun currentAverageThrottlePercent(): Int {
+        val state = mutableUiState.value
+        return ((state.leftThrottlePercent + state.rightThrottlePercent) / 2)
+            .coerceIn(-100, 100)
+    }
+
+    private fun coerceHeadingLockBasePercent(percent: Int): Int {
+        return when {
+            percent > 0 -> percent.coerceAtMost(VOICE_MAX_FORWARD_PERCENT)
+            percent < 0 -> percent.coerceAtLeast(-VOICE_MAX_REVERSE_PERCENT)
+            else -> 0
+        }
     }
 
     private fun Int.signedPercentText(): String {
@@ -704,12 +1469,15 @@ class ControlViewModel(application: Application) : AndroidViewModel(application)
         transport = null
         telemetryJob?.cancel()
         commandHeartbeatJob?.cancel()
+        clearAutonomousCommands()
         mutableUiState.update {
             it.copy(
                 connectionState = ConnectionState.Disconnected,
                 armed = false,
                 leftThrottlePercent = 0,
                 rightThrottlePercent = 0,
+                commandSource = CommandSource.App,
+                headingLockEnabled = false,
                 selectedGear = ThrottleGear.Neutral,
                 statusMessage = "蓝牙链路异常：${error.message ?: "未知错误"}",
             )
@@ -856,6 +1624,9 @@ class ControlViewModel(application: Application) : AndroidViewModel(application)
         private const val KEY_GITHUB_TOKEN = "github_token"
         private const val KEY_GEAR_PREFIX = "gear_percent_"
         private const val COMMAND_HEARTBEAT_MS = 250L
+        private const val MAX_TURN_REQUEST_ID = 65_535
+        private const val VOICE_MAX_FORWARD_PERCENT = 30
+        private const val VOICE_MAX_REVERSE_PERCENT = 15
     }
 
     private fun lockForDirectionChange(message: String) {
@@ -864,6 +1635,8 @@ class ControlViewModel(application: Application) : AndroidViewModel(application)
                 armed = false,
                 leftThrottlePercent = 0,
                 rightThrottlePercent = 0,
+                commandSource = CommandSource.App,
+                headingLockEnabled = false,
                 selectedGear = ThrottleGear.Neutral,
                 statusMessage = "$message，已锁定并回空挡",
             )

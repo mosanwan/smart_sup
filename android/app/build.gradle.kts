@@ -26,6 +26,10 @@ android {
         versionCode = 5
         versionName = "0.2.3"
         buildConfigField("String", "GITHUB_REPOSITORY", "\"mosanwan/smart_sup\"")
+
+        ndk {
+            abiFilters += listOf("arm64-v8a")
+        }
     }
 
     signingConfigs {
@@ -78,6 +82,7 @@ dependencies {
     implementation(libs.androidx.core.ktx)
     implementation(libs.androidx.lifecycle.runtime.ktx)
     implementation(libs.androidx.lifecycle.viewmodel.compose)
+    implementation(files("libs/sherpa-onnx-1.13.2.aar"))
 
     debugImplementation(libs.androidx.compose.ui.tooling)
 }

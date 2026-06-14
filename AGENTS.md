@@ -28,10 +28,17 @@
 - 除非同步更新 `docs/hardware_plan.md`，不要占用 LoLin32-Lite-LoRa 参考资料中已经用于 LoRa/I2C 的引脚。
 - PWM 假设必须明确记录：频率、空闲脉宽、最大脉宽、校准方式和刷新周期。
 
+## Android 规则
+
+- Android 本地 AI/ASR 模型会显著增大 App 体积，开发和验证阶段优先使用本机直连安装。
+- 当检测到 Android 手机通过 USB 连接到电脑并可被 `adb devices` 识别时，直接用 Gradle/ADB 安装到手机测试，不必走 GitHub Release 发布流程。
+- 只有在需要正式分发、留存版本归档，或用户明确要求时，才按 `docs/update_release_flow.md` 走 GitHub Release。
+
 ## 仓库结构
 
 ```text
 docs/                 项目设计、硬件方案、安全清单
+android/              Android 控制端 App
 firmware/esp32/       ESP32 PlatformIO 固件
 ref/                  规格书、照片、手册和外部参考资料
 tools/                辅助脚本和数据分析工具

@@ -48,17 +48,92 @@ ID;VALUE=001;BT=SmartSUP-001;SRC=NVS;PROVISIONED=1
 
 ```text
 ARM=1;L=30;R=-20
+SRC=VOICE;ARM=1;L=30;R=30
+SRC=VOICE;ARM=1;MODE=TURN;DIR=LEFT;ANGLE=30;TID=12;LREV=0;RREV=0
+SRC=APP;ARM=1;MODE=HEADING_LOCK;HLOCK=1;BASE=20;HID=7;LREV=0;RREV=0
 ```
 
 字段说明：
 
 | 字段 | 范围 | 说明 |
 | --- | --- | --- |
+| `SRC` | `APP` 或 `VOICE` | 可选字段；省略时按普通 App 控制处理，`VOICE` 表示语音控制输入 |
 | `ARM` | `0` 或 `1` | `1` 表示 App 明确解锁，`0` 表示锁定 |
 | `L` | `-100..100` | 左侧 ESC 有符号油门百分比，正值前进，负值后退 |
 | `R` | `-100..100` | 右侧 ESC 有符号油门百分比，正值前进，负值后退 |
+| `MODE` | `THROTTLE`、`TURN` 或 `HEADING_LOCK` | 可选字段；省略时按普通油门命令处理 |
+| `DIR` | `LEFT` 或 `RIGHT` | `MODE=TURN` 时的目标转向方向 |
+| `ANGLE` | `1..90` | `MODE=TURN` 时的相对目标角度，单位度 |
+| `TID` | `1..65535` | 角度转向请求编号；同一编号重复发送只作为心跳，不重置目标 |
+| `HLOCK` | `0` 或 `1` | `MODE=HEADING_LOCK` 时，`1` 表示开启航向锁定，`0` 表示取消 |
+| `BASE` | `-100..100` | `MODE=HEADING_LOCK` 时的基础推进油门；固件会再次限幅 |
+| `HID` | `1..65535` | 航向锁定请求编号；同一编号重复发送只作为心跳，不重置目标航向 |
+| `LREV` / `RREV` | `0` 或 `1` | `MODE=TURN` 或 `MODE=HEADING_LOCK` 时由 App 下发的左右 ESC 方向反转设置 |
 
 当前 MVP 按双向 ESC 处理，`0%` 对应 ESC 中位/空闲脉宽，`100%` 对应最大前进脉宽，`-100%` 对应最大后退脉宽。App 默认有油门限幅，初始为 30%，该限幅作为正反向的绝对值上限。
+
+`MODE=TURN` 是一次性目标命令，不是普通油门命令。Android 会在语音识别到“左转 30 度”一类指令时生成新的 `TID`；ESP32 收到新 `TID` 后记录当前 IMU 积分航向，计算目标相对角度，并在后续控制周期中用低速差速输出逼近目标。Android 心跳重复发送同一个 `TID` 时，ESP32 只刷新通信超时计时，不重新计算目标角度。
+
+`MODE=HEADING_LOCK` 是持续航向保持命令。Android 控制页开启航向锁定或语音识别到“保持航向”时生成新的 `HID`；ESP32 收到新 `HID` 后把当前 IMU 积分航向记录为目标航向。后续 Android 每 250ms 重发同一 `HID` 作为心跳，ESP32 不重新取目标，只按当前航向误差持续做低速差速修正。取消航向锁定、手动油门变化、锁定、急停、蓝牙失联或 IMU 异常都会退出该模式。
+
+航向锁定初始控制策略：
+
+- 目标航向来自开启瞬间的当前 IMU 航向；当前版本是短时相对航向保持，不是绝对罗盘航向。
+- 航向误差容差先设为 `4°`。误差在容差内不主动修正，避免 IMU 漂移和噪声导致电机抖动。
+- 误差超过容差后，按误差大小线性增加差速修正，`45°` 及以上达到最大修正。
+- 默认采用“基础推进 + 差速修正”：有前进基础油门时优先一侧加推、一侧降推，不主动反推；基础油门为 `0%` 时才允许小幅双向原地修正。
+- 初始航向锁定限幅按低速测试处理：基础前进最大 `30%`、基础后退最大 `15%`、左右最大差值 `20%`。如果后续实测需要更快转向，再在文档和固件里显式增加“保守/标准/激进”策略。
+
+## 语音控制来源
+
+Android 本地语音控制方案见 [Android 本地语音控制方案](voice_control_plan.md)。语音命令必须带 `SRC=VOICE`，并在 Android 和 ESP32 两侧同时限幅。
+
+初始固件级语音限幅：
+
+| 项目 | 初始值 |
+| --- | --- |
+| 语音前进最大油门 | `30%` |
+| 语音后退最大油门 | `15%` |
+| 语音左右差速最大差值 | `20%` |
+| 语音单次角度转向最大角度 | `90°` |
+| 角度转向超时 | `8s` |
+| 航向锁定容差 | `4°` |
+| 航向锁定最大误差参考 | `45°` |
+
+语音命令不能把未解锁系统切换到解锁状态；只能在系统已解锁后改变低速目标，或在任何状态下执行 `ARM=0;L=0;R=0` 停止/锁定。高油门仍必须通过手动 App 控制或有线控制器，并受对应模式的限幅和安全保护约束。
+
+角度转向依赖 ICM20948 陀螺仪 Z 轴短时积分。IMU 未检测到、读取失败、通信超时或系统未解锁时，ESP32 必须拒绝或取消角度转向，并回到空闲/保守输出。当前版本是相对角度短时控制，不等同于长时间航向保持；长时间保持需要后续用磁力计/GPS 修正漂移。
+
+## 状态回包
+
+ESP32 每秒通过蓝牙 SPP 发送一行 `STATUS` 状态。Android App 解析 `IMU`、`HDG`、GPS 字段和角度转向时的 `TARGET` 字段，并在控制页显示 IMU 状态、航向角、GPS 模块状态、定位状态、卫星数量和经纬度：
+
+```text
+STATUS;ARMED=0;L=0;R=0;CMD_SRC=APP;MODE=THROTTLE;LPWM=1500;RPWM=1500;IMU=1;HDG=12.3;GPS=1;PPS=0;GPS_SENT=32;GPS_BAUD=115200;GPS_FIX=0;GPS_SAT=0;GPS_ANT=OPEN;ID=001;BT=SmartSUP-001;ID_SRC=NVS
+STATUS;ARMED=1;L=8;R=18;CMD_SRC=VOICE;MODE=TURN;LPWM=1540;RPWM=1590;IMU=1;HDG=12.3;GPS=1;PPS=1;GPS_SENT=120;GPS_BAUD=115200;GPS_FIX=1;GPS_SAT=8;GPS_ANT=OK;GPS_LAT=22.123456;GPS_LON=113.123456;TURN=ACTIVE;TID=12;TARGET=42.3;TERR=30.0;ID=001;BT=SmartSUP-001;ID_SRC=NVS
+STATUS;ARMED=1;L=24;R=16;CMD_SRC=APP;MODE=HEADING_LOCK;LPWM=1620;RPWM=1580;IMU=1;HDG=10.2;GPS=1;PPS=1;GPS_SENT=120;GPS_BAUD=115200;GPS_FIX=1;GPS_SAT=8;GPS_ANT=OK;GPS_LAT=22.123456;GPS_LON=113.123456;HLOCK=ACTIVE;HID=7;TARGET=0.0;HERR=-10.2;HCORR=-4;ID=001;BT=SmartSUP-001;ID_SRC=NVS
+```
+
+字段说明：
+
+| 字段 | 说明 |
+| --- | --- |
+| `IMU` | `1` 表示 IMU 当前可用，`0` 表示 IMU 不可用或读取失败 |
+| `HDG` | ESP32 基于 ICM20948 陀螺仪 Z 轴积分得到的当前相对航向角，单位度 |
+| `TARGET` | `TURN=ACTIVE` 或 `HLOCK=ACTIVE` 时的目标航向角，单位度 |
+| `HLOCK` | `ACTIVE` 表示航向锁定闭环正在执行 |
+| `HID` | 当前航向锁定请求编号 |
+| `HERR` | 航向锁定误差，单位度 |
+| `HCORR` | 航向锁定差速修正百分比，正值表示左侧增加、右侧降低 |
+| `GPS` | `1` 表示 GPS 串口最近有数据，`0` 表示最近无 GPS 串口数据 |
+| `PPS` | `1` 表示最近检测到 PPS 秒脉冲，`0` 表示未检测到 |
+| `GPS_BAUD` | 当前锁定或正在扫描的 GPS 串口波特率 |
+| `GPS_FIX` | `1` 表示 NMEA 报告已定位，`0` 表示未定位 |
+| `GPS_SAT` | NMEA `GGA` 语句报告的卫星数量 |
+| `GPS_ANT` | GPS 天线状态，`OK`、`OPEN` 或 `UNKNOWN` |
+| `GPS_LAT` / `GPS_LON` | 定位有效时的纬度/经度，十进制度 |
+
+`HDG` 是上电后/校准后的短时相对航向，不是经过磁力计或 GPS 修正的绝对罗盘航向。长时间使用会有漂移，当前主要用于短时角度转向和 App 调试显示。
 
 ## 手动控制 UI 约定
 

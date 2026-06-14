@@ -94,7 +94,7 @@
   <rect x="1030" y="325" width="200" height="95" class="box-sensor" />
   <text x="1090" y="360" class="label">IMU</text>
   <text x="1065" y="388" class="small">ICM20948V2</text>
-  <text x="1055" y="412" class="pin">SDA GPIO21 / SCL GPIO22</text>
+  <text x="1055" y="412" class="pin">SDA GPIO14 / SCL GPIO22</text>
   <line x1="950" y1="392" x2="1030" y2="382" class="green" />
   <rect x="965" y="372" width="55" height="22" class="wire-label-bg" />
   <text x="970" y="389" class="tiny">I2C</text>
@@ -102,7 +102,8 @@
   <rect x="1030" y="455" width="200" height="95" class="box-sensor" />
   <text x="1090" y="490" class="label">GPS</text>
   <text x="1058" y="518" class="small">GPS TX → GPIO16</text>
-  <text x="1058" y="542" class="small">GPS RX 不接</text>
+  <text x="1058" y="542" class="small">GPS PPS → GPIO13</text>
+  <text x="1058" y="566" class="small">GPS RX 不接</text>
   <line x1="950" y1="505" x2="1030" y2="505" class="green" />
   <rect x="965" y="485" width="60" height="22" class="wire-label-bg" />
   <text x="970" y="502" class="tiny">UART</text>

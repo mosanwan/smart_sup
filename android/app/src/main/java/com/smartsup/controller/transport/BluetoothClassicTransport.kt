@@ -89,7 +89,7 @@ class BluetoothClassicTransport(
     }
 
     override suspend fun send(command: ControlCommand) = withContext(Dispatchers.IO) {
-        writeAsciiLine("ARM=${if (command.armed) 1 else 0};L=${command.leftThrottlePercent};R=${command.rightThrottlePercent}")
+        writeAsciiLine(command.toWireLine())
     }
 
     private fun writeAsciiLine(line: String) {
@@ -153,10 +153,7 @@ class BluetoothClassicTransport(
                     while (true) {
                         val line = reader.readLine() ?: break
                         Log.d(TAG, "rx $line")
-                        telemetryState.value = telemetryState.value.copy(
-                            controllerMessage = "ESP32 在线",
-                            lastReceivedStatus = line,
-                        )
+                        telemetryState.value = telemetryState.value.withStatusLine(line)
                     }
                 }
             }.onFailure { error ->
@@ -166,6 +163,45 @@ class BluetoothClassicTransport(
                 )
             }
         }
+    }
+
+    private fun Telemetry.withStatusLine(line: String): Telemetry {
+        val fields = line.parseStatusFields()
+        val isFullStatus = fields.containsKey("L") || fields.containsKey("R") || fields.containsKey("LPWM")
+        val nextStatusFields = when {
+            fields.isEmpty() -> statusFields
+            isFullStatus -> fields
+            else -> statusFields + fields
+        }
+        return copy(
+            controllerMessage = fields["FAULT"]?.let { "ESP32 故障：$it" } ?: "ESP32 在线",
+            imuAvailable = fields["IMU"]?.let { it == "1" } ?: imuAvailable,
+            headingDegrees = fields["HDG"]?.toFloatOrNull() ?: headingDegrees,
+            targetHeadingDegrees = when {
+                fields.containsKey("TARGET") -> fields["TARGET"]?.toFloatOrNull()
+                isFullStatus && fields["TURN"] != "ACTIVE" && fields["HLOCK"] != "ACTIVE" -> null
+                else -> targetHeadingDegrees
+            },
+            statusFields = nextStatusFields,
+            lastReceivedStatus = line,
+        )
+    }
+
+    private fun String.parseStatusFields(): Map<String, String> {
+        if (!startsWith("STATUS;")) {
+            return emptyMap()
+        }
+        return split(';')
+            .drop(1)
+            .mapNotNull { token ->
+                val separatorIndex = token.indexOf('=')
+                if (separatorIndex <= 0 || separatorIndex == token.lastIndex) {
+                    null
+                } else {
+                    token.substring(0, separatorIndex) to token.substring(separatorIndex + 1)
+                }
+            }
+            .toMap()
     }
 
     private suspend fun ensureBonded(device: BluetoothDevice) {

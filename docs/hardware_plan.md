@@ -59,7 +59,8 @@
 | 有线控制器右摇杆 ADC | GPIO32 | 单轴摇杆模拟输入 |
 | 备用 ADC | GPIO33 | 可用于温度、电调温度或后续扩展 |
 | GPS RX2 | GPIO16 | 接 GPS TX |
-| IMU SDA | GPIO21 | I2C 数据线 |
+| GPS PPS | GPIO13 | 接 GPS PPS 秒脉冲 |
+| IMU SDA | GPIO14 | I2C 数据线；当前实物板未引出 GPIO21 |
 | IMU SCL | GPIO22 | I2C 时钟线 |
 | 按键 1：启动/解锁 | GPIO17 | `INPUT_PULLUP`，按下接地 |
 | 按键 2：暂停/停止 | GPIO18 | `INPUT_PULLUP`，按下接地 |
@@ -76,7 +77,7 @@
 | --- | --- | --- |
 | VCC | 3V3 | 优先使用 3.3V，避免 5V 逻辑风险 |
 | GND | GND | 必须与 ESP32、电调信号地共地 |
-| SDA | GPIO21 | I2C 数据线 |
+| SDA | GPIO14 | I2C 数据线；接 ESP32 丝印 `R16/14` |
 | SCL | GPIO22 | I2C 时钟线；状态 LED 已改用 GPIO2 |
 | ADO | GND | I2C 地址通常为 `0x68` |
 | INT | 暂不接 | 后续需要中断/数据就绪时再接 |
@@ -84,7 +85,7 @@
 | FSYNC | 暂不接 | 外部同步输入，当前不用 |
 | EDA/ECL | 暂不接 | 辅助 I2C 总线，当前不用 |
 
-注意：LoLin32-Lite-LoRa 参考扩展板里 I2C 使用 GPIO12/GPIO14，但 GPIO12 是 ESP32 启动绑定位，外接上拉可能影响启动。当前项目不使用 LoRa 扩展板，直连 IMU 时优先使用 GPIO21/GPIO22，并在固件里显式 `Wire.begin(21, 22)`。
+注意：LoLin32-Lite-LoRa 参考扩展板里 I2C 使用 GPIO12/GPIO14，但 GPIO12 是 ESP32 启动绑定位，外接上拉可能影响启动。当前实物 ESP32 板未引出 GPIO21，直连 IMU 时使用 GPIO14/GPIO22，并在固件里显式 `Wire.begin(14, 22)`。
 
 ## GPS 接线计划
 
@@ -96,15 +97,17 @@
 | GND | GND | 必须与 ESP32 共地 |
 | TX | GPIO16 | GPS 串口输出，接 ESP32 的 RX2 |
 | RX | 暂不接 | 当前只读取定位数据，不需要向 GPS 发配置 |
-| PPS | 暂不接 | 秒脉冲，后续需要高精度时间同步时再接 |
+| PPS | GPIO13 | 秒脉冲，用于确认 GPS 模块工作和后续时间同步 |
 
-建议固件中使用 ESP32 的第二串口读取 GPS：
+建议固件中使用 ESP32 的第二串口读取 GPS。当前固件会从 `9600` 开始扫描常见 GPS 波特率，找到有效 NMEA 后锁定该波特率：
 
 ```cpp
 Serial2.begin(9600, SERIAL_8N1, 16, -1);
 ```
 
-其中 `16` 是 ESP32 接收 GPS TX 的引脚，`-1` 表示不使用 ESP32 TX。
+其中 `16` 是 ESP32 接收 GPS TX 的引脚，`-1` 表示不使用 ESP32 TX。PPS 使用 `GPIO13` 作为普通数字输入读取上升沿，不向 GPS 模块输出信号。
+
+当前实测该 GPS 模块 NMEA 输出波特率为 `115200`。模块可以输出 `$BDRMC`、`$BDGGA`、`$BDGSA`、`$BDGSV`、`$BDGLL`、`$BDZDA` 和 `$GPTXT` 等语句；若日志出现 `ANTENNA OPEN`、`RMC` 状态为 `V`、`GGA` fix quality 为 `0` 或卫星数为 `00`，表示串口数据正常但尚未定位，需检查天线/室外视野。
 
 ## 自动导航传感器分工
 

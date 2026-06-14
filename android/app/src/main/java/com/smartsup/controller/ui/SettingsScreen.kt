@@ -7,22 +7,41 @@ import androidx.compose.foundation.layout.Row
 import androidx.compose.foundation.layout.fillMaxSize
 import androidx.compose.foundation.layout.fillMaxWidth
 import androidx.compose.foundation.layout.padding
+import androidx.compose.foundation.layout.size
 import androidx.compose.foundation.rememberScrollState
+import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.foundation.verticalScroll
 import androidx.activity.compose.rememberLauncherForActivityResult
 import androidx.activity.result.contract.ActivityResultContracts
-import androidx.compose.material3.Button
 import androidx.compose.material3.Card
 import androidx.compose.material3.CardDefaults
 import androidx.compose.material3.HorizontalDivider
+import androidx.compose.material.icons.Icons
+import androidx.compose.material.icons.outlined.Bluetooth
+import androidx.compose.material.icons.outlined.Download
+import androidx.compose.material.icons.outlined.Link
+import androidx.compose.material.icons.outlined.LinkOff
+import androidx.compose.material.icons.outlined.Refresh
+import androidx.compose.material.icons.outlined.Search
+import androidx.compose.material.icons.outlined.Security
+import androidx.compose.material.icons.outlined.Settings
+import androidx.compose.material.icons.outlined.Speed
+import androidx.compose.material.icons.outlined.SystemUpdate
+import androidx.compose.material.icons.outlined.Tune
+import androidx.compose.material.icons.outlined.UploadFile
+import androidx.compose.material3.Icon
 import androidx.compose.material3.MaterialTheme
-import androidx.compose.material3.OutlinedButton
 import androidx.compose.material3.Slider
+import androidx.compose.material3.Surface
 import androidx.compose.material3.Switch
 import androidx.compose.material3.Text
 import androidx.compose.runtime.Composable
+import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
+import androidx.compose.ui.graphics.Color
+import androidx.compose.ui.graphics.vector.ImageVector
 import androidx.compose.ui.text.font.FontWeight
+import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.unit.dp
 import com.smartsup.controller.BuildConfig
 import com.smartsup.controller.model.BluetoothDeviceInfo
@@ -130,7 +149,11 @@ private fun BluetoothCard(
             modifier = Modifier.padding(16.dp),
             verticalArrangement = Arrangement.spacedBy(10.dp),
         ) {
-            Text("ESP32 经典蓝牙", style = MaterialTheme.typography.titleMedium)
+            SettingsSectionHeader(
+                title = "ESP32 经典蓝牙",
+                icon = Icons.Outlined.Bluetooth,
+                color = Color(0xFF1565C0),
+            )
             SettingsRow("蓝牙", if (settingsState.bluetoothEnabled) "已开启" else "未开启")
             SettingsRow("权限", if (settingsState.bluetoothPermissionGranted) "已授权" else "未授权")
             SettingsRow("过滤前缀", settingsState.deviceNamePrefix)
@@ -143,41 +166,45 @@ private fun BluetoothCard(
                 color = MaterialTheme.colorScheme.onSurfaceVariant,
             )
 
-            Button(
+            SettingsActionButton(
                 onClick = onConnectSaved,
                 enabled = settingsState.savedDevice != null &&
                     settingsState.bluetoothEnabled &&
                     controlState.connectionState == ConnectionState.Disconnected,
+                text = "连接已保存设备",
+                icon = Icons.Outlined.Link,
+                color = Color(0xFF2E7D32),
                 modifier = Modifier.fillMaxWidth(),
-            ) {
-                Text("连接已保存设备")
-            }
+            )
 
-            Button(
+            SettingsActionButton(
                 onClick = onScanBluetooth,
                 enabled = settingsState.bluetoothEnabled &&
                     settingsState.bluetoothPermissionGranted &&
                     controlState.connectionState == ConnectionState.Disconnected &&
                     !settingsState.discovering,
+                text = if (settingsState.discovering) "正在扫描..." else "扫描 SmartSUP 设备",
+                icon = Icons.Outlined.Search,
+                color = Color(0xFF1565C0),
                 modifier = Modifier.fillMaxWidth(),
-            ) {
-                Text(if (settingsState.discovering) "正在扫描..." else "扫描 SmartSUP 设备")
-            }
+            )
 
-            OutlinedButton(
+            SettingsActionButton(
                 onClick = onRefreshBluetooth,
+                text = "刷新设备状态",
+                icon = Icons.Outlined.Refresh,
+                color = Color(0xFF546E7A),
                 modifier = Modifier.fillMaxWidth(),
-            ) {
-                Text("刷新设备状态")
-            }
+            )
 
             if (controlState.connectionState != ConnectionState.Disconnected) {
-                OutlinedButton(
+                SettingsActionButton(
                     onClick = onDisconnect,
+                    text = "断开 ESP32",
+                    icon = Icons.Outlined.LinkOff,
+                    color = Color(0xFFC62828),
                     modifier = Modifier.fillMaxWidth(),
-                ) {
-                    Text("断开 ESP32")
-                }
+                )
             }
 
             if (settingsState.pairedDevices.isNotEmpty()) {
@@ -254,12 +281,13 @@ private fun BluetoothDeviceRow(
                 Text(device.address, style = MaterialTheme.typography.bodySmall)
             }
             Box {
-                Button(
+                SettingsActionButton(
                     onClick = onConnect,
                     enabled = canConnect,
-                ) {
-                    Text("连接")
-                }
+                    text = "连接",
+                    icon = Icons.Outlined.Link,
+                    color = Color(0xFF2E7D32),
+                )
             }
         }
     }
@@ -283,7 +311,11 @@ private fun UpdateSettingsCard(
             modifier = Modifier.padding(16.dp),
             verticalArrangement = Arrangement.spacedBy(10.dp),
         ) {
-            Text("软件更新", style = MaterialTheme.typography.titleMedium)
+            SettingsSectionHeader(
+                title = "软件更新",
+                icon = Icons.Outlined.SystemUpdate,
+                color = Color(0xFFE65100),
+            )
             SettingsRow("当前 App", BuildConfig.VERSION_NAME)
             SettingsRow("GitHub 最新", updateState.latestVersionName ?: "--")
             SettingsRow("App 产物", updateState.appAssetName ?: "--")
@@ -299,39 +331,43 @@ private fun UpdateSettingsCard(
                 Text(updateState.progressText, style = MaterialTheme.typography.bodySmall)
             }
 
-            Button(
+            SettingsActionButton(
                 onClick = onCheckUpdates,
                 enabled = !busy,
+                text = if (updateState.checking) "正在检查..." else "检查 GitHub 更新",
+                icon = Icons.Outlined.Refresh,
+                color = Color(0xFF1565C0),
                 modifier = Modifier.fillMaxWidth(),
-            ) {
-                Text(if (updateState.checking) "正在检查..." else "检查 GitHub 更新")
-            }
+            )
 
-            Button(
+            SettingsActionButton(
                 onClick = onInstallAppUpdate,
                 enabled = !busy && updateState.appUpdateAvailable && updateState.appDownloadUrl != null,
+                text = "下载并安装 App 更新",
+                icon = Icons.Outlined.Download,
+                color = Color(0xFF2E7D32),
                 modifier = Modifier.fillMaxWidth(),
-            ) {
-                Text("下载并安装 App 更新")
-            }
+            )
 
-            Button(
+            SettingsActionButton(
                 onClick = onUpdateEsp32FromGitHub,
                 enabled = !busy &&
                     controlState.connectionState == ConnectionState.Connected &&
                     updateState.firmwareDownloadUrl != null,
+                text = "从 GitHub 更新 ESP32 固件",
+                icon = Icons.Outlined.SystemUpdate,
+                color = Color(0xFFE65100),
                 modifier = Modifier.fillMaxWidth(),
-            ) {
-                Text("从 GitHub 更新 ESP32 固件")
-            }
+            )
 
-            OutlinedButton(
+            SettingsActionButton(
                 onClick = onPickLocalFirmware,
                 enabled = !busy && controlState.connectionState == ConnectionState.Connected,
+                text = "选择本地 ESP32 固件 .bin",
+                icon = Icons.Outlined.UploadFile,
+                color = Color(0xFF546E7A),
                 modifier = Modifier.fillMaxWidth(),
-            ) {
-                Text("选择本地 ESP32 固件 .bin")
-            }
+            )
         }
     }
 }
@@ -353,7 +389,11 @@ private fun SafetySettingsCard(
             modifier = Modifier.padding(16.dp),
             verticalArrangement = Arrangement.spacedBy(12.dp),
         ) {
-            Text("控制安全", style = MaterialTheme.typography.titleMedium)
+            SettingsSectionHeader(
+                title = "控制安全",
+                icon = Icons.Outlined.Security,
+                color = Color(0xFFC62828),
+            )
             SwitchRow(
                 label = "启动后自动连接已保存 ESP32",
                 checked = settingsState.autoReconnect,
@@ -401,7 +441,11 @@ private fun GearPercentSettingsCard(
             modifier = Modifier.padding(16.dp),
             verticalArrangement = Arrangement.spacedBy(12.dp),
         ) {
-            Text("档位百分比", style = MaterialTheme.typography.titleMedium)
+            SettingsSectionHeader(
+                title = "档位百分比",
+                icon = Icons.Outlined.Speed,
+                color = Color(0xFF2E7D32),
+            )
             ThrottleGear.entries.forEach { gear ->
                 if (gear == ThrottleGear.Neutral) {
                     SettingsRow(gear.label, "0%")
@@ -452,6 +496,74 @@ private fun SwitchRow(
     ) {
         Text(label, modifier = Modifier.weight(1f))
         Switch(checked = checked, onCheckedChange = onCheckedChange)
+    }
+}
+
+@Composable
+private fun SettingsSectionHeader(
+    title: String,
+    icon: ImageVector,
+    color: Color,
+) {
+    Row(
+        horizontalArrangement = Arrangement.spacedBy(8.dp),
+        verticalAlignment = Alignment.CenterVertically,
+    ) {
+        Icon(
+            imageVector = icon,
+            contentDescription = title,
+            tint = color,
+            modifier = Modifier.size(20.dp),
+        )
+        Text(
+            title,
+            style = MaterialTheme.typography.titleMedium,
+            fontWeight = FontWeight.SemiBold,
+            color = color,
+            maxLines = 1,
+            overflow = TextOverflow.Ellipsis,
+        )
+    }
+}
+
+@Composable
+private fun SettingsActionButton(
+    text: String,
+    icon: ImageVector,
+    color: Color,
+    onClick: () -> Unit,
+    modifier: Modifier = Modifier,
+    enabled: Boolean = true,
+) {
+    val actualColor = if (enabled) color else MaterialTheme.colorScheme.onSurfaceVariant
+    Surface(
+        onClick = onClick,
+        enabled = enabled,
+        shape = RoundedCornerShape(8.dp),
+        color = actualColor.copy(alpha = if (enabled) 0.14f else 0.08f),
+        modifier = modifier,
+    ) {
+        Row(
+            modifier = Modifier.padding(horizontal = 12.dp, vertical = 10.dp),
+            horizontalArrangement = Arrangement.Center,
+            verticalAlignment = Alignment.CenterVertically,
+        ) {
+            Icon(
+                imageVector = icon,
+                contentDescription = text,
+                tint = actualColor,
+                modifier = Modifier.size(18.dp),
+            )
+            Text(
+                text,
+                modifier = Modifier.padding(start = 6.dp),
+                style = MaterialTheme.typography.labelMedium,
+                fontWeight = FontWeight.SemiBold,
+                color = actualColor,
+                maxLines = 1,
+                overflow = TextOverflow.Ellipsis,
+            )
+        }
     }
 }
 

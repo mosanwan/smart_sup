@@ -20,7 +20,8 @@
 | 左摇杆 ADC | GPIO35 |
 | 右摇杆 ADC | GPIO32 |
 | GPS RX2 | GPIO16 |
-| IMU SDA | GPIO21 |
+| GPS PPS | GPIO13 |
+| IMU SDA | GPIO14 |
 | IMU SCL | GPIO22 |
 | 启动/解锁 | GPIO17 |
 | 暂停/停止 | GPIO18 |
