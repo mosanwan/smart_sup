@@ -1958,8 +1958,15 @@ void finishOta() {
 void processOtaBytes() {
   uint8_t buffer[OTA_BUFFER_SIZE];
   while (otaInProgress && SerialBT.available() > 0 && otaWrittenBytes < otaExpectedBytes) {
+    const int availableBytes = SerialBT.available();
+    if (availableBytes <= 0) {
+      break;
+    }
     const size_t remaining = otaExpectedBytes - otaWrittenBytes;
-    const size_t toRead = min(remaining, sizeof(buffer));
+    const size_t toRead = min(
+      remaining,
+      min(sizeof(buffer), static_cast<size_t>(availableBytes))
+    );
     const size_t readBytes = SerialBT.readBytes(buffer, toRead);
     if (readBytes == 0) {
       break;
