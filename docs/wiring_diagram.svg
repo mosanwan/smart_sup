@@ -169,11 +169,10 @@
   <text x="1110" y="660" class="label">应急有线控制器</text>
   <text x="1045" y="692" class="pin">左摇杆中点 → GPIO35</text>
   <text x="1045" y="718" class="pin">右摇杆中点 → GPIO32</text>
-  <text x="1045" y="744" class="pin">启动/解锁 → GPIO17</text>
-  <text x="1045" y="770" class="pin">暂停/停止 → GPIO18</text>
-  <text x="1045" y="796" class="pin">方向锁定 → GPIO19</text>
-  <text x="1045" y="822" class="pin">自动/手动 → GPIO23</text>
-  <text x="1045" y="848" class="pin">模式/确认 → GPIO27</text>
+  <text x="1045" y="744" class="pin">加档 → GPIO17</text>
+  <text x="1045" y="770" class="pin">减档 → GPIO18</text>
+  <text x="1045" y="796" class="pin">回到空档 → GPIO19</text>
+  <text x="1045" y="822" class="pin">方向锁定 → GPIO23</text>
   <line x1="950" y1="455" x2="1015" y2="690" class="orange" />
   <line x1="950" y1="455" x2="1015" y2="718" class="orange" />
   <line x1="950" y1="430" x2="1015" y2="745" class="blue" />

@@ -19,11 +19,13 @@ import androidx.compose.foundation.rememberScrollState
 import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.foundation.verticalScroll
 import androidx.compose.material.icons.Icons
+import androidx.compose.material.icons.outlined.Add
 import androidx.compose.material.icons.outlined.Bluetooth
 import androidx.compose.material.icons.outlined.Explore
 import androidx.compose.material.icons.outlined.Lock
 import androidx.compose.material.icons.outlined.LockOpen
 import androidx.compose.material.icons.outlined.Mic
+import androidx.compose.material.icons.outlined.Remove
 import androidx.compose.material.icons.outlined.ReportProblem
 import androidx.compose.material.icons.outlined.Speed
 import androidx.compose.material3.Card
@@ -43,7 +45,9 @@ import androidx.compose.ui.geometry.Size
 import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.graphics.Path
 import androidx.compose.ui.graphics.vector.ImageVector
+import androidx.compose.ui.hapticfeedback.HapticFeedbackType
 import androidx.compose.ui.input.pointer.pointerInput
+import androidx.compose.ui.platform.LocalHapticFeedback
 import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.text.style.TextAlign
 import androidx.compose.ui.text.style.TextOverflow
@@ -58,7 +62,10 @@ import kotlin.math.abs
 fun ControlScreen(
     state: ControlUiState,
     maxThrottlePercent: Int,
+    fineTuneStepPercent: Int,
     gearPercents: Map<ThrottleGear, Int>,
+    leftEscReversed: Boolean,
+    rightEscReversed: Boolean,
     modifier: Modifier = Modifier,
     onArm: () -> Unit,
     onDisarm: () -> Unit,
@@ -67,11 +74,32 @@ fun ControlScreen(
     onLeftThrottleRelease: () -> Unit,
     onRightThrottleRelease: () -> Unit,
     onGearSelected: (ThrottleGear) -> Unit,
+    onFineTuneDecrease: () -> Unit,
+    onFineTuneIncrease: () -> Unit,
     onEnableHeadingLock: () -> Unit,
     onDisableHeadingLock: () -> Unit,
     onToggleVoiceControl: () -> Unit,
     onEmergencyStop: () -> Unit,
 ) {
+    val showingHeadingLockOutput = state.headingLockEnabled &&
+        state.telemetry.statusFields["HLOCK"] == "ACTIVE"
+    val leftDisplayThrottle = if (showingHeadingLockOutput) {
+        state.telemetry.leftOutputPercent?.toUserFacingThrottle(leftEscReversed) ?: state.leftThrottlePercent
+    } else {
+        state.leftThrottlePercent
+    }
+    val rightDisplayThrottle = if (showingHeadingLockOutput) {
+        state.telemetry.rightOutputPercent?.toUserFacingThrottle(rightEscReversed) ?: state.rightThrottlePercent
+    } else {
+        state.rightThrottlePercent
+    }
+    val visualThrottlePercent = maxOf(
+        maxThrottlePercent,
+        abs(leftDisplayThrottle),
+        abs(rightDisplayThrottle),
+        1,
+    )
+
     Column(
         modifier = modifier
             .fillMaxSize()
@@ -99,8 +127,9 @@ fun ControlScreen(
         ) {
             VerticalThrottle(
                 label = "左 ESC",
-                value = state.leftThrottlePercent,
-                maxThrottlePercent = maxThrottlePercent,
+                value = leftDisplayThrottle,
+                inputMaxThrottlePercent = maxThrottlePercent,
+                visualMaxThrottlePercent = visualThrottlePercent,
                 enabled = state.canSendThrottle,
                 onChange = onLeftThrottleChange,
                 onRelease = onLeftThrottleRelease,
@@ -111,6 +140,7 @@ fun ControlScreen(
 
             CenterControlPanel(
                 state = state,
+                fineTuneStepPercent = fineTuneStepPercent,
                 gearPercents = gearPercents,
                 modifier = Modifier
                     .weight(1f)
@@ -118,12 +148,17 @@ fun ControlScreen(
                 onArm = onArm,
                 onDisarm = onDisarm,
                 onGearSelected = onGearSelected,
+                onFineTuneDecrease = onFineTuneDecrease,
+                onFineTuneIncrease = onFineTuneIncrease,
+                onEnableHeadingLock = onEnableHeadingLock,
+                onDisableHeadingLock = onDisableHeadingLock,
             )
 
             VerticalThrottle(
                 label = "右 ESC",
-                value = state.rightThrottlePercent,
-                maxThrottlePercent = maxThrottlePercent,
+                value = rightDisplayThrottle,
+                inputMaxThrottlePercent = maxThrottlePercent,
+                visualMaxThrottlePercent = visualThrottlePercent,
                 enabled = state.canSendThrottle,
                 onChange = onRightThrottleChange,
                 onRelease = onRightThrottleRelease,
@@ -244,7 +279,8 @@ private fun IconStatusChip(
 private fun VerticalThrottle(
     label: String,
     value: Int,
-    maxThrottlePercent: Int,
+    inputMaxThrottlePercent: Int,
+    visualMaxThrottlePercent: Int,
     enabled: Boolean,
     onChange: (Int) -> Unit,
     onRelease: () -> Unit,
@@ -262,7 +298,7 @@ private fun VerticalThrottle(
             verticalArrangement = Arrangement.spacedBy(7.dp),
         ) {
             Text(label, style = MaterialTheme.typography.labelLarge, textAlign = TextAlign.Center)
-            ThrottleValueBadge(value = value, maxThrottlePercent = maxThrottlePercent, enabled = enabled)
+            ThrottleValueBadge(value = value, maxThrottlePercent = visualMaxThrottlePercent, enabled = enabled)
             Box(
                 modifier = Modifier
                     .weight(1f)
@@ -271,7 +307,8 @@ private fun VerticalThrottle(
             ) {
                 VerticalThrottleTrack(
                     value = value,
-                    maxThrottlePercent = maxThrottlePercent,
+                    inputMaxThrottlePercent = inputMaxThrottlePercent,
+                    visualMaxThrottlePercent = visualMaxThrottlePercent,
                     enabled = enabled,
                     onChange = onChange,
                     onRelease = onRelease,
@@ -310,7 +347,8 @@ private fun ThrottleValueBadge(value: Int, maxThrottlePercent: Int, enabled: Boo
 @Composable
 private fun VerticalThrottleTrack(
     value: Int,
-    maxThrottlePercent: Int,
+    inputMaxThrottlePercent: Int,
+    visualMaxThrottlePercent: Int,
     enabled: Boolean,
     onChange: (Int) -> Unit,
     onRelease: () -> Unit,
@@ -322,7 +360,7 @@ private fun VerticalThrottleTrack(
     val tickColor = MaterialTheme.colorScheme.onSurfaceVariant.copy(alpha = if (enabled) 0.42f else 0.18f)
     val centerLineColor = MaterialTheme.colorScheme.onSurface.copy(alpha = if (enabled) 0.7f else 0.28f)
     val neutralBarColor = MaterialTheme.colorScheme.surface.copy(alpha = 0.92f)
-    val activeThrottleColor = throttleHeatColor(value, maxThrottlePercent)
+    val activeThrottleColor = throttleHeatColor(value, visualMaxThrottlePercent)
     val thumbOuterColor = when {
         !enabled -> MaterialTheme.colorScheme.onSurfaceVariant.copy(alpha = 0.45f)
         value != 0 -> activeThrottleColor
@@ -331,18 +369,19 @@ private fun VerticalThrottleTrack(
     val thumbInnerColor = MaterialTheme.colorScheme.surface
 
     fun yToPercent(y: Float, height: Float): Int {
-        if (height <= 0f || maxThrottlePercent <= 0) {
+        if (height <= 0f || inputMaxThrottlePercent <= 0) {
             return 0
         }
         val center = height / 2f
         val halfHeight = center.coerceAtLeast(1f)
         val normalized = ((center - y) / halfHeight).coerceIn(-1f, 1f)
-        return (normalized * maxThrottlePercent).toInt().coerceIn(-maxThrottlePercent, maxThrottlePercent)
+        return (normalized * inputMaxThrottlePercent).toInt()
+            .coerceIn(-inputMaxThrottlePercent, inputMaxThrottlePercent)
     }
 
     Canvas(
         modifier = modifier
-            .pointerInput(enabled, maxThrottlePercent) {
+            .pointerInput(enabled, inputMaxThrottlePercent) {
                 if (!enabled) {
                     return@pointerInput
                 }
@@ -364,10 +403,10 @@ private fun VerticalThrottleTrack(
         val bottom = size.height - thumbRadius - 3.dp.toPx()
         val trackHeight = (bottom - top).coerceAtLeast(1f)
         val centerY = top + trackHeight / 2f
-        val normalized = if (maxThrottlePercent == 0) {
+        val normalized = if (visualMaxThrottlePercent == 0) {
             0f
         } else {
-            (value.toFloat() / maxThrottlePercent.toFloat()).coerceIn(-1f, 1f)
+            (value.toFloat() / visualMaxThrottlePercent.toFloat()).coerceIn(-1f, 1f)
         }
         val thumbY = centerY - (trackHeight / 2f) * normalized
         val activeTop = minOf(centerY, thumbY)
@@ -461,11 +500,16 @@ private fun VerticalThrottleTrack(
 @Composable
 private fun CenterControlPanel(
     state: ControlUiState,
+    fineTuneStepPercent: Int,
     gearPercents: Map<ThrottleGear, Int>,
     modifier: Modifier = Modifier,
     onArm: () -> Unit,
     onDisarm: () -> Unit,
     onGearSelected: (ThrottleGear) -> Unit,
+    onFineTuneDecrease: () -> Unit,
+    onFineTuneIncrease: () -> Unit,
+    onEnableHeadingLock: () -> Unit,
+    onDisableHeadingLock: () -> Unit,
 ) {
     Column(
         modifier = modifier.verticalScroll(rememberScrollState()),
@@ -483,6 +527,13 @@ private fun CenterControlPanel(
             onGearSelected = onGearSelected,
         )
 
+        FineTuneControls(
+            state = state,
+            fineTuneStepPercent = fineTuneStepPercent,
+            onDecrease = onFineTuneDecrease,
+            onIncrease = onFineTuneIncrease,
+        )
+
         Card(
             colors = CardDefaults.cardColors(containerColor = MaterialTheme.colorScheme.surface),
             modifier = Modifier.fillMaxWidth(),
@@ -493,7 +544,11 @@ private fun CenterControlPanel(
             ) {
                 CompactInfoRow("左电流", state.telemetry.leftCurrent.format("A"))
                 CompactInfoRow("右电流", state.telemetry.rightCurrent.format("A"))
-                CompactInfoRow("当前航向", state.headingText())
+                HeadingValueRow(
+                    state = state,
+                    onEnableHeadingLock = onEnableHeadingLock,
+                    onDisableHeadingLock = onDisableHeadingLock,
+                )
                 CompactInfoRow("目标航向", state.targetHeadingText())
                 CompactInfoRow("IMU", state.telemetry.imuAvailable.imuStatusText())
             }
@@ -543,6 +598,67 @@ private fun CenterControlPanel(
                 CompactInfoRow("故障", state.statusValue("FAULT"))
                 CompactInfoRow("编号", state.statusValue("ID"))
                 CompactInfoRow("设备", state.statusValue("BT"))
+            }
+        }
+    }
+}
+
+@Composable
+private fun HeadingValueRow(
+    state: ControlUiState,
+    onEnableHeadingLock: () -> Unit,
+    onDisableHeadingLock: () -> Unit,
+) {
+    val haptic = LocalHapticFeedback.current
+    val actionEnabled = state.connectionState == ConnectionState.Connected
+    val color = Color(0xFFC62828)
+    val actionLabel = if (state.headingLockEnabled) "取消航向锁定" else "锁定当前航向"
+    Row(
+        modifier = Modifier.fillMaxWidth(),
+        horizontalArrangement = Arrangement.SpaceBetween,
+        verticalAlignment = Alignment.CenterVertically,
+    ) {
+        Text("当前航向", color = MaterialTheme.colorScheme.onSurfaceVariant, style = MaterialTheme.typography.bodySmall)
+        Surface(
+            onClick = {
+                haptic.performHapticFeedback(HapticFeedbackType.LongPress)
+                if (state.headingLockEnabled) {
+                    onDisableHeadingLock()
+                } else {
+                    onEnableHeadingLock()
+                }
+            },
+            enabled = actionEnabled,
+            color = Color.Transparent,
+            modifier = Modifier
+                .weight(1f)
+                .padding(start = 8.dp),
+        ) {
+            Row(
+                modifier = Modifier.fillMaxWidth(),
+                horizontalArrangement = Arrangement.End,
+                verticalAlignment = Alignment.CenterVertically,
+            ) {
+                Text(
+                    state.headingText(),
+                    fontWeight = FontWeight.Medium,
+                    style = MaterialTheme.typography.bodySmall,
+                    maxLines = 1,
+                    overflow = TextOverflow.Ellipsis,
+                    textAlign = TextAlign.End,
+                )
+                Icon(
+                    imageVector = Icons.Outlined.Lock,
+                    contentDescription = actionLabel,
+                    tint = if (actionEnabled || state.headingLockEnabled) {
+                        color
+                    } else {
+                        color.copy(alpha = 0.38f)
+                    },
+                    modifier = Modifier
+                        .padding(start = 3.dp)
+                        .size(12.dp),
+                )
             }
         }
     }
@@ -660,6 +776,84 @@ private fun GearSelector(
 }
 
 @Composable
+private fun FineTuneControls(
+    state: ControlUiState,
+    fineTuneStepPercent: Int,
+    onDecrease: () -> Unit,
+    onIncrease: () -> Unit,
+) {
+    val enabled = state.canSendThrottle
+    val targetPercent = ((state.leftThrottlePercent + state.rightThrottlePercent) / 2)
+        .coerceIn(-100, 100)
+    val trimText = state.throttleTrimPercent.signedPercentText()
+    val targetText = targetPercent.signedPercentText()
+    val color = if (enabled) Color(0xFF00897B) else MaterialTheme.colorScheme.onSurfaceVariant
+    Card(
+        colors = CardDefaults.cardColors(containerColor = MaterialTheme.colorScheme.surface),
+        modifier = Modifier.fillMaxWidth(),
+    ) {
+        Column(
+            modifier = Modifier
+                .fillMaxWidth()
+                .padding(horizontal = 10.dp, vertical = 8.dp),
+            verticalArrangement = Arrangement.spacedBy(8.dp),
+            horizontalAlignment = Alignment.CenterHorizontally,
+        ) {
+            Column(
+                modifier = Modifier.fillMaxWidth(),
+                horizontalAlignment = Alignment.CenterHorizontally,
+                verticalArrangement = Arrangement.spacedBy(2.dp),
+            ) {
+                Text(
+                    "微调 $trimText",
+                    style = MaterialTheme.typography.bodyMedium,
+                    fontWeight = FontWeight.SemiBold,
+                    textAlign = TextAlign.Center,
+                    maxLines = 1,
+                    overflow = TextOverflow.Clip,
+                )
+                Text(
+                    "目标 $targetText · 步进 ${fineTuneStepPercent}%",
+                    style = MaterialTheme.typography.labelSmall,
+                    color = MaterialTheme.colorScheme.onSurfaceVariant,
+                    textAlign = TextAlign.Center,
+                    maxLines = 1,
+                    overflow = TextOverflow.Clip,
+                )
+            }
+            Row(
+                modifier = Modifier.fillMaxWidth(),
+                horizontalArrangement = Arrangement.spacedBy(8.dp),
+                verticalAlignment = Alignment.CenterVertically,
+            ) {
+                FilledTonalIconButton(
+                    onClick = onDecrease,
+                    enabled = enabled,
+                    colors = IconButtonDefaults.filledTonalIconButtonColors(
+                        containerColor = color.copy(alpha = 0.16f),
+                        contentColor = color,
+                    ),
+                    modifier = Modifier.weight(1f),
+                ) {
+                    Icon(Icons.Outlined.Remove, contentDescription = "微调减速")
+                }
+                FilledTonalIconButton(
+                    onClick = onIncrease,
+                    enabled = enabled,
+                    colors = IconButtonDefaults.filledTonalIconButtonColors(
+                        containerColor = color.copy(alpha = 0.16f),
+                        contentColor = color,
+                    ),
+                    modifier = Modifier.weight(1f),
+                ) {
+                    Icon(Icons.Outlined.Add, contentDescription = "微调加速")
+                }
+            }
+        }
+    }
+}
+
+@Composable
 private fun GearStrip(
     selectedGear: ThrottleGear,
     gearPercents: Map<ThrottleGear, Int>,
@@ -743,6 +937,10 @@ private fun CompactInfoRow(label: String, value: String) {
 
 private fun Int.signedPercentText(): String {
     return if (this > 0) "+$this%" else "$this%"
+}
+
+private fun Int.toUserFacingThrottle(reversed: Boolean): Int {
+    return if (reversed) -this else this
 }
 
 private fun throttleHeatColor(value: Int, maxThrottlePercent: Int): Color {
@@ -838,17 +1036,6 @@ private fun ControlUiState.statusModeText(): String {
         "HEADING_LOCK" -> "航向锁定"
         else -> statusValue("MODE")
     }
-}
-
-private fun ControlUiState.statusHeadingLockText(): String {
-    val lock = telemetry.statusFields["HLOCK"] ?: return if (headingLockEnabled) "等待状态" else "未开启"
-    val lockText = when (lock) {
-        "ACTIVE" -> "执行中"
-        else -> lock
-    }
-    val requestId = telemetry.statusFields["HID"]?.let { "#$it" }
-    val error = telemetry.statusFields["HERR"]?.let { "误差 ${it}°" }
-    return listOfNotNull(lockText, requestId, error).joinToString(" ")
 }
 
 private fun ControlUiState.statusTurnText(): String {

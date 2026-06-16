@@ -1,8 +1,20 @@
+import java.util.Properties
+
 plugins {
     alias(libs.plugins.android.application)
     alias(libs.plugins.kotlin.android)
     alias(libs.plugins.kotlin.compose)
 }
+
+val localProperties = Properties().apply {
+    val localPropertiesFile = rootProject.file("local.properties")
+    if (localPropertiesFile.isFile) {
+        localPropertiesFile.inputStream().use(::load)
+    }
+}
+
+fun String.asBuildConfigString(): String =
+    "\"" + replace("\\", "\\\\").replace("\"", "\\\"") + "\""
 
 android {
     namespace = "com.smartsup.controller"
@@ -23,9 +35,16 @@ android {
         applicationId = "com.smartsup.controller"
         minSdk = 26
         targetSdk = 36
-        versionCode = 5
-        versionName = "0.2.3"
+        versionCode = 6
+        versionName = "0.2.4"
         buildConfigField("String", "GITHUB_REPOSITORY", "\"mosanwan/smart_sup\"")
+        val maptilerApiKey = providers.gradleProperty("MAPTILER_API_KEY")
+            .orElse(providers.environmentVariable("MAPTILER_API_KEY"))
+            .orElse("")
+            .get()
+            .ifBlank { localProperties.getProperty("MAPTILER_API_KEY", "") }
+        buildConfigField("String", "MAPTILER_API_KEY", maptilerApiKey.asBuildConfigString())
+        buildConfigField("boolean", "MAPTILER_API_KEY_CONFIGURED", maptilerApiKey.isNotBlank().toString())
 
         ndk {
             abiFilters += listOf("arm64-v8a")
@@ -82,6 +101,7 @@ dependencies {
     implementation(libs.androidx.core.ktx)
     implementation(libs.androidx.lifecycle.runtime.ktx)
     implementation(libs.androidx.lifecycle.viewmodel.compose)
+    implementation(libs.maplibre.android)
     implementation(files("libs/sherpa-onnx-1.13.2.aar"))
 
     debugImplementation(libs.androidx.compose.ui.tooling)

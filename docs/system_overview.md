@@ -16,9 +16,11 @@ flowchart LR
     ESC_R --> Motor_R["右侧 6010 170KV 电机"]
     Controller["ESP32 控制器"] --> ESC_L
     Controller --> ESC_R
-    Controller --> Sensors["电压 / 电流 / 温度 / 进水检测"]
+    Controller --> Sensors["电压 / 电流 / 温度 / 进水检测 / GPS"]
     Voice["Android 本地 ASR / 语音命令解析"] --> Remote["Android App / 经典蓝牙 SPP"]
     Remote --> Controller
+    Controller --> TrackLog["GPS 轨迹缓存"]
+    TrackLog --> Remote
 ```
 
 ## 推荐迭代顺序
@@ -35,7 +37,8 @@ flowchart LR
 - ESC 按双向 RC PWM 信号处理：约 1000us 最大后退、1500us 中位/空闲、2000us 最大前进。实际以电调说明书和低功率实测为准。
 - Android 控制端第一版使用经典蓝牙 SPP，命令和失联保护见 [经典蓝牙控制 MVP](bluetooth_control_mvp.md)。
 - Android 本地语音控制只作为低速辅助输入，方案和限幅规则见 [Android 本地语音控制方案](voice_control_plan.md)。
-- 航向锁定第一版使用 IMU Z 轴积分相对航向，不使用磁力计/GPS 绝对修正；只适合短时低速保持，策略和限幅见 [经典蓝牙控制 MVP](bluetooth_control_mvp.md)。
+- 航向锁定当前使用 ICM20948 内置磁力计 X/Y 直接计算当前罗盘航向，避免陀螺仪零偏积分导致静止时航向持续累加；磁力计容易受电机、电流线、电池和金属件干扰，策略和限幅见 [经典蓝牙控制 MVP](bluetooth_control_mvp.md)。
+- GPS 第一版只用于实时定位、1Hz 轨迹缓存、Android 同步和历史回放，不参与推进安全闭环；方案见 [GPS 实时定位、轨迹记录和回放方案](gps_track_plan.md)。
 - 每个 ESP32 的三位硬件编号在出厂第一次 USB 刷入时写入 NVS/flash，流程见 [ESP32 出厂编号刷入流程](esp32_factory_provisioning.md)。
 - Android App 和 ESP32 固件更新走 GitHub Release，流程见 [GitHub 更新发布流程](update_release_flow.md)。
 - 两个 100A ESC 不应由 60A BMS 长时间满功率供电，系统持续功率需要按 BMS、线束、电芯放电能力和散热重新核算。

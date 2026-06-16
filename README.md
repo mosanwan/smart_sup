@@ -58,6 +58,7 @@ tools/provision_esp32_unit.py --flash --port /dev/ttyUSB0
 ## 接线图
 
 - [详细接线图](docs/wiring_diagram.md)
+- [GPS 轨迹记录和回放方案](docs/gps_track_plan.md)
 
 ## 重要安全边界
 

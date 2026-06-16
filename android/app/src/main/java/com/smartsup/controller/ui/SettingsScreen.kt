@@ -41,6 +41,7 @@ import androidx.compose.ui.Modifier
 import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.graphics.vector.ImageVector
 import androidx.compose.ui.text.font.FontWeight
+import androidx.compose.ui.text.style.TextAlign
 import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.unit.dp
 import com.smartsup.controller.BuildConfig
@@ -50,6 +51,7 @@ import com.smartsup.controller.model.ControlUiState
 import com.smartsup.controller.model.SettingsUiState
 import com.smartsup.controller.model.ThrottleGear
 import com.smartsup.controller.model.UpdateUiState
+import kotlin.math.roundToInt
 
 @Composable
 fun SettingsScreen(
@@ -64,10 +66,19 @@ fun SettingsScreen(
     onDisconnect: () -> Unit,
     onAutoReconnectChange: (Boolean) -> Unit,
     onMaxThrottleChange: (Int) -> Unit,
+    onVoicePowerLimitChange: (Int) -> Unit,
+    onFineTuneStepChange: (Int) -> Unit,
     onGearThrottleChange: (ThrottleGear, Int) -> Unit,
     onRampLimitChange: (Boolean) -> Unit,
     onLeftEscReversedChange: (Boolean) -> Unit,
     onRightEscReversedChange: (Boolean) -> Unit,
+    onHeadingLockToleranceChange: (Int) -> Unit,
+    onHeadingLockFullCorrectionChange: (Int) -> Unit,
+    onHeadingLockNeutralReverseChange: (Int) -> Unit,
+    onStartMagCalibration: () -> Unit,
+    onSaveMagCalibration: () -> Unit,
+    onClearMagCalibration: () -> Unit,
+    onRefreshMagCalibrationStatus: () -> Unit,
     onCheckUpdates: () -> Unit,
     onInstallAppUpdate: () -> Unit,
     onUpdateEsp32FromGitHub: () -> Unit,
@@ -119,9 +130,22 @@ fun SettingsScreen(
             settingsState = settingsState,
             onAutoReconnectChange = onAutoReconnectChange,
             onMaxThrottleChange = onMaxThrottleChange,
+            onVoicePowerLimitChange = onVoicePowerLimitChange,
+            onFineTuneStepChange = onFineTuneStepChange,
             onRampLimitChange = onRampLimitChange,
             onLeftEscReversedChange = onLeftEscReversedChange,
             onRightEscReversedChange = onRightEscReversedChange,
+            onHeadingLockToleranceChange = onHeadingLockToleranceChange,
+            onHeadingLockFullCorrectionChange = onHeadingLockFullCorrectionChange,
+            onHeadingLockNeutralReverseChange = onHeadingLockNeutralReverseChange,
+        )
+
+        MagCalibrationSettingsCard(
+            controlState = controlState,
+            onStartMagCalibration = onStartMagCalibration,
+            onSaveMagCalibration = onSaveMagCalibration,
+            onClearMagCalibration = onClearMagCalibration,
+            onRefreshMagCalibrationStatus = onRefreshMagCalibrationStatus,
         )
 
         GearPercentSettingsCard(
@@ -377,9 +401,14 @@ private fun SafetySettingsCard(
     settingsState: SettingsUiState,
     onAutoReconnectChange: (Boolean) -> Unit,
     onMaxThrottleChange: (Int) -> Unit,
+    onVoicePowerLimitChange: (Int) -> Unit,
+    onFineTuneStepChange: (Int) -> Unit,
     onRampLimitChange: (Boolean) -> Unit,
     onLeftEscReversedChange: (Boolean) -> Unit,
     onRightEscReversedChange: (Boolean) -> Unit,
+    onHeadingLockToleranceChange: (Int) -> Unit,
+    onHeadingLockFullCorrectionChange: (Int) -> Unit,
+    onHeadingLockNeutralReverseChange: (Int) -> Unit,
 ) {
     Card(
         colors = CardDefaults.cardColors(containerColor = MaterialTheme.colorScheme.surface),
@@ -421,9 +450,180 @@ private fun SafetySettingsCard(
                 valueRange = 5f..100f,
                 steps = 18,
             )
+            PercentSliderRow(
+                label = "声控功率限制",
+                value = settingsState.voicePowerLimitPercent,
+                valueRange = 5f..100f,
+                steps = 94,
+                onValueChange = onVoicePowerLimitChange,
+            )
+            PercentSliderRow(
+                label = "微调步进",
+                value = settingsState.fineTuneStepPercent,
+                valueRange = 1f..10f,
+                steps = 8,
+                onValueChange = onFineTuneStepChange,
+            )
+            DegreeSliderRow(
+                label = "航向锁定容差",
+                value = settingsState.headingLockToleranceDegrees,
+                valueRange = 1f..20f,
+                steps = 18,
+                onValueChange = onHeadingLockToleranceChange,
+            )
+            DegreeSliderRow(
+                label = "最大转向角度",
+                value = settingsState.headingLockFullCorrectionDegrees,
+                valueRange = 5f..180f,
+                steps = 174,
+                onValueChange = onHeadingLockFullCorrectionChange,
+            )
+            PercentSliderRow(
+                label = "空档锁航最大反推",
+                value = settingsState.headingLockNeutralReversePercent,
+                valueRange = 0f..100f,
+                steps = 99,
+                onValueChange = onHeadingLockNeutralReverseChange,
+            )
             SettingsRow("上电默认", "锁定")
             SettingsRow("失联处理", "油门回空挡")
             SettingsRow("急停后", "保持锁定")
+        }
+    }
+}
+
+@Composable
+private fun DegreeSliderRow(
+    label: String,
+    value: Int,
+    valueRange: ClosedFloatingPointRange<Float>,
+    steps: Int,
+    onValueChange: (Int) -> Unit,
+) {
+    Column(verticalArrangement = Arrangement.spacedBy(4.dp)) {
+        Row(
+            modifier = Modifier.fillMaxWidth(),
+            horizontalArrangement = Arrangement.SpaceBetween,
+        ) {
+            Text(label, color = MaterialTheme.colorScheme.onSurfaceVariant)
+            Text("${value}°", fontWeight = FontWeight.Medium)
+        }
+        Slider(
+            value = value.toFloat(),
+            onValueChange = { onValueChange(it.roundToInt()) },
+            valueRange = valueRange,
+            steps = steps,
+        )
+    }
+}
+
+@Composable
+private fun PercentSliderRow(
+    label: String,
+    value: Int,
+    valueRange: ClosedFloatingPointRange<Float>,
+    steps: Int,
+    onValueChange: (Int) -> Unit,
+) {
+    Column(verticalArrangement = Arrangement.spacedBy(4.dp)) {
+        Row(
+            modifier = Modifier.fillMaxWidth(),
+            horizontalArrangement = Arrangement.SpaceBetween,
+        ) {
+            Text(label, color = MaterialTheme.colorScheme.onSurfaceVariant)
+            Text("${value}%", fontWeight = FontWeight.Medium)
+        }
+        Slider(
+            value = value.toFloat(),
+            onValueChange = { onValueChange(it.roundToInt()) },
+            valueRange = valueRange,
+            steps = steps,
+        )
+    }
+}
+
+@Composable
+private fun MagCalibrationSettingsCard(
+    controlState: ControlUiState,
+    onStartMagCalibration: () -> Unit,
+    onSaveMagCalibration: () -> Unit,
+    onClearMagCalibration: () -> Unit,
+    onRefreshMagCalibrationStatus: () -> Unit,
+) {
+    val statusFields = controlState.telemetry.statusFields
+    val connected = controlState.connectionState == ConnectionState.Connected
+    val calibrationState = statusFields["MCAL"] ?: "UNKNOWN"
+    val calibrationActive = calibrationState == "ACTIVE"
+
+    Card(
+        colors = CardDefaults.cardColors(containerColor = MaterialTheme.colorScheme.surface),
+        modifier = Modifier.fillMaxWidth(),
+    ) {
+        Column(
+            modifier = Modifier.padding(16.dp),
+            verticalArrangement = Arrangement.spacedBy(12.dp),
+        ) {
+            SettingsSectionHeader(
+                title = "航向校准",
+                icon = Icons.Outlined.Tune,
+                color = Color(0xFF00695C),
+            )
+            SettingsRow("连接", connectionText(controlState.connectionState))
+            SettingsRow("航向来源", headingSourceText(statusFields["HSRC"]))
+            SettingsRow("当前航向", statusFields["HDG"]?.let { "$it°" } ?: "--")
+            SettingsRow("校准状态", magCalibrationStateText(calibrationState))
+            SettingsRow("采样数量", statusFields["MCNT"] ?: "0")
+            SettingsRow(
+                "覆盖范围",
+                listOfNotNull(statusFields["MRX"]?.let { "X $it" }, statusFields["MRY"]?.let { "Y $it" })
+                    .takeIf { it.isNotEmpty() }
+                    ?.joinToString(" / ")
+                    ?: "--",
+            )
+
+            Row(
+                modifier = Modifier.fillMaxWidth(),
+                horizontalArrangement = Arrangement.spacedBy(10.dp),
+            ) {
+                SettingsActionButton(
+                    onClick = onStartMagCalibration,
+                    enabled = connected,
+                    text = "开始校准",
+                    icon = Icons.Outlined.Tune,
+                    color = Color(0xFF00695C),
+                    modifier = Modifier.weight(1f),
+                )
+                SettingsActionButton(
+                    onClick = onSaveMagCalibration,
+                    enabled = connected && calibrationActive,
+                    text = "保存校准",
+                    icon = Icons.Outlined.UploadFile,
+                    color = Color(0xFF2E7D32),
+                    modifier = Modifier.weight(1f),
+                )
+            }
+
+            Row(
+                modifier = Modifier.fillMaxWidth(),
+                horizontalArrangement = Arrangement.spacedBy(10.dp),
+            ) {
+                SettingsActionButton(
+                    onClick = onRefreshMagCalibrationStatus,
+                    enabled = connected,
+                    text = "刷新状态",
+                    icon = Icons.Outlined.Refresh,
+                    color = Color(0xFF1565C0),
+                    modifier = Modifier.weight(1f),
+                )
+                SettingsActionButton(
+                    onClick = onClearMagCalibration,
+                    enabled = connected && (calibrationActive || calibrationState == "SAVED"),
+                    text = "清除校准",
+                    icon = Icons.Outlined.LinkOff,
+                    color = Color(0xFFC62828),
+                    modifier = Modifier.weight(1f),
+                )
+            }
         }
     }
 }
@@ -573,8 +773,19 @@ private fun SettingsRow(label: String, value: String) {
         modifier = Modifier.fillMaxWidth(),
         horizontalArrangement = Arrangement.SpaceBetween,
     ) {
-        Text(label, color = MaterialTheme.colorScheme.onSurfaceVariant)
-        Text(value, fontWeight = FontWeight.Medium)
+        Text(
+            label,
+            color = MaterialTheme.colorScheme.onSurfaceVariant,
+            modifier = Modifier.weight(1f),
+        )
+        Text(
+            value,
+            fontWeight = FontWeight.Medium,
+            textAlign = TextAlign.End,
+            maxLines = 2,
+            overflow = TextOverflow.Ellipsis,
+            modifier = Modifier.weight(1.2f),
+        )
     }
 }
 
@@ -583,6 +794,25 @@ private fun connectionText(connectionState: ConnectionState): String {
         ConnectionState.Disconnected -> "未连接"
         ConnectionState.Connecting -> "连接中"
         ConnectionState.Connected -> "已连接"
+    }
+}
+
+private fun headingSourceText(source: String?): String {
+    return when (source) {
+        "MAG" -> "磁力计"
+        "NONE" -> "无"
+        null -> "--"
+        else -> source
+    }
+}
+
+private fun magCalibrationStateText(state: String): String {
+    return when (state) {
+        "ACTIVE" -> "校准中"
+        "SAVED" -> "已保存"
+        "NONE" -> "未保存"
+        "UNKNOWN" -> "--"
+        else -> state
     }
 }
 

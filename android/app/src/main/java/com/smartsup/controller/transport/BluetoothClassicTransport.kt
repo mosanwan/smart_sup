@@ -12,7 +12,10 @@ import android.util.Log
 import androidx.core.content.ContextCompat
 import com.smartsup.controller.model.BluetoothDeviceInfo
 import com.smartsup.controller.model.ControlCommand
+import com.smartsup.controller.model.GpsTrackPoint
 import com.smartsup.controller.model.Telemetry
+import com.smartsup.controller.model.TrackLogEvent
+import com.smartsup.controller.model.TrackLogInfo
 import java.io.BufferedReader
 import java.io.InputStreamReader
 import java.io.OutputStream
@@ -23,7 +26,10 @@ import kotlinx.coroutines.Job
 import kotlinx.coroutines.SupervisorJob
 import kotlinx.coroutines.delay
 import kotlinx.coroutines.launch
+import kotlinx.coroutines.flow.MutableSharedFlow
 import kotlinx.coroutines.flow.MutableStateFlow
+import kotlinx.coroutines.flow.SharedFlow
+import kotlinx.coroutines.flow.asSharedFlow
 import kotlinx.coroutines.flow.StateFlow
 import kotlinx.coroutines.flow.asStateFlow
 import kotlinx.coroutines.withContext
@@ -40,8 +46,12 @@ class BluetoothClassicTransport(
     private val telemetryState = MutableStateFlow(
         Telemetry(controllerMessage = "准备连接 ${deviceInfo.name}"),
     )
+    private val trackLogEventFlow = MutableSharedFlow<TrackLogEvent>(
+        extraBufferCapacity = TRACK_EVENT_BUFFER_CAPACITY,
+    )
 
     override val telemetry: StateFlow<Telemetry> = telemetryState.asStateFlow()
+    override val trackLogEvents: SharedFlow<TrackLogEvent> = trackLogEventFlow.asSharedFlow()
 
     override suspend fun connect() = withContext(Dispatchers.IO) {
         Log.i(TAG, "connect start name=${deviceInfo.name} address=${deviceInfo.address}")
@@ -55,12 +65,7 @@ class BluetoothClassicTransport(
 
         ensureBonded(device)
 
-        @SuppressLint("MissingPermission")
-        val nextSocket = device.createRfcommSocketToServiceRecord(SPP_UUID)
-
-        @SuppressLint("MissingPermission")
-        adapter.cancelDiscovery()
-        nextSocket.connect()
+        val nextSocket = connectBluetoothSocket(adapter = adapter, device = device)
 
         socket = nextSocket
         outputStream = nextSocket.outputStream
@@ -74,6 +79,42 @@ class BluetoothClassicTransport(
         )
         Log.i(TAG, "connect success name=${device.safeName()}")
         send(ControlCommand.Idle)
+    }
+
+    @SuppressLint("MissingPermission")
+    private suspend fun connectBluetoothSocket(
+        adapter: BluetoothAdapter,
+        device: BluetoothDevice,
+    ): BluetoothSocket {
+        val standardSocket = device.createRfcommSocketToServiceRecord(SPP_UUID)
+        adapter.cancelDiscovery()
+        return runCatching {
+            standardSocket.connect()
+            standardSocket
+        }.getOrElse { standardError ->
+            Log.w(TAG, "standard SPP connect failed; retrying RFCOMM channel 1", standardError)
+            telemetryState.value = telemetryState.value.copy(
+                controllerMessage = "标准 SPP 连接失败，尝试 RFCOMM channel 1",
+            )
+            runCatching { standardSocket.close() }
+            delay(350)
+
+            val channelSocket = device.createRfcommSocketOnChannel(SPP_CHANNEL)
+            adapter.cancelDiscovery()
+            runCatching {
+                channelSocket.connect()
+                channelSocket
+            }.getOrElse { channelError ->
+                runCatching { channelSocket.close() }
+                channelError.addSuppressed(standardError)
+                throw channelError
+            }
+        }
+    }
+
+    private fun BluetoothDevice.createRfcommSocketOnChannel(channel: Int): BluetoothSocket {
+        val method = javaClass.getMethod("createRfcommSocket", Int::class.javaPrimitiveType)
+        return method.invoke(this, channel) as BluetoothSocket
     }
 
     override suspend fun disconnect() = withContext(Dispatchers.IO) {
@@ -90,6 +131,10 @@ class BluetoothClassicTransport(
 
     override suspend fun send(command: ControlCommand) = withContext(Dispatchers.IO) {
         writeAsciiLine(command.toWireLine())
+    }
+
+    override suspend fun sendRawLine(line: String) = withContext(Dispatchers.IO) {
+        writeAsciiLine(line)
     }
 
     private fun writeAsciiLine(line: String) {
@@ -153,7 +198,7 @@ class BluetoothClassicTransport(
                     while (true) {
                         val line = reader.readLine() ?: break
                         Log.d(TAG, "rx $line")
-                        telemetryState.value = telemetryState.value.withStatusLine(line)
+                        handleReceivedLine(line)
                     }
                 }
             }.onFailure { error ->
@@ -165,7 +210,24 @@ class BluetoothClassicTransport(
         }
     }
 
+    private fun handleReceivedLine(line: String) {
+        parseTrackLogEvent(line)?.let { event ->
+            trackLogEventFlow.tryEmit(event)
+            telemetryState.value = telemetryState.value.copy(lastReceivedStatus = line)
+            return
+        }
+
+        telemetryState.value = telemetryState.value.withStatusLine(line)
+    }
+
     private fun Telemetry.withStatusLine(line: String): Telemetry {
+        if (line.startsWith("ERR;")) {
+            return copy(
+                controllerMessage = "ESP32 错误：${line.removePrefix("ERR;")}",
+                lastReceivedStatus = line,
+            )
+        }
+
         val fields = line.parseStatusFields()
         val isFullStatus = fields.containsKey("L") || fields.containsKey("R") || fields.containsKey("LPWM")
         val nextStatusFields = when {
@@ -182,6 +244,8 @@ class BluetoothClassicTransport(
                 isFullStatus && fields["TURN"] != "ACTIVE" && fields["HLOCK"] != "ACTIVE" -> null
                 else -> targetHeadingDegrees
             },
+            leftOutputPercent = fields["L"]?.toIntOrNull() ?: leftOutputPercent,
+            rightOutputPercent = fields["R"]?.toIntOrNull() ?: rightOutputPercent,
             statusFields = nextStatusFields,
             lastReceivedStatus = line,
         )
@@ -191,6 +255,48 @@ class BluetoothClassicTransport(
         if (!startsWith("STATUS;")) {
             return emptyMap()
         }
+        return parseSemicolonFields()
+    }
+
+    private fun parseTrackLogEvent(line: String): TrackLogEvent? {
+        val fields = line.parseSemicolonFields()
+        return when {
+            line.startsWith("LOG_INFO;ERR=") -> TrackLogEvent.Error(fields["ERR"].orEmpty())
+            line.startsWith("LOG_BEGIN;ERR=") -> TrackLogEvent.Error(fields["ERR"].orEmpty())
+            line.startsWith("LOG_INFO;") -> TrackLogEvent.Info(
+                TrackLogInfo(
+                    recordSize = fields["REC"]?.toIntOrNull() ?: 0,
+                    capacity = fields["CAP"]?.toIntOrNull() ?: 0,
+                    count = fields["COUNT"]?.toIntOrNull() ?: 0,
+                    oldestSequence = fields["OLDEST"]?.toIntOrNull() ?: 0,
+                    newestSequence = fields["NEWEST"]?.toIntOrNull() ?: 0,
+                    sessionId = fields["SESSION"]?.toIntOrNull() ?: 0,
+                    droppedInvalid = fields["DROP_INVALID"]?.toIntOrNull() ?: 0,
+                    droppedDrift = fields["DROP_DRIFT"]?.toIntOrNull() ?: 0,
+                    writeErrors = fields["WRITE_ERR"]?.toIntOrNull() ?: 0,
+                ),
+            )
+            line.startsWith("LOG_BEGIN;") -> TrackLogEvent.Begin(
+                fromSequence = fields["FROM"]?.toIntOrNull() ?: 0,
+                count = fields["COUNT"]?.toIntOrNull() ?: 0,
+            )
+            line.startsWith("LOG_POINT;") -> TrackLogEvent.Point(
+                GpsTrackPoint(
+                    sequence = fields["SEQ"]?.toIntOrNull() ?: return TrackLogEvent.Error("BAD_POINT"),
+                    sessionId = fields["SID"]?.toIntOrNull() ?: 0,
+                    utcSeconds = fields["T"]?.toLongOrNull() ?: return TrackLogEvent.Error("BAD_POINT"),
+                    latitudeE7 = fields["LAT"]?.toIntOrNull() ?: return TrackLogEvent.Error("BAD_POINT"),
+                    longitudeE7 = fields["LON"]?.toIntOrNull() ?: return TrackLogEvent.Error("BAD_POINT"),
+                ),
+            )
+            line.startsWith("LOG_END;") -> TrackLogEvent.End(
+                nextSequence = fields["NEXT"]?.toIntOrNull() ?: 0,
+            )
+            else -> null
+        }
+    }
+
+    private fun String.parseSemicolonFields(): Map<String, String> {
         return split(';')
             .drop(1)
             .mapNotNull { token ->
@@ -242,6 +348,8 @@ class BluetoothClassicTransport(
         private const val BOND_TIMEOUT_MS = 30_000L
         private const val OTA_CHUNK_SIZE = 512
         private const val OTA_CHUNK_DELAY_MS = 8L
+        private const val TRACK_EVENT_BUFFER_CAPACITY = 256
+        private const val SPP_CHANNEL = 1
         private val SPP_UUID: UUID = UUID.fromString("00001101-0000-1000-8000-00805F9B34FB")
 
         fun hasBluetoothConnectPermission(context: Context): Boolean {

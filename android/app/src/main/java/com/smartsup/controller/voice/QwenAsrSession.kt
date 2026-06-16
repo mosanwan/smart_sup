@@ -41,6 +41,7 @@ class QwenAsrSession(
     private var processJob: Job? = null
     private var samplesChannel: Channel<FloatArray>? = null
     @Volatile private var active = false
+    @Volatile private var inputSuppressed = false
 
     fun start() {
         if (active) {
@@ -83,6 +84,22 @@ class QwenAsrSession(
         vad?.release()
         vad = null
         scope.cancel()
+    }
+
+    fun setInputSuppressed(suppressed: Boolean) {
+        if (inputSuppressed == suppressed) {
+            return
+        }
+        inputSuppressed = suppressed
+        if (suppressed) {
+            vad?.reset()
+            samplesChannel?.trySend(RESET_MARKER)
+            notifyStatus("Qwen ASR：TTS 播报中，暂停识别")
+        } else if (active) {
+            vad?.reset()
+            samplesChannel?.trySend(RESET_MARKER)
+            notifyStatus("Qwen ASR：继续监听")
+        }
     }
 
     private fun ensureEngine(modelDir: File) {
@@ -161,6 +178,9 @@ class QwenAsrSession(
             while (active && isActive) {
                 val read = audioRecord?.read(buffer, 0, buffer.size) ?: break
                 if (read > 0) {
+                    if (inputSuppressed) {
+                        continue
+                    }
                     val samples = FloatArray(read) { index -> buffer[index] / PCM_16BIT_SCALE }
                     channel.send(samples)
                 }
@@ -193,10 +213,23 @@ class QwenAsrSession(
         var speechStartOffset = 0
         var lastDecodeAt = System.currentTimeMillis()
         var lastPartialText = ""
+        fun resetRecognitionBuffer() {
+            currentVad.reset()
+            buffer.clear()
+            offset = 0
+            speechStarted = false
+            speechStartOffset = 0
+            lastDecodeAt = System.currentTimeMillis()
+            lastPartialText = ""
+        }
 
         for (samples in channel) {
             if (!active || samples.isEmpty()) {
                 break
+            }
+            if (isResetMarker(samples) || inputSuppressed) {
+                resetRecognitionBuffer()
+                continue
             }
 
             buffer.addAll(samples.asIterable())
@@ -218,7 +251,7 @@ class QwenAsrSession(
                 offset - speechStartOffset >= MIN_PARTIAL_SAMPLES
             ) {
                 val text = decode(currentRecognizer, buffer.subList(speechStartOffset, offset).toFloatArray())
-                if (text.isNotBlank() && text != lastPartialText) {
+                if (!inputSuppressed && text.isNotBlank() && text != lastPartialText) {
                     lastPartialText = text
                     notifyPartial(text)
                 }
@@ -236,7 +269,7 @@ class QwenAsrSession(
                 lastDecodeAt = System.currentTimeMillis()
                 lastPartialText = ""
 
-                if (finalText.isNotBlank()) {
+                if (!inputSuppressed && finalText.isNotBlank()) {
                     notifyFinal(finalText, segment.samples.copyOf())
                     notifyStatus("Qwen ASR：继续监听")
                 }
@@ -281,6 +314,11 @@ class QwenAsrSession(
         private const val MIN_PARTIAL_SAMPLES = SAMPLE_RATE / 2
         private const val PARTIAL_DECODE_INTERVAL_MS = 900L
         private const val PCM_16BIT_SCALE = 32768.0f
+        private val RESET_MARKER = FloatArray(1) { Float.NaN }
+
+        private fun isResetMarker(samples: FloatArray): Boolean {
+            return samples.size == 1 && samples[0].isNaN()
+        }
     }
 }
 

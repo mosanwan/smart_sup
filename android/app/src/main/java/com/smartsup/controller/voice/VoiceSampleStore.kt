@@ -32,6 +32,13 @@ object VoiceSampleStore {
         return File(context.filesDir, "voice_samples").apply { mkdirs() }
     }
 
+    fun countSavedSamples(context: Context): Int {
+        val dir = samplesDir(context)
+        return dir.listFiles { file ->
+            file.isFile && file.extension.equals("json", ignoreCase = true)
+        }?.size ?: 0
+    }
+
     fun save(context: Context, samples: FloatArray, metadata: VoiceSampleMetadata): File {
         val dir = samplesDir(context)
         val baseName = DateTimeFormatter.ofPattern("yyyyMMdd_HHmmss_SSS")

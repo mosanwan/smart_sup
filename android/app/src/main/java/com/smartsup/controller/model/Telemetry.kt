@@ -8,6 +8,8 @@ data class Telemetry(
     val imuAvailable: Boolean? = null,
     val headingDegrees: Float? = null,
     val targetHeadingDegrees: Float? = null,
+    val leftOutputPercent: Int? = null,
+    val rightOutputPercent: Int? = null,
     val statusFields: Map<String, String> = emptyMap(),
     val controllerMessage: String = "等待连接",
     val lastSentCommand: String = "--",

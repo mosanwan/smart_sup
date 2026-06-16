@@ -1,8 +1,6 @@
 package com.smartsup.controller.ui
 
 import android.Manifest
-import android.content.Context
-import android.content.ContextWrapper
 import android.content.pm.PackageManager
 import androidx.activity.compose.rememberLauncherForActivityResult
 import androidx.activity.result.contract.ActivityResultContracts
@@ -33,11 +31,9 @@ import androidx.compose.ui.Modifier
 import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.platform.LocalContext
 import androidx.core.content.ContextCompat
-import androidx.lifecycle.Lifecycle
-import androidx.lifecycle.LifecycleEventObserver
-import androidx.lifecycle.LifecycleOwner
 import com.smartsup.controller.control.ControlViewModel
 import com.smartsup.controller.model.AppTab
+import com.smartsup.controller.service.ControlForegroundService
 import com.smartsup.controller.voice.QwenAsrSession
 
 @Composable
@@ -50,6 +46,7 @@ fun AppScreen(viewModel: ControlViewModel) {
     AppAsrHost(
         voiceControlEnabled = controlState.voiceControlEnabled,
         voiceSamplingEnabled = controlState.voiceSamplingEnabled,
+        voiceReplySuppressingRecognition = controlState.voiceReplySuppressingRecognition,
         onStatusChange = viewModel::setVoiceAsrStatus,
         onStarting = viewModel::markVoiceAsrStarting,
         onStopped = viewModel::markVoiceAsrStopped,
@@ -87,11 +84,19 @@ fun AppScreen(viewModel: ControlViewModel) {
     ) { paddingValues ->
         val modifier = Modifier.padding(paddingValues)
         when (selectedTab) {
-            AppTab.Navigation -> NavigationScreen(modifier = modifier)
+            AppTab.Navigation -> NavigationScreen(
+                state = controlState,
+                modifier = modifier,
+                onSyncTrack = viewModel::requestTrackLogSync,
+                onPlaybackIndexChange = viewModel::setGpsPlaybackIndex,
+            )
             AppTab.Control -> ControlScreen(
                 state = controlState,
                 maxThrottlePercent = settingsState.maxThrottlePercent,
+                fineTuneStepPercent = settingsState.fineTuneStepPercent,
                 gearPercents = settingsState.gearPercents,
+                leftEscReversed = settingsState.leftEscReversed,
+                rightEscReversed = settingsState.rightEscReversed,
                 modifier = modifier,
                 onArm = { viewModel.setArmed(true) },
                 onDisarm = { viewModel.setArmed(false) },
@@ -100,6 +105,8 @@ fun AppScreen(viewModel: ControlViewModel) {
                 onLeftThrottleRelease = viewModel::returnLeftThrottleToGear,
                 onRightThrottleRelease = viewModel::returnRightThrottleToGear,
                 onGearSelected = viewModel::setThrottleGear,
+                onFineTuneDecrease = viewModel::decreaseThrottleFineTune,
+                onFineTuneIncrease = viewModel::increaseThrottleFineTune,
                 onEnableHeadingLock = viewModel::enableHeadingLock,
                 onDisableHeadingLock = viewModel::cancelHeadingLock,
                 onToggleVoiceControl = viewModel::toggleVoiceControl,
@@ -126,10 +133,19 @@ fun AppScreen(viewModel: ControlViewModel) {
                 onDisconnect = viewModel::disconnectBluetooth,
                 onAutoReconnectChange = viewModel::setAutoReconnect,
                 onMaxThrottleChange = viewModel::setMaxThrottlePercent,
+                onVoicePowerLimitChange = viewModel::setVoicePowerLimitPercent,
+                onFineTuneStepChange = viewModel::setFineTuneStepPercent,
                 onGearThrottleChange = viewModel::setGearThrottlePercent,
                 onRampLimitChange = viewModel::setRampLimitEnabled,
                 onLeftEscReversedChange = viewModel::setLeftEscReversed,
                 onRightEscReversedChange = viewModel::setRightEscReversed,
+                onHeadingLockToleranceChange = viewModel::setHeadingLockToleranceDegrees,
+                onHeadingLockFullCorrectionChange = viewModel::setHeadingLockFullCorrectionDegrees,
+                onHeadingLockNeutralReverseChange = viewModel::setHeadingLockNeutralReversePercent,
+                onStartMagCalibration = viewModel::startMagCalibration,
+                onSaveMagCalibration = viewModel::saveMagCalibration,
+                onClearMagCalibration = viewModel::clearMagCalibration,
+                onRefreshMagCalibrationStatus = viewModel::refreshMagCalibrationStatus,
                 onCheckUpdates = viewModel::checkForUpdates,
                 onInstallAppUpdate = viewModel::installLatestAppUpdate,
                 onUpdateEsp32FromGitHub = viewModel::downloadAndUploadLatestEsp32Firmware,
@@ -143,6 +159,7 @@ fun AppScreen(viewModel: ControlViewModel) {
 private fun AppAsrHost(
     voiceControlEnabled: Boolean,
     voiceSamplingEnabled: Boolean,
+    voiceReplySuppressingRecognition: Boolean,
     onStatusChange: (String) -> Unit,
     onStarting: (String) -> Unit,
     onStopped: (String) -> Unit,
@@ -151,18 +168,12 @@ private fun AppAsrHost(
     onFinalSegment: (String, FloatArray) -> Unit,
 ) {
     val context = LocalContext.current
-    val lifecycleOwner = remember(context) { context.findLifecycleOwner() }
     val latestOnPartialText = rememberUpdatedState(onPartialText)
     val latestOnFinalText = rememberUpdatedState(onFinalText)
     val latestOnFinalSegment = rememberUpdatedState(onFinalSegment)
     val latestOnStatusChange = rememberUpdatedState(onStatusChange)
     val latestOnStarting = rememberUpdatedState(onStarting)
     val latestOnStopped = rememberUpdatedState(onStopped)
-    var isLifecycleStarted by remember(lifecycleOwner) {
-        mutableStateOf(
-            lifecycleOwner?.lifecycle?.currentState?.isAtLeast(Lifecycle.State.STARTED) ?: true,
-        )
-    }
     var hasRecordAudioPermission by remember {
         mutableStateOf(
             ContextCompat.checkSelfPermission(
@@ -191,41 +202,33 @@ private fun AppAsrHost(
         )
     }
 
-    DisposableEffect(lifecycleOwner) {
-        if (lifecycleOwner == null) {
-            onDispose { }
-        } else {
-            val observer = LifecycleEventObserver { _, _ ->
-                isLifecycleStarted = lifecycleOwner.lifecycle.currentState.isAtLeast(Lifecycle.State.STARTED)
-            }
-            lifecycleOwner.lifecycle.addObserver(observer)
-            onDispose { lifecycleOwner.lifecycle.removeObserver(observer) }
-        }
-    }
-
     LaunchedEffect(Unit) {
         if (!hasRecordAudioPermission) {
             permissionLauncher.launch(Manifest.permission.RECORD_AUDIO)
         }
     }
 
-    LaunchedEffect(hasRecordAudioPermission, isLifecycleStarted, voiceControlEnabled, voiceSamplingEnabled, qwenAsrSession) {
+    LaunchedEffect(hasRecordAudioPermission, voiceControlEnabled, voiceSamplingEnabled, qwenAsrSession) {
         val shouldRunAsr = hasRecordAudioPermission &&
-            isLifecycleStarted &&
             (voiceControlEnabled || voiceSamplingEnabled)
         if (shouldRunAsr) {
+            ControlForegroundService.start(context)
             latestOnStarting.value("Qwen ASR：初始化模型")
             qwenAsrSession.start()
         } else {
             qwenAsrSession.stop()
+            ControlForegroundService.stop(context)
             latestOnStopped.value(
                 when {
                     !hasRecordAudioPermission -> "Qwen ASR：等待录音权限"
-                    !isLifecycleStarted -> "Qwen ASR：前台恢复后继续监听"
                     else -> "Qwen ASR：已暂停"
                 },
             )
         }
+    }
+
+    LaunchedEffect(voiceReplySuppressingRecognition, qwenAsrSession) {
+        qwenAsrSession.setInputSuppressed(voiceReplySuppressingRecognition)
     }
 
     DisposableEffect(qwenAsrSession) {
@@ -245,12 +248,4 @@ private fun AppTab.color() = when (this) {
     AppTab.Control -> Color(0xFF2E7D32)
     AppTab.Voice -> Color(0xFFE65100)
     AppTab.Settings -> Color(0xFF546E7A)
-}
-
-private tailrec fun Context.findLifecycleOwner(): LifecycleOwner? {
-    return when (this) {
-        is LifecycleOwner -> this
-        is ContextWrapper -> baseContext.findLifecycleOwner()
-        else -> null
-    }
 }

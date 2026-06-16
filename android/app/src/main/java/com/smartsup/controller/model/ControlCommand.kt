@@ -12,12 +12,18 @@ data class ControlCommand(
     val headingLockEnabled: Boolean = false,
     val headingLockRequestId: Int? = null,
     val headingLockBaseThrottlePercent: Int = 0,
+    val headingLockToleranceDegrees: Int = 4,
+    val headingLockFullCorrectionDegrees: Int = 6,
+    val headingLockNeutralReversePercent: Int = 70,
+    val headingLockTargetOffsetDegrees: Int? = null,
+    val voicePowerLimitPercent: Int = 70,
     val leftEscReversed: Boolean = false,
     val rightEscReversed: Boolean = false,
 ) {
     init {
         require(leftThrottlePercent in -100..100)
         require(rightThrottlePercent in -100..100)
+        require(voicePowerLimitPercent in 5..100) { "声控功率限制只允许 5..100%" }
         if (mode == ControlCommandMode.TurnAngle) {
             require(armed) { "角度转向命令必须在已解锁状态下发送" }
             require(source == CommandSource.Voice) { "角度转向当前只开放语音来源" }
@@ -30,29 +36,46 @@ data class ControlCommand(
         if (mode == ControlCommandMode.HeadingLock) {
             require(armed) { "航向锁定命令必须在已解锁状态下发送" }
             require(headingLockBaseThrottlePercent in -100..100)
+            require(headingLockToleranceDegrees in 1..20) { "航向锁定容差只允许 1..20 度" }
+            require(headingLockFullCorrectionDegrees in 5..180) { "航向锁定最大转向角只允许 5..180 度" }
+            require(headingLockNeutralReversePercent in 0..100) { "空档锁航最大反推只允许 0..100%" }
+            require(headingLockFullCorrectionDegrees > headingLockToleranceDegrees) {
+                "航向锁定最大转向角必须大于容差"
+            }
             if (headingLockEnabled) {
                 requireNotNull(headingLockRequestId) { "航向锁定命令缺少请求 ID" }
                 require(headingLockRequestId in 1..65535) { "航向锁定请求 ID 超出范围" }
+            }
+            headingLockTargetOffsetDegrees?.let {
+                require(it in -90..90) { "航向锁定目标偏移只允许 -90..90 度" }
             }
         }
     }
 
     fun toWireLine(): String {
+        val voiceLimitToken = if (source == CommandSource.Voice) ";VMAX=$voicePowerLimitPercent" else ""
         return when (mode) {
             ControlCommandMode.Throttle -> {
-                "SRC=${source.wireValue};ARM=${if (armed) 1 else 0};L=$leftThrottlePercent;R=$rightThrottlePercent"
+                "SRC=${source.wireValue};ARM=${if (armed) 1 else 0};L=$leftThrottlePercent;R=$rightThrottlePercent" +
+                    voiceLimitToken
             }
             ControlCommandMode.TurnAngle -> {
                 "SRC=${source.wireValue};ARM=1;MODE=${mode.wireValue};DIR=${turnDirection!!.wireValue};" +
                     "ANGLE=$turnAngleDegrees;TID=$turnRequestId;" +
-                    "LREV=${if (leftEscReversed) 1 else 0};RREV=${if (rightEscReversed) 1 else 0}"
+                    "LREV=${if (leftEscReversed) 1 else 0};RREV=${if (rightEscReversed) 1 else 0}" +
+                    voiceLimitToken
             }
             ControlCommandMode.HeadingLock -> {
                 val idToken = if (headingLockEnabled) ";HID=$headingLockRequestId" else ""
+                val offsetToken = headingLockTargetOffsetDegrees?.let { ";HOFF=$it" } ?: ""
                 "SRC=${source.wireValue};ARM=1;MODE=${mode.wireValue};" +
-                    "HLOCK=${if (headingLockEnabled) 1 else 0};BASE=$headingLockBaseThrottlePercent" +
+                    "HLOCK=${if (headingLockEnabled) 1 else 0};BASE=$headingLockBaseThrottlePercent;" +
+                    "HTOL=$headingLockToleranceDegrees;HFULL=$headingLockFullCorrectionDegrees;" +
+                    "HREV=$headingLockNeutralReversePercent" +
                     idToken +
-                    ";LREV=${if (leftEscReversed) 1 else 0};RREV=${if (rightEscReversed) 1 else 0}"
+                    offsetToken +
+                    ";LREV=${if (leftEscReversed) 1 else 0};RREV=${if (rightEscReversed) 1 else 0}" +
+                    voiceLimitToken
             }
         }
     }

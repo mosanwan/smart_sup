@@ -3,7 +3,11 @@ package com.smartsup.controller.transport
 import com.smartsup.controller.model.ControlCommand
 import com.smartsup.controller.model.ControlCommandMode
 import com.smartsup.controller.model.Telemetry
+import com.smartsup.controller.model.TrackLogEvent
+import kotlinx.coroutines.flow.MutableSharedFlow
 import kotlinx.coroutines.flow.MutableStateFlow
+import kotlinx.coroutines.flow.SharedFlow
+import kotlinx.coroutines.flow.asSharedFlow
 import kotlinx.coroutines.flow.StateFlow
 import kotlinx.coroutines.flow.asStateFlow
 
@@ -11,8 +15,10 @@ class MockControlTransport : ControlTransport {
     private val telemetryState = MutableStateFlow(
         Telemetry(controllerMessage = "模拟链路：未连接真实控制器"),
     )
+    private val trackLogEventFlow = MutableSharedFlow<TrackLogEvent>()
 
     override val telemetry: StateFlow<Telemetry> = telemetryState.asStateFlow()
+    override val trackLogEvents: SharedFlow<TrackLogEvent> = trackLogEventFlow.asSharedFlow()
 
     override suspend fun connect() {
         telemetryState.value = Telemetry(
@@ -23,6 +29,8 @@ class MockControlTransport : ControlTransport {
             imuAvailable = true,
             headingDegrees = 0f,
             targetHeadingDegrees = null,
+            leftOutputPercent = 0,
+            rightOutputPercent = 0,
             statusFields = mapOf(
                 "ARMED" to "0",
                 "L" to "0",
@@ -74,6 +82,13 @@ class MockControlTransport : ControlTransport {
                 }
             },
             lastSentCommand = command.toWireLine(),
+        )
+    }
+
+    override suspend fun sendRawLine(line: String) {
+        telemetryState.value = telemetryState.value.copy(
+            controllerMessage = "模拟原始命令：$line",
+            lastSentCommand = line,
         )
     }
 

@@ -21,6 +21,7 @@ import androidx.compose.material.icons.outlined.Replay
 import androidx.compose.material.icons.outlined.Security
 import androidx.compose.material.icons.outlined.SkipNext
 import androidx.compose.material.icons.outlined.Terminal
+import androidx.compose.material3.AlertDialog
 import androidx.compose.material3.Card
 import androidx.compose.material3.CardDefaults
 import androidx.compose.material3.Icon
@@ -29,8 +30,12 @@ import androidx.compose.material3.OutlinedTextField
 import androidx.compose.material3.Surface
 import androidx.compose.material3.Switch
 import androidx.compose.material3.Text
+import androidx.compose.material3.TextButton
 import androidx.compose.runtime.Composable
+import androidx.compose.runtime.getValue
+import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.remember
+import androidx.compose.runtime.setValue
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.graphics.Color
@@ -51,6 +56,8 @@ fun VoiceTestScreen(
     onSaveVoiceSample: (Boolean) -> Unit,
     onDiscardVoiceSample: () -> Unit,
 ) {
+    var samplingDialogVisible by remember { mutableStateOf(false) }
+
     Column(
         modifier = modifier
             .fillMaxSize()
@@ -58,49 +65,24 @@ fun VoiceTestScreen(
             .padding(12.dp),
         verticalArrangement = Arrangement.spacedBy(10.dp),
     ) {
-        VoiceInfoCard(
-            title = "ASR 运行状态",
+        VoiceStatusCard(
             value = state.voiceAsrStatus,
-            emphasized = true,
-            icon = Icons.Outlined.Mic,
-            color = Color(0xFF1565C0),
         )
 
-        VoiceSamplingCard(
+        VoiceTranscriptionCard(
+            value = state.voiceInputText,
+            onValueChange = onVoiceInputChange,
+        )
+
+        VoiceSamplingEntryButton(
             state = state,
-            onEnabledChange = onVoiceSamplingEnabledChange,
-            onSaveCorrect = { onSaveVoiceSample(true) },
-            onSaveFailure = { onSaveVoiceSample(false) },
-            onDiscard = onDiscardVoiceSample,
-            onNextTarget = onNextVoiceSampleTarget,
+            onClick = {
+                samplingDialogVisible = true
+                onVoiceSamplingEnabledChange(true)
+            },
         )
 
         VoiceCommandListCard()
-
-        Card(
-            colors = CardDefaults.cardColors(containerColor = MaterialTheme.colorScheme.surface),
-            modifier = Modifier.fillMaxWidth(),
-        ) {
-            Column(
-                modifier = Modifier.padding(12.dp),
-                verticalArrangement = Arrangement.spacedBy(8.dp),
-            ) {
-                VoiceSectionHeader(
-                    title = "ASR 转写文本",
-                    icon = Icons.Outlined.Terminal,
-                    color = Color(0xFF546E7A),
-                )
-                OutlinedTextField(
-                    value = state.voiceInputText,
-                    onValueChange = onVoiceInputChange,
-                    modifier = Modifier
-                        .fillMaxWidth()
-                        .heightIn(min = 132.dp),
-                    minLines = 4,
-                    maxLines = 8,
-                )
-            }
-        }
 
         VoiceInfoCard(
             title = "候选命令",
@@ -131,16 +113,65 @@ fun VoiceTestScreen(
             color = if (state.armed) Color(0xFF2E7D32) else Color(0xFFC62828),
         )
     }
+
+    if (samplingDialogVisible) {
+        VoiceSamplingDialog(
+            state = state,
+            onDismiss = {
+                samplingDialogVisible = false
+                onVoiceSamplingEnabledChange(false)
+            },
+            onEnabledChange = onVoiceSamplingEnabledChange,
+            onVoiceInputChange = onVoiceInputChange,
+            onSaveCorrect = { onSaveVoiceSample(true) },
+            onSaveFailure = { onSaveVoiceSample(false) },
+            onDiscard = onDiscardVoiceSample,
+            onNextTarget = onNextVoiceSampleTarget,
+        )
+    }
 }
 
 @Composable
-private fun VoiceSamplingCard(
-    state: ControlUiState,
-    onEnabledChange: (Boolean) -> Unit,
-    onSaveCorrect: () -> Unit,
-    onSaveFailure: () -> Unit,
-    onDiscard: () -> Unit,
-    onNextTarget: () -> Unit,
+private fun VoiceStatusCard(value: String) {
+    val color = Color(0xFF1565C0)
+    Card(
+        colors = CardDefaults.cardColors(containerColor = color.copy(alpha = 0.1f)),
+        modifier = Modifier.fillMaxWidth(),
+    ) {
+        Row(
+            modifier = Modifier.padding(horizontal = 12.dp, vertical = 10.dp),
+            horizontalArrangement = Arrangement.spacedBy(8.dp),
+            verticalAlignment = Alignment.CenterVertically,
+        ) {
+            Icon(
+                imageVector = Icons.Outlined.Mic,
+                contentDescription = "ASR 运行状态",
+                tint = color,
+                modifier = Modifier.size(20.dp),
+            )
+            Text(
+                "ASR 运行状态",
+                style = MaterialTheme.typography.labelLarge,
+                fontWeight = FontWeight.SemiBold,
+                color = color,
+                maxLines = 1,
+            )
+            Text(
+                value,
+                modifier = Modifier.weight(1f),
+                style = MaterialTheme.typography.bodyMedium,
+                fontWeight = FontWeight.SemiBold,
+                maxLines = 1,
+                overflow = TextOverflow.Ellipsis,
+            )
+        }
+    }
+}
+
+@Composable
+private fun VoiceTranscriptionCard(
+    value: String,
+    onValueChange: (String) -> Unit,
 ) {
     Card(
         colors = CardDefaults.cardColors(containerColor = MaterialTheme.colorScheme.surface),
@@ -148,100 +179,220 @@ private fun VoiceSamplingCard(
     ) {
         Column(
             modifier = Modifier.padding(12.dp),
-            verticalArrangement = Arrangement.spacedBy(10.dp),
+            verticalArrangement = Arrangement.spacedBy(8.dp),
+        ) {
+            VoiceSectionHeader(
+                title = "ASR 转写文本",
+                icon = Icons.Outlined.Terminal,
+                color = Color(0xFF546E7A),
+            )
+            OutlinedTextField(
+                value = value,
+                onValueChange = onValueChange,
+                modifier = Modifier
+                    .fillMaxWidth()
+                    .heightIn(min = 96.dp),
+                minLines = 3,
+                maxLines = 6,
+            )
+        }
+    }
+}
+
+@Composable
+private fun VoiceSamplingEntryButton(
+    state: ControlUiState,
+    onClick: () -> Unit,
+) {
+    val color = if (state.voiceSamplingEnabled) Color(0xFF2E7D32) else Color(0xFFE65100)
+    Surface(
+        onClick = onClick,
+        shape = RoundedCornerShape(8.dp),
+        color = color.copy(alpha = 0.12f),
+        modifier = Modifier.fillMaxWidth(),
+    ) {
+        Row(
+            modifier = Modifier.padding(horizontal = 12.dp, vertical = 11.dp),
+            horizontalArrangement = Arrangement.SpaceBetween,
+            verticalAlignment = Alignment.CenterVertically,
         ) {
             Row(
-                modifier = Modifier.fillMaxWidth(),
-                horizontalArrangement = Arrangement.SpaceBetween,
+                horizontalArrangement = Arrangement.spacedBy(8.dp),
+                verticalAlignment = Alignment.CenterVertically,
+                modifier = Modifier.weight(1f),
             ) {
-                Column(
-                    modifier = Modifier.weight(1f),
-                    verticalArrangement = Arrangement.spacedBy(2.dp),
-                ) {
-                    VoiceSectionHeader(
-                        title = "采样模式",
-                        icon = Icons.AutoMirrored.Outlined.PlaylistAddCheck,
-                        color = if (state.voiceSamplingEnabled) Color(0xFF2E7D32) else Color(0xFF546E7A),
+                Icon(
+                    imageVector = Icons.AutoMirrored.Outlined.PlaylistAddCheck,
+                    contentDescription = "采样模式",
+                    tint = color,
+                    modifier = Modifier.size(20.dp),
+                )
+                Column(verticalArrangement = Arrangement.spacedBy(2.dp)) {
+                    Text(
+                        "采样模式",
+                        style = MaterialTheme.typography.labelLarge,
+                        fontWeight = FontWeight.SemiBold,
+                        color = color,
+                        maxLines = 1,
+                        overflow = TextOverflow.Ellipsis,
                     )
                     Text(
-                        if (state.voiceSamplingEnabled) "只录音，不发送控制命令" else "关闭时按正常语音控制执行",
+                        if (state.voiceSamplingEnabled) "采样中，点击查看" else "点击弹出采样窗口",
+                        style = MaterialTheme.typography.bodySmall,
+                        color = MaterialTheme.colorScheme.onSurfaceVariant,
+                        maxLines = 1,
+                        overflow = TextOverflow.Ellipsis,
+                    )
+                }
+            }
+            Text(
+                "打开",
+                style = MaterialTheme.typography.labelMedium,
+                fontWeight = FontWeight.SemiBold,
+                color = color,
+                maxLines = 1,
+            )
+        }
+    }
+}
+
+@Composable
+private fun VoiceSamplingDialog(
+    state: ControlUiState,
+    onDismiss: () -> Unit,
+    onEnabledChange: (Boolean) -> Unit,
+    onVoiceInputChange: (String) -> Unit,
+    onSaveCorrect: () -> Unit,
+    onSaveFailure: () -> Unit,
+    onDiscard: () -> Unit,
+    onNextTarget: () -> Unit,
+) {
+    AlertDialog(
+        onDismissRequest = onDismiss,
+        title = {
+            VoiceSectionHeader(
+                title = "采样模式",
+                icon = Icons.AutoMirrored.Outlined.PlaylistAddCheck,
+                color = if (state.voiceSamplingEnabled) Color(0xFF2E7D32) else Color(0xFF546E7A),
+            )
+        },
+        text = {
+            Column(
+                modifier = Modifier
+                    .fillMaxWidth()
+                    .heightIn(max = 560.dp)
+                    .verticalScroll(rememberScrollState()),
+                verticalArrangement = Arrangement.spacedBy(10.dp),
+            ) {
+                Row(
+                    modifier = Modifier.fillMaxWidth(),
+                    horizontalArrangement = Arrangement.SpaceBetween,
+                ) {
+                    Column(
+                        modifier = Modifier.weight(1f),
+                        verticalArrangement = Arrangement.spacedBy(2.dp),
+                    ) {
+                        VoiceSectionHeader(
+                            title = "采样模式",
+                            icon = Icons.AutoMirrored.Outlined.PlaylistAddCheck,
+                            color = if (state.voiceSamplingEnabled) Color(0xFF2E7D32) else Color(0xFF546E7A),
+                        )
+                        Text(
+                            if (state.voiceSamplingEnabled) "只录音，不发送控制命令" else "关闭时按正常语音控制执行",
+                            style = MaterialTheme.typography.bodySmall,
+                            color = MaterialTheme.colorScheme.onSurfaceVariant,
+                        )
+                    }
+                    Switch(
+                        checked = state.voiceSamplingEnabled,
+                        onCheckedChange = onEnabledChange,
+                    )
+                }
+
+                OutlinedTextField(
+                    value = state.voiceInputText,
+                    onValueChange = onVoiceInputChange,
+                    label = { Text("ASR 转写文本") },
+                    modifier = Modifier
+                        .fillMaxWidth()
+                        .heightIn(min = 88.dp),
+                    minLines = 3,
+                    maxLines = 5,
+                )
+
+                Text(
+                    "目标：${state.voiceSampleTargetText}",
+                    style = MaterialTheme.typography.bodyLarge,
+                    fontWeight = FontWeight.SemiBold,
+                )
+                Text(
+                    "标签：${state.voiceSampleTargetLabel}",
+                    style = MaterialTheme.typography.bodySmall,
+                    color = MaterialTheme.colorScheme.onSurfaceVariant,
+                )
+                Text(
+                    state.voiceSampleExpectedCommand,
+                    style = MaterialTheme.typography.bodySmall,
+                    fontWeight = FontWeight.Medium,
+                )
+
+                VoiceSampleField("本次 ASR", state.voiceSamplePendingText.ifBlank { "无待保存样本" })
+                VoiceSampleField("解析结果", state.voiceSamplePendingCommand)
+                VoiceSampleField("保存状态", "${state.voiceSampleLastMessage}；已保存 ${state.voiceSampleSavedCount} 条")
+
+                Row(
+                    modifier = Modifier.fillMaxWidth(),
+                    horizontalArrangement = Arrangement.spacedBy(8.dp),
+                ) {
+                    VoiceActionButton(
+                        onClick = onSaveCorrect,
+                        enabled = state.voiceSamplingEnabled && state.voiceSamplePendingText.isNotBlank(),
+                        text = "正确",
+                        icon = Icons.Outlined.CheckCircle,
+                        color = Color(0xFF2E7D32),
+                        modifier = Modifier.weight(1f),
+                    )
+                    VoiceActionButton(
+                        onClick = onSaveFailure,
+                        enabled = state.voiceSamplingEnabled && state.voiceSamplePendingText.isNotBlank(),
+                        text = "失败",
+                        icon = Icons.Outlined.ErrorOutline,
+                        color = Color(0xFFC62828),
+                        modifier = Modifier.weight(1f),
+                    )
+                    VoiceActionButton(
+                        onClick = onDiscard,
+                        enabled = state.voiceSamplingEnabled && state.voiceSamplePendingText.isNotBlank(),
+                        text = "重录",
+                        icon = Icons.Outlined.Replay,
+                        color = Color(0xFFE65100),
+                        modifier = Modifier.weight(1f),
+                    )
+                }
+                VoiceActionButton(
+                    onClick = onNextTarget,
+                    enabled = state.voiceSamplingEnabled,
+                    text = "下一条",
+                    icon = Icons.Outlined.SkipNext,
+                    color = Color(0xFF1565C0),
+                    modifier = Modifier.fillMaxWidth(),
+                )
+
+                if (state.voiceSampleDirectory.isNotBlank()) {
+                    Text(
+                        state.voiceSampleDirectory,
                         style = MaterialTheme.typography.bodySmall,
                         color = MaterialTheme.colorScheme.onSurfaceVariant,
                     )
                 }
-                Switch(
-                    checked = state.voiceSamplingEnabled,
-                    onCheckedChange = onEnabledChange,
-                )
             }
-
-            Text(
-                "目标：${state.voiceSampleTargetText}",
-                style = MaterialTheme.typography.bodyLarge,
-                fontWeight = FontWeight.SemiBold,
-            )
-            Text(
-                "标签：${state.voiceSampleTargetLabel}",
-                style = MaterialTheme.typography.bodySmall,
-                color = MaterialTheme.colorScheme.onSurfaceVariant,
-            )
-            Text(
-                state.voiceSampleExpectedCommand,
-                style = MaterialTheme.typography.bodySmall,
-                fontWeight = FontWeight.Medium,
-            )
-
-            VoiceSampleField("本次 ASR", state.voiceSamplePendingText.ifBlank { "无待保存样本" })
-            VoiceSampleField("解析结果", state.voiceSamplePendingCommand)
-            VoiceSampleField("保存状态", "${state.voiceSampleLastMessage}；已保存 ${state.voiceSampleSavedCount} 条")
-
-            Row(
-                modifier = Modifier.fillMaxWidth(),
-                horizontalArrangement = Arrangement.spacedBy(8.dp),
-            ) {
-                VoiceActionButton(
-                    onClick = onSaveCorrect,
-                    enabled = state.voiceSamplingEnabled && state.voiceSamplePendingText.isNotBlank(),
-                    text = "正确",
-                    icon = Icons.Outlined.CheckCircle,
-                    color = Color(0xFF2E7D32),
-                    modifier = Modifier.weight(1f),
-                )
-                VoiceActionButton(
-                    onClick = onSaveFailure,
-                    enabled = state.voiceSamplingEnabled && state.voiceSamplePendingText.isNotBlank(),
-                    text = "失败",
-                    icon = Icons.Outlined.ErrorOutline,
-                    color = Color(0xFFC62828),
-                    modifier = Modifier.weight(1f),
-                )
-                VoiceActionButton(
-                    onClick = onDiscard,
-                    enabled = state.voiceSamplingEnabled && state.voiceSamplePendingText.isNotBlank(),
-                    text = "重录",
-                    icon = Icons.Outlined.Replay,
-                    color = Color(0xFFE65100),
-                    modifier = Modifier.weight(1f),
-                )
+        },
+        confirmButton = {
+            TextButton(onClick = onDismiss) {
+                Text("结束采样")
             }
-            VoiceActionButton(
-                onClick = onNextTarget,
-                enabled = state.voiceSamplingEnabled,
-                text = "下一条",
-                icon = Icons.Outlined.SkipNext,
-                color = Color(0xFF1565C0),
-                modifier = Modifier.fillMaxWidth(),
-            )
-
-            if (state.voiceSampleDirectory.isNotBlank()) {
-                Text(
-                    state.voiceSampleDirectory,
-                    style = MaterialTheme.typography.bodySmall,
-                    color = MaterialTheme.colorScheme.onSurfaceVariant,
-                )
-            }
-        }
-    }
+        },
+    )
 }
 
 @Composable
@@ -280,6 +431,11 @@ private fun VoiceCommandListCard() {
                 command = "SRC=VOICE;ARM=0;L=0;R=0",
             ),
             VoiceCommandItem(
+                name = "空档",
+                examples = "空档、空挡、回空档、回空挡",
+                command = "SRC=VOICE;ARM=1;L=0;R=0",
+            ),
+            VoiceCommandItem(
                 name = "前进一档",
                 examples = "前进、前进一档、慢速前进、低速前进、向前、往前",
                 command = "SRC=VOICE;ARM=1;L=20;R=20",
@@ -290,9 +446,29 @@ private fun VoiceCommandListCard() {
                 command = "SRC=VOICE;ARM=1;L=30;R=30",
             ),
             VoiceCommandItem(
+                name = "前进三档",
+                examples = "前进三档、前进3档、向前三档、往前3档",
+                command = "SRC=VOICE;ARM=1;L=60;R=60",
+            ),
+            VoiceCommandItem(
+                name = "前进四档",
+                examples = "前进四档、前进4档、向前四档、往前4档",
+                command = "设置页四档目标，默认 80%，继续受声控功率限制",
+            ),
+            VoiceCommandItem(
                 name = "后退一档",
                 examples = "后退、倒车、向后、往后、慢速后退",
                 command = "SRC=VOICE;ARM=1;L=-15;R=-15",
+            ),
+            VoiceCommandItem(
+                name = "微调加速",
+                examples = "快点、快一点、快一点点、再快一点、加速、速度快点",
+                command = "当前左右目标按设置页微调步进加速，默认 3%",
+            ),
+            VoiceCommandItem(
+                name = "微调减速",
+                examples = "慢点、慢一点、慢一点点、再慢一点、减速、速度慢点",
+                command = "当前左右目标按设置页微调步进减速，向 0% 收敛",
             ),
             VoiceCommandItem(
                 name = "左转",
@@ -307,11 +483,11 @@ private fun VoiceCommandListCard() {
             VoiceCommandItem(
                 name = "角度转向",
                 examples = "左转30度、右转十五度、往左90度",
-                command = "SRC=VOICE;ARM=1;MODE=TURN;DIR=LEFT;ANGLE=30;TID=...",
+                command = "未锁航时用 MODE=TURN；锁航中改为 MODE=HEADING_LOCK;HOFF=...",
             ),
             VoiceCommandItem(
                 name = "保持航向",
-                examples = "保持航向、方向锁定、开启航向锁定",
+                examples = "保持航向、锁定当前航向、方向锁定、开启航向锁定",
                 command = "SRC=VOICE;ARM=1;MODE=HEADING_LOCK;HLOCK=1;BASE=...;HID=...",
             ),
             VoiceCommandItem(
@@ -373,6 +549,7 @@ private fun VoiceInfoCard(
     emphasized: Boolean = false,
     icon: ImageVector,
     color: Color,
+    maxLines: Int = Int.MAX_VALUE,
 ) {
     Card(
         colors = CardDefaults.cardColors(containerColor = color.copy(alpha = 0.1f)),
@@ -391,6 +568,8 @@ private fun VoiceInfoCard(
                 value,
                 style = if (emphasized) MaterialTheme.typography.bodyLarge else MaterialTheme.typography.bodyMedium,
                 fontWeight = if (emphasized) FontWeight.SemiBold else FontWeight.Medium,
+                maxLines = maxLines,
+                overflow = TextOverflow.Ellipsis,
             )
         }
     }

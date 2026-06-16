@@ -9,6 +9,8 @@ enum class VoiceCommandAction {
     Control,
     EnableVoiceControl,
     DisableVoiceControl,
+    FineTuneFaster,
+    FineTuneSlower,
 }
 
 sealed interface VoiceParseResult {
@@ -41,6 +43,8 @@ data class VoiceCommandEvaluation(
 object VoiceCommandParser {
     private const val FORWARD_GEAR_1 = 20
     private const val FORWARD_GEAR_2 = 30
+    private const val FORWARD_GEAR_3 = 60
+    private const val FORWARD_GEAR_4 = 80
     private const val REVERSE_GEAR_1 = -15
     private const val TURN_INNER = 10
     private const val TURN_OUTER = 25
@@ -63,9 +67,7 @@ object VoiceCommandParser {
         "立刻",
         "执行",
         "一下子",
-        "一点点",
         "一下",
-        "一点",
         "吧",
         "呢",
         "啊",
@@ -75,9 +77,22 @@ object VoiceCommandParser {
     private val stopWords = listOf("停止", "停下", "急停", "锁定", "刹车", "停住", "制动")
     private val forwardWords = listOf("前进", "向前", "往前")
     private val reverseWords = listOf("后退", "倒车", "倒退", "向后", "往后")
+    private val fasterWords = listOf("快点", "快一点", "快一点点", "快一些", "再快点", "再快一点", "再快一点点", "加速", "速度快点", "稍微快点")
+    private val slowerWords = listOf("慢点", "慢一点", "慢一点点", "慢一些", "再慢点", "再慢一点", "再慢一点点", "减速", "速度慢点", "稍微慢点")
     private val leftWords = listOf("左转", "左拐", "左转弯", "往左", "向左")
     private val rightWords = listOf("右转", "右拐", "右转弯", "往右", "向右")
-    private val holdHeadingWords = listOf("保持航向", "锁定航向", "方向锁定", "航向锁定", "开启航向锁定", "开启方向锁定")
+    private val holdHeadingWords = listOf(
+        "保持航向",
+        "保持当前航向",
+        "锁定航向",
+        "锁定当前航向",
+        "锁住当前航向",
+        "方向锁定",
+        "锁定当前方向",
+        "航向锁定",
+        "开启航向锁定",
+        "开启方向锁定",
+    )
     private val cancelHoldHeadingWords = listOf(
         "取消保持航向",
         "退出保持航向",
@@ -91,24 +106,6 @@ object VoiceCommandParser {
         "最大油门",
         "满油门",
         "高速",
-        "三档",
-        "3档",
-        "第三档",
-        "三当",
-        "3当",
-        "三旦",
-        "3旦",
-        "三段",
-        "3段",
-        "四档",
-        "4档",
-        "第四档",
-        "四当",
-        "4当",
-        "四旦",
-        "4旦",
-        "四段",
-        "4段",
     )
     private val secondReverseWords = listOf("后退二档", "后退2档", "倒车二档", "倒车2档", "倒退二档", "倒退2档")
     private val commandSpecs = listOf(
@@ -131,6 +128,26 @@ object VoiceCommandParser {
             minScore = MIN_STOP_SCORE,
             command = command(armed = false, left = 0, right = 0),
             phrases = stopWords,
+        ),
+        CommandSpec(
+            label = "空档",
+            minScore = MIN_MOVE_SCORE,
+            command = command(armed = true, left = 0, right = 0),
+            phrases = listOf("空档", "空挡", "回空档", "回空挡", "挂空档", "挂空挡"),
+        ),
+        CommandSpec(
+            label = "快点",
+            minScore = MIN_MOVE_SCORE,
+            command = null,
+            action = VoiceCommandAction.FineTuneFaster,
+            phrases = fasterWords,
+        ),
+        CommandSpec(
+            label = "慢点",
+            minScore = MIN_MOVE_SCORE,
+            command = null,
+            action = VoiceCommandAction.FineTuneSlower,
+            phrases = slowerWords,
         ),
         CommandSpec(
             label = "前进一档",
@@ -161,6 +178,34 @@ object VoiceCommandParser {
                 "向前2档",
                 "往前二档",
                 "往前2档",
+            ),
+        ),
+        CommandSpec(
+            label = "前进三档",
+            minScore = MIN_MOVE_SCORE,
+            command = command(armed = true, left = FORWARD_GEAR_3, right = FORWARD_GEAR_3),
+            phrases = listOf(
+                "前进三档",
+                "前进3档",
+                "前进第三档",
+                "向前三档",
+                "向前3档",
+                "往前三档",
+                "往前3档",
+            ),
+        ),
+        CommandSpec(
+            label = "前进四档",
+            minScore = MIN_MOVE_SCORE,
+            command = command(armed = true, left = FORWARD_GEAR_4, right = FORWARD_GEAR_4),
+            phrases = listOf(
+                "前进四档",
+                "前进4档",
+                "前进第四档",
+                "向前四档",
+                "向前4档",
+                "往前四档",
+                "往前4档",
             ),
         ),
         CommandSpec(
@@ -270,7 +315,7 @@ object VoiceCommandParser {
             return VoiceParseResult.Rejected("命令候选不够明确")
         }
 
-        if (top.action == VoiceCommandAction.EnableVoiceControl || top.action == VoiceCommandAction.DisableVoiceControl) {
+        if (top.action != VoiceCommandAction.Control) {
             return VoiceParseResult.Accepted(
                 label = top.label,
                 command = top.command,
@@ -281,14 +326,20 @@ object VoiceCommandParser {
         val hasCancelHoldHeading = cancelHoldHeadingWords.any { it in commandText }
         val hasHoldHeading = !hasCancelHoldHeading && holdHeadingWords.any { it in commandText }
         val hasStop = !hasHoldHeading && !hasCancelHoldHeading && stopWords.any { it in commandText }
+        val hasNeutral = !hasStop && listOf("空档", "空挡").any { it in commandText }
         val hasForward = forwardWords.any { it in commandText }
         val hasReverse = reverseWords.any { it in commandText }
+        val hasFaster = fasterWords.any { it in commandText }
+        val hasSlower = slowerWords.any { it in commandText }
         val hasLeft = leftWords.any { it in commandText }
         val hasRight = rightWords.any { it in commandText }
         val actionCount = listOf(
             hasStop,
+            hasNeutral,
             hasForward,
             hasReverse,
+            hasFaster,
+            hasSlower,
             hasLeft,
             hasRight,
             hasHoldHeading,
@@ -455,6 +506,18 @@ object VoiceCommandParser {
             .replace("2段", "2档")
             .replace("二当", "二档")
             .replace("二段", "二档")
+            .replace("3当", "3档")
+            .replace("3旦", "3档")
+            .replace("3段", "3档")
+            .replace("三当", "三档")
+            .replace("三旦", "三档")
+            .replace("三段", "三档")
+            .replace("4当", "4档")
+            .replace("4旦", "4档")
+            .replace("4段", "4档")
+            .replace("四当", "四档")
+            .replace("四旦", "四档")
+            .replace("四段", "四档")
             .replace("到车", "倒车")
             .replace("挺止", "停止")
             .replace("听止", "停止")
