@@ -83,6 +83,7 @@ constexpr float RADIANS_TO_DEGREES = 57.2957795f;
 constexpr float MAG_HEADING_OFFSET_DEGREES = 0.0f;
 constexpr float MAG_HEADING_FILTER_ALPHA = 0.22f;
 constexpr uint32_t MAG_HEADING_INTERVAL_MS = 20;
+constexpr uint32_t PHONE_HEADING_TIMEOUT_MS = 1000;
 constexpr uint16_t MAG_CAL_MIN_SAMPLES = 80;
 constexpr int32_t MAG_CAL_MIN_RANGE = 100;
 constexpr float MAG_CAL_MIN_SCALE = 0.2f;
@@ -192,9 +193,12 @@ bool magnetometerAvailable = false;
 bool headingFilterInitialized = false;
 bool magCalibrationValid = false;
 bool magCalibrationActive = false;
+bool phoneHeadingEnabled = false;
 uint8_t imuAddress = ICM20948_ADDR_LOW;
 uint8_t imuFailureCount = 0;
 float headingDegrees = 0.0f;
+float phoneHeadingDegrees = 0.0f;
+uint32_t lastPhoneHeadingMs = 0;
 float magOffsetX = 0.0f;
 float magOffsetY = 0.0f;
 float magScaleX = 1.0f;
@@ -278,6 +282,8 @@ bool trackLogHasLastRecorded = false;
 bool trackLogHasLastCandidate = false;
 TrackLogRecord trackLogLastRecorded = {};
 TrackLogRecord trackLogLastCandidate = {};
+
+void forceNeutralAndDisarm();
 
 void IRAM_ATTR handleGpsPps() {
   gpsPpsCount += 1;
@@ -446,6 +452,34 @@ float normalizeAngle180(float degrees) {
 
 float shortestAngleError(float targetDegrees, float currentDegrees) {
   return normalizeAngle180(targetDegrees - currentDegrees);
+}
+
+float normalizeCompass360(float degrees) {
+  while (degrees >= 360.0f) {
+    degrees -= 360.0f;
+  }
+  while (degrees < 0.0f) {
+    degrees += 360.0f;
+  }
+  return degrees;
+}
+
+bool hasFreshPhoneHeading(uint32_t now) {
+  return phoneHeadingEnabled && lastPhoneHeadingMs != 0 && now - lastPhoneHeadingMs <= PHONE_HEADING_TIMEOUT_MS;
+}
+
+bool hasUsableHeading(uint32_t now) {
+  return hasFreshPhoneHeading(now) || (!phoneHeadingEnabled && imuAvailable);
+}
+
+const char* activeHeadingSourceName(uint32_t now) {
+  if (hasFreshPhoneHeading(now)) {
+    return "PHONE";
+  }
+  if (!phoneHeadingEnabled && magnetometerAvailable) {
+    return "MAG";
+  }
+  return "NONE";
 }
 
 bool imuWrite(uint8_t reg, uint8_t value) {
@@ -1422,6 +1456,14 @@ void updateTrackLog(uint32_t now) {
 }
 
 void updateImu(uint32_t now) {
+  if (phoneHeadingEnabled) {
+    if (!hasFreshPhoneHeading(now) && (turnControlActive || headingLockActive)) {
+      forceNeutralAndDisarm();
+      Serial.println("Phone heading timeout; autonomous control disabled");
+      SerialBT.println("STATUS;ARMED=0;FAULT=PHONE_HEADING_TIMEOUT");
+    }
+    return;
+  }
   if (!imuAvailable) {
     return;
   }
@@ -1724,6 +1766,34 @@ bool parseTurnDirectionToken(const char* token, TurnDirection& outDirection) {
   return false;
 }
 
+bool parseHeadingSourceToken(const char* token, bool& outUsePhoneHeading) {
+  if (strcmp(token, "H_SRC=PHONE") == 0) {
+    outUsePhoneHeading = true;
+    return true;
+  }
+  if (strcmp(token, "H_SRC=IMU") == 0) {
+    outUsePhoneHeading = false;
+    return true;
+  }
+  return false;
+}
+
+bool parseHeadingDegreesToken(const char* token, const char* prefix, float& outValue) {
+  const size_t prefixLen = strlen(prefix);
+  if (strncmp(token, prefix, prefixLen) != 0) {
+    return false;
+  }
+
+  char* end = nullptr;
+  const float parsed = strtof(token + prefixLen, &end);
+  if (end == token + prefixLen || *end != '\0' || !isfinite(parsed) || parsed < -180.0f || parsed > 360.0f) {
+    return false;
+  }
+
+  outValue = normalizeCompass360(parsed);
+  return true;
+}
+
 bool parseUnsignedToken(const char* token, const char* prefix, uint16_t minValue, uint16_t maxValue, uint16_t& outValue) {
   const size_t prefixLen = strlen(prefix);
   if (strncmp(token, prefix, prefixLen) != 0) {
@@ -1944,13 +2014,13 @@ void applyTurnAngleCommand(
   bool leftEscReversed,
   bool rightEscReversed
 ) {
-  if (!imuAvailable) {
-    SerialBT.println("ERR;IMU_UNAVAILABLE");
-    Serial.println("Turn angle rejected: IMU unavailable");
+  const uint32_t now = millis();
+  if (!hasUsableHeading(now)) {
+    SerialBT.println("ERR;HEADING_UNAVAILABLE");
+    Serial.println("Turn angle rejected: heading unavailable");
     return;
   }
 
-  const uint32_t now = millis();
   lastValidBtCommandMs = now;
   lastCommandSource = CommandSource::Voice;
   lastCommandMode = CommandMode::TurnAngle;
@@ -2011,9 +2081,9 @@ void updateTurnControl(uint32_t now) {
     return;
   }
 
-  if (!imuAvailable) {
+  if (!hasUsableHeading(now)) {
     forceNeutralAndDisarm();
-    SerialBT.println("STATUS;ARMED=0;FAULT=IMU_UNAVAILABLE");
+    SerialBT.println("STATUS;ARMED=0;FAULT=HEADING_UNAVAILABLE");
     return;
   }
 
@@ -2083,9 +2153,9 @@ void applyHeadingLockCommand(
     return;
   }
 
-  if (!imuAvailable) {
-    SerialBT.println("ERR;IMU_UNAVAILABLE");
-    Serial.println("Heading lock rejected: IMU unavailable");
+  if (!hasUsableHeading(now)) {
+    SerialBT.println("ERR;HEADING_UNAVAILABLE");
+    Serial.println("Heading lock rejected: heading unavailable");
     return;
   }
 
@@ -2177,9 +2247,9 @@ void updateHeadingLockControl(uint32_t now) {
     return;
   }
 
-  if (!imuAvailable) {
+  if (!hasUsableHeading(now)) {
     forceNeutralAndDisarm();
-    SerialBT.println("STATUS;ARMED=0;FAULT=IMU_UNAVAILABLE");
+    SerialBT.println("STATUS;ARMED=0;FAULT=HEADING_UNAVAILABLE");
     return;
   }
 
@@ -2394,11 +2464,14 @@ void applyBluetoothLine(char* line) {
   bool sawHeadingLockNeutralReverse = false;
   bool sawHeadingLockTargetOffset = false;
   bool sawVoicePowerLimit = false;
+  bool sawHeadingSource = false;
+  bool sawPhoneHeading = false;
   bool badSource = false;
   bool badMode = false;
   bool badTurnToken = false;
   bool badHeadingLockToken = false;
   bool badVoiceLimitToken = false;
+  bool badHeadingSourceToken = false;
   bool nextArmed = false;
   int8_t nextLeftPercent = 0;
   int8_t nextRightPercent = 0;
@@ -2414,7 +2487,9 @@ void applyBluetoothLine(char* line) {
   uint16_t nextHeadingLockFullCorrectionDegrees = DEFAULT_HEADING_LOCK_FULL_CORRECTION_DEGREES;
   uint16_t nextHeadingLockNeutralReversePercent = DEFAULT_HEADING_LOCK_NEUTRAL_REVERSE_PERCENT;
   int16_t nextHeadingLockTargetOffsetDegrees = 0;
+  float nextPhoneHeadingDegrees = 0.0f;
   bool nextHeadingLockEnabled = false;
+  bool nextUsePhoneHeading = false;
   bool nextLeftEscReversed = false;
   bool nextRightEscReversed = false;
 
@@ -2504,6 +2579,12 @@ void applyBluetoothLine(char* line) {
     ) {
       badVoiceLimitToken = badVoiceLimitToken || sawVoicePowerLimit;
       sawVoicePowerLimit = true;
+    } else if (parseHeadingSourceToken(token, nextUsePhoneHeading)) {
+      badHeadingSourceToken = badHeadingSourceToken || sawHeadingSource;
+      sawHeadingSource = true;
+    } else if (parseHeadingDegreesToken(token, "PHDG=", nextPhoneHeadingDegrees)) {
+      badHeadingSourceToken = badHeadingSourceToken || sawPhoneHeading;
+      sawPhoneHeading = true;
     } else if (parseBoolToken(token, "LREV=", nextLeftEscReversed)) {
       // Optional Android-side ESC direction setting for autonomous angle turns.
     } else if (parseBoolToken(token, "RREV=", nextRightEscReversed)) {
@@ -2532,6 +2613,8 @@ void applyBluetoothLine(char* line) {
       badHeadingLockToken = true;
     } else if (strncmp(token, "VMAX=", 5) == 0) {
       badVoiceLimitToken = true;
+    } else if (strncmp(token, "H_SRC=", 6) == 0 || strncmp(token, "PHDG=", 5) == 0) {
+      badHeadingSourceToken = true;
     }
     token = strtok(nullptr, ";");
   }
@@ -2558,6 +2641,26 @@ void applyBluetoothLine(char* line) {
     SerialBT.println("ERR;BAD_VOICE_LIMIT");
     Serial.println("Bluetooth command rejected: bad voice power limit");
     return;
+  }
+
+  if (badHeadingSourceToken) {
+    SerialBT.println("ERR;BAD_HEADING_SOURCE");
+    Serial.println("Bluetooth command rejected: bad heading source");
+    return;
+  }
+
+  const uint32_t commandNow = millis();
+  if (sawHeadingSource) {
+    phoneHeadingEnabled = nextUsePhoneHeading;
+    if (!phoneHeadingEnabled) {
+      lastPhoneHeadingMs = 0;
+    }
+  }
+  if (phoneHeadingEnabled && sawPhoneHeading) {
+    phoneHeadingDegrees = nextPhoneHeadingDegrees;
+    headingDegrees = normalizeAngle180(nextPhoneHeadingDegrees);
+    headingFilterInitialized = true;
+    lastPhoneHeadingMs = commandNow;
   }
 
   if (nextMode == CommandMode::TurnAngle) {
@@ -2784,7 +2887,13 @@ void publishBluetoothStatus(uint32_t now) {
   SerialBT.print(";HDG=");
   SerialBT.print(headingDegrees, 1);
   SerialBT.print(";HSRC=");
-  SerialBT.print(magnetometerAvailable ? "MAG" : "NONE");
+  SerialBT.print(activeHeadingSourceName(now));
+  if (phoneHeadingEnabled) {
+    SerialBT.print(";PHDG=");
+    SerialBT.print(phoneHeadingDegrees, 1);
+    SerialBT.print(";PHDG_AGE=");
+    SerialBT.print(lastPhoneHeadingMs == 0 ? 9999 : now - lastPhoneHeadingMs);
+  }
   SerialBT.print(";MCAL=");
   SerialBT.print(magCalibrationStateName());
   SerialBT.print(";MCNT=");

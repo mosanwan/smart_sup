@@ -1,5 +1,7 @@
 package com.smartsup.controller.model
 
+import java.util.Locale
+
 data class ControlCommand(
     val leftThrottlePercent: Int = 0,
     val rightThrottlePercent: Int = 0,
@@ -19,11 +21,16 @@ data class ControlCommand(
     val voicePowerLimitPercent: Int = 70,
     val leftEscReversed: Boolean = false,
     val rightEscReversed: Boolean = false,
+    val usePhoneHeading: Boolean = false,
+    val phoneHeadingDegrees: Float? = null,
 ) {
     init {
         require(leftThrottlePercent in -100..100)
         require(rightThrottlePercent in -100..100)
         require(voicePowerLimitPercent in 5..100) { "声控功率限制只允许 5..100%" }
+        if (phoneHeadingDegrees != null) {
+            require(phoneHeadingDegrees in 0f..360f) { "手机航向只允许 0..360 度" }
+        }
         if (mode == ControlCommandMode.TurnAngle) {
             require(armed) { "角度转向命令必须在已解锁状态下发送" }
             require(source == CommandSource.Voice) { "角度转向当前只开放语音来源" }
@@ -54,16 +61,25 @@ data class ControlCommand(
 
     fun toWireLine(): String {
         val voiceLimitToken = if (source == CommandSource.Voice) ";VMAX=$voicePowerLimitPercent" else ""
+        val headingSourceToken = if (usePhoneHeading) {
+            ";H_SRC=PHONE" + phoneHeadingDegrees?.let {
+                ";PHDG=${String.format(Locale.US, "%.1f", it)}"
+            }.orEmpty()
+        } else {
+            ";H_SRC=IMU"
+        }
         return when (mode) {
             ControlCommandMode.Throttle -> {
                 "SRC=${source.wireValue};ARM=${if (armed) 1 else 0};L=$leftThrottlePercent;R=$rightThrottlePercent" +
-                    voiceLimitToken
+                    voiceLimitToken +
+                    headingSourceToken
             }
             ControlCommandMode.TurnAngle -> {
                 "SRC=${source.wireValue};ARM=1;MODE=${mode.wireValue};DIR=${turnDirection!!.wireValue};" +
                     "ANGLE=$turnAngleDegrees;TID=$turnRequestId;" +
                     "LREV=${if (leftEscReversed) 1 else 0};RREV=${if (rightEscReversed) 1 else 0}" +
-                    voiceLimitToken
+                    voiceLimitToken +
+                    headingSourceToken
             }
             ControlCommandMode.HeadingLock -> {
                 val idToken = if (headingLockEnabled) ";HID=$headingLockRequestId" else ""
@@ -75,7 +91,8 @@ data class ControlCommand(
                     idToken +
                     offsetToken +
                     ";LREV=${if (leftEscReversed) 1 else 0};RREV=${if (rightEscReversed) 1 else 0}" +
-                    voiceLimitToken
+                    voiceLimitToken +
+                    headingSourceToken
             }
         }
     }

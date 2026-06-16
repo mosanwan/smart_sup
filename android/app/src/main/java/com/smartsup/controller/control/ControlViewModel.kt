@@ -8,6 +8,10 @@ import android.content.BroadcastReceiver
 import android.content.Context
 import android.content.Intent
 import android.content.IntentFilter
+import android.hardware.Sensor
+import android.hardware.SensorEvent
+import android.hardware.SensorEventListener
+import android.hardware.SensorManager
 import android.net.Uri
 import android.os.Build
 import android.os.Handler
@@ -70,6 +74,11 @@ class ControlViewModel(application: Application) : AndroidViewModel(application)
     }
     private val gpsTrackStore = GpsTrackStore(application)
     private val appUpdateInstaller = AppUpdateInstaller(application)
+    private val sensorManager = application.getSystemService(SensorManager::class.java)
+    private val phoneHeadingRotation = FloatArray(9)
+    private val phoneHeadingOrientation = FloatArray(3)
+    private var phoneHeadingSensorRegistered = false
+    private var phoneHeadingLastUpdateMs = 0L
     private var latestRelease: ReleaseInfo? = null
     private var downloadedApk: File? = null
     private var activeTurnCommand: ControlCommand? = null
@@ -85,6 +94,31 @@ class ControlViewModel(application: Application) : AndroidViewModel(application)
     private var lastAcceptedVoiceCommandAtMs = 0L
     private val pendingVoiceReplies = ArrayDeque<String>()
     private val mainHandler = Handler(Looper.getMainLooper())
+    private val phoneHeadingListener = object : SensorEventListener {
+        override fun onSensorChanged(event: SensorEvent) {
+            if (
+                event.sensor.type != Sensor.TYPE_ROTATION_VECTOR &&
+                event.sensor.type != Sensor.TYPE_GEOMAGNETIC_ROTATION_VECTOR
+            ) {
+                return
+            }
+            SensorManager.getRotationMatrixFromVector(phoneHeadingRotation, event.values)
+            SensorManager.getOrientation(phoneHeadingRotation, phoneHeadingOrientation)
+            val headingDegrees = normalizeCompassDegrees(
+                Math.toDegrees(phoneHeadingOrientation[0].toDouble()).toFloat(),
+            )
+            phoneHeadingLastUpdateMs = System.currentTimeMillis()
+            mutableUiState.update {
+                it.copy(
+                    phoneHeadingDegrees = headingDegrees,
+                    phoneHeadingAvailable = true,
+                    phoneHeadingSensorName = event.sensor.name,
+                )
+            }
+        }
+
+        override fun onAccuracyChanged(sensor: Sensor?, accuracy: Int) = Unit
+    }
     private val voiceSampleTargets = listOf(
         VoiceSampleTarget("开始声控", "开始声控", "本地状态：恢复执行语音控制命令"),
         VoiceSampleTarget("停止声控", "停止声控", "SRC=VOICE;ARM=0;L=0;R=0"),
@@ -161,6 +195,7 @@ class ControlViewModel(application: Application) : AndroidViewModel(application)
             )
         }
         initializeVoiceReplyEngine()
+        updatePhoneHeadingSensorRegistration()
         refreshBluetoothDevices()
     }
 
@@ -653,8 +688,28 @@ class ControlViewModel(application: Application) : AndroidViewModel(application)
         sendCurrentCommand()
     }
 
+    fun setUsePhoneHeading(enabled: Boolean) {
+        preferences.edit().putBoolean(KEY_USE_PHONE_HEADING, enabled).apply()
+        mutableSettingsState.update { it.copy(usePhoneHeading = enabled) }
+        updatePhoneHeadingSensorRegistration()
+        clearAutonomousCommands()
+        mutableUiState.update {
+            it.copy(
+                commandSource = CommandSource.App,
+                headingLockEnabled = false,
+                statusMessage = if (enabled) {
+                    "航向来源已切到手机指南针，请把手机固定在板体上"
+                } else {
+                    "航向来源已切回 ESP32 IMU"
+                },
+            )
+        }
+        sendCurrentCommand()
+    }
+
     fun enableHeadingLock() {
         val state = mutableUiState.value
+        val settings = mutableSettingsState.value
         if (state.connectionState != ConnectionState.Connected) {
             mutableUiState.update { it.copy(statusMessage = "航向锁定拒绝：未连接 ESP32") }
             return
@@ -663,7 +718,11 @@ class ControlViewModel(application: Application) : AndroidViewModel(application)
             mutableUiState.update { it.copy(statusMessage = "航向锁定拒绝：请先手动解锁") }
             return
         }
-        if (state.telemetry.imuAvailable == false) {
+        if (settings.usePhoneHeading && currentPhoneHeadingDegreesOrNull() == null) {
+            mutableUiState.update { it.copy(statusMessage = "航向锁定拒绝：手机指南针暂无有效读数") }
+            return
+        }
+        if (!settings.usePhoneHeading && state.telemetry.imuAvailable == false) {
             mutableUiState.update { it.copy(statusMessage = "航向锁定拒绝：IMU 不可用") }
             return
         }
@@ -1848,6 +1907,82 @@ class ControlViewModel(application: Application) : AndroidViewModel(application)
         }
     }
 
+    private fun ControlCommand.withRuntimeHeadingSource(): ControlCommand {
+        if (!mutableSettingsState.value.usePhoneHeading) {
+            return copy(usePhoneHeading = false, phoneHeadingDegrees = null)
+        }
+        return copy(
+            usePhoneHeading = true,
+            phoneHeadingDegrees = currentPhoneHeadingDegreesOrNull(),
+        )
+    }
+
+    private fun currentPhoneHeadingDegreesOrNull(): Float? {
+        val state = mutableUiState.value
+        val ageMs = System.currentTimeMillis() - phoneHeadingLastUpdateMs
+        return state.phoneHeadingDegrees
+            ?.takeIf { state.phoneHeadingAvailable && ageMs <= PHONE_HEADING_STALE_MS }
+    }
+
+    private fun updatePhoneHeadingSensorRegistration() {
+        if (mutableSettingsState.value.usePhoneHeading) {
+            startPhoneHeadingSensor()
+        } else {
+            stopPhoneHeadingSensor(clearReading = true)
+        }
+    }
+
+    private fun startPhoneHeadingSensor() {
+        if (phoneHeadingSensorRegistered) {
+            return
+        }
+        val sensor = sensorManager?.getDefaultSensor(Sensor.TYPE_ROTATION_VECTOR)
+            ?: sensorManager?.getDefaultSensor(Sensor.TYPE_GEOMAGNETIC_ROTATION_VECTOR)
+        if (sensor == null) {
+            mutableUiState.update {
+                it.copy(
+                    phoneHeadingAvailable = false,
+                    phoneHeadingSensorName = "无可用指南针传感器",
+                    statusMessage = "手机没有可用的指南针航向传感器",
+                )
+            }
+            return
+        }
+        phoneHeadingSensorRegistered = sensorManager.registerListener(
+            phoneHeadingListener,
+            sensor,
+            SensorManager.SENSOR_DELAY_GAME,
+        )
+        mutableUiState.update {
+            it.copy(
+                phoneHeadingAvailable = false,
+                phoneHeadingSensorName = sensor.name,
+            )
+        }
+    }
+
+    private fun stopPhoneHeadingSensor(clearReading: Boolean) {
+        if (phoneHeadingSensorRegistered) {
+            sensorManager?.unregisterListener(phoneHeadingListener)
+            phoneHeadingSensorRegistered = false
+        }
+        if (clearReading) {
+            phoneHeadingLastUpdateMs = 0L
+            mutableUiState.update {
+                it.copy(
+                    phoneHeadingDegrees = null,
+                    phoneHeadingAvailable = false,
+                    phoneHeadingSensorName = "",
+                )
+            }
+        }
+    }
+
+    private fun normalizeCompassDegrees(degrees: Float): Float {
+        val normalized = degrees % 360f
+        return if (normalized < 0f) normalized + 360f else normalized
+    }
+
     private fun uploadEsp32FirmwareBytes(firmwareBytes: ByteArray, sourceLabel: String) {
         viewModelScope.launch {
             val nextTransport = transport
@@ -2437,7 +2572,7 @@ class ControlViewModel(application: Application) : AndroidViewModel(application)
     private suspend fun sendCommand(command: ControlCommand): Boolean {
         val activeTransport = transport ?: return false
         return runCatching {
-            activeTransport.send(command)
+            activeTransport.send(command.withRuntimeHeadingSource())
         }.onFailure { error ->
             handleTransportError(error)
         }.isSuccess
@@ -2727,6 +2862,7 @@ class ControlViewModel(application: Application) : AndroidViewModel(application)
             headingLockNeutralReversePercent = coerceHeadingLockNeutralReversePercent(
                 preferences.getInt(KEY_HEADING_LOCK_NEUTRAL_REVERSE_PERCENT, 70),
             ),
+            usePhoneHeading = preferences.getBoolean(KEY_USE_PHONE_HEADING, false),
             githubToken = preferences.getString(KEY_GITHUB_TOKEN, null).orEmpty(),
         )
     }
@@ -2748,6 +2884,7 @@ class ControlViewModel(application: Application) : AndroidViewModel(application)
             }
             discoveryReceiverRegistered = false
         }
+        stopPhoneHeadingSensor(clearReading = true)
         voiceReplyEngine?.stop()
         voiceReplyEngine?.shutdown()
         voiceReplyEngine = null
@@ -2771,9 +2908,11 @@ class ControlViewModel(application: Application) : AndroidViewModel(application)
         private const val KEY_HEADING_LOCK_NEUTRAL_REVERSE_PERCENT = "heading_lock_neutral_reverse_percent"
         private const val KEY_LEFT_ESC_REVERSED = "left_esc_reversed"
         private const val KEY_RIGHT_ESC_REVERSED = "right_esc_reversed"
+        private const val KEY_USE_PHONE_HEADING = "use_phone_heading"
         private const val KEY_GITHUB_TOKEN = "github_token"
         private const val KEY_GEAR_PREFIX = "gear_percent_"
         private const val COMMAND_HEARTBEAT_MS = 250L
+        private const val PHONE_HEADING_STALE_MS = 1_500L
         private const val MAX_TURN_REQUEST_ID = 65_535
         private const val VOICE_POWER_LIMIT_MIN = 5
         private const val VOICE_POWER_LIMIT_MAX = 100

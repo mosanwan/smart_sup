@@ -37,7 +37,7 @@ flowchart LR
 - ESC 按双向 RC PWM 信号处理：约 1000us 最大后退、1500us 中位/空闲、2000us 最大前进。实际以电调说明书和低功率实测为准。
 - Android 控制端第一版使用经典蓝牙 SPP，命令和失联保护见 [经典蓝牙控制 MVP](bluetooth_control_mvp.md)。
 - Android 本地语音控制只作为低速辅助输入，方案和限幅规则见 [Android 本地语音控制方案](voice_control_plan.md)。
-- 航向锁定当前使用 ICM20948 内置磁力计 X/Y 直接计算当前罗盘航向，避免陀螺仪零偏积分导致静止时航向持续累加；磁力计容易受电机、电流线、电池和金属件干扰，策略和限幅见 [经典蓝牙控制 MVP](bluetooth_control_mvp.md)。
+- 航向锁定默认使用 ICM20948 内置磁力计 X/Y 直接计算当前罗盘航向，避免陀螺仪零偏积分导致静止时航向持续累加；设置页也提供手机指南针测试来源，但手机必须固定在板体上。航向策略和限幅见 [经典蓝牙控制 MVP](bluetooth_control_mvp.md)。
 - GPS 第一版只用于实时定位、1Hz 轨迹缓存、Android 同步和历史回放，不参与推进安全闭环；方案见 [GPS 实时定位、轨迹记录和回放方案](gps_track_plan.md)。
 - 每个 ESP32 的三位硬件编号在出厂第一次 USB 刷入时写入 NVS/flash，流程见 [ESP32 出厂编号刷入流程](esp32_factory_provisioning.md)。
 - Android App 和 ESP32 固件更新走 GitHub Release，流程见 [GitHub 更新发布流程](update_release_flow.md)。

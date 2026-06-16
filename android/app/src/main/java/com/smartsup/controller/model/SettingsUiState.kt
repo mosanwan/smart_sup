@@ -19,6 +19,7 @@ data class SettingsUiState(
     val headingLockToleranceDegrees: Int = 4,
     val headingLockFullCorrectionDegrees: Int = 6,
     val headingLockNeutralReversePercent: Int = 70,
+    val usePhoneHeading: Boolean = false,
     val githubToken: String = "",
     val deviceNamePrefix: String = "SmartSUP-",
     val message: String = "在 App 内扫描并连接 SmartSUP ESP32 设备",

@@ -142,6 +142,7 @@ fun AppScreen(viewModel: ControlViewModel) {
                 onHeadingLockToleranceChange = viewModel::setHeadingLockToleranceDegrees,
                 onHeadingLockFullCorrectionChange = viewModel::setHeadingLockFullCorrectionDegrees,
                 onHeadingLockNeutralReverseChange = viewModel::setHeadingLockNeutralReversePercent,
+                onUsePhoneHeadingChange = viewModel::setUsePhoneHeading,
                 onStartMagCalibration = viewModel::startMagCalibration,
                 onSaveMagCalibration = viewModel::saveMagCalibration,
                 onClearMagCalibration = viewModel::clearMagCalibration,

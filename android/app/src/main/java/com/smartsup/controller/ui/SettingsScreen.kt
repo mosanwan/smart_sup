@@ -75,6 +75,7 @@ fun SettingsScreen(
     onHeadingLockToleranceChange: (Int) -> Unit,
     onHeadingLockFullCorrectionChange: (Int) -> Unit,
     onHeadingLockNeutralReverseChange: (Int) -> Unit,
+    onUsePhoneHeadingChange: (Boolean) -> Unit,
     onStartMagCalibration: () -> Unit,
     onSaveMagCalibration: () -> Unit,
     onClearMagCalibration: () -> Unit,
@@ -142,6 +143,8 @@ fun SettingsScreen(
 
         MagCalibrationSettingsCard(
             controlState = controlState,
+            settingsState = settingsState,
+            onUsePhoneHeadingChange = onUsePhoneHeadingChange,
             onStartMagCalibration = onStartMagCalibration,
             onSaveMagCalibration = onSaveMagCalibration,
             onClearMagCalibration = onClearMagCalibration,
@@ -545,6 +548,8 @@ private fun PercentSliderRow(
 @Composable
 private fun MagCalibrationSettingsCard(
     controlState: ControlUiState,
+    settingsState: SettingsUiState,
+    onUsePhoneHeadingChange: (Boolean) -> Unit,
     onStartMagCalibration: () -> Unit,
     onSaveMagCalibration: () -> Unit,
     onClearMagCalibration: () -> Unit,
@@ -564,13 +569,28 @@ private fun MagCalibrationSettingsCard(
             verticalArrangement = Arrangement.spacedBy(12.dp),
         ) {
             SettingsSectionHeader(
-                title = "航向校准",
+                title = "航向来源与校准",
                 icon = Icons.Outlined.Tune,
                 color = Color(0xFF00695C),
             )
             SettingsRow("连接", connectionText(controlState.connectionState))
             SettingsRow("航向来源", headingSourceText(statusFields["HSRC"]))
             SettingsRow("当前航向", statusFields["HDG"]?.let { "$it°" } ?: "--")
+            SwitchRow(
+                label = "使用手机指南针",
+                checked = settingsState.usePhoneHeading,
+                onCheckedChange = onUsePhoneHeadingChange,
+            )
+            SettingsRow(
+                "手机航向",
+                controlState.phoneHeadingDegrees?.let { "${it.roundToInt()}°" } ?: "--",
+            )
+            SettingsRow(
+                "手机传感器",
+                controlState.phoneHeadingSensorName.ifBlank {
+                    if (settingsState.usePhoneHeading) "等待传感器" else "--"
+                },
+            )
             SettingsRow("校准状态", magCalibrationStateText(calibrationState))
             SettingsRow("采样数量", statusFields["MCNT"] ?: "0")
             SettingsRow(
@@ -799,6 +819,7 @@ private fun connectionText(connectionState: ConnectionState): String {
 
 private fun headingSourceText(source: String?): String {
     return when (source) {
+        "PHONE" -> "手机指南针"
         "MAG" -> "磁力计"
         "NONE" -> "无"
         null -> "--"
