@@ -2032,7 +2032,7 @@ class ControlViewModel(application: Application) : AndroidViewModel(application)
                 mutableUpdateState.update {
                     it.copy(
                         esp32Uploading = false,
-                        message = "ESP32 固件已发送完成，等待设备校验并重启",
+                        message = "ESP32 固件已发送完成，设备会校验并重启；如果蓝牙断开，请重新连接",
                         progressText = "",
                     )
                 }
@@ -2591,6 +2591,7 @@ class ControlViewModel(application: Application) : AndroidViewModel(application)
     }
 
     private fun handleTransportError(error: Throwable) {
+        val updateStateBeforeDisconnect = mutableUpdateState.value
         transport = null
         telemetryJob?.cancel()
         commandHeartbeatJob?.cancel()
@@ -2610,6 +2611,20 @@ class ControlViewModel(application: Application) : AndroidViewModel(application)
         }
         mutableSettingsState.update {
             it.copy(message = "蓝牙链路异常：${error.message ?: "未知错误"}")
+        }
+        if (
+            updateStateBeforeDisconnect.esp32Uploading ||
+            updateStateBeforeDisconnect.message.contains("OTA") ||
+            updateStateBeforeDisconnect.message.contains("固件已发送完成") ||
+            updateStateBeforeDisconnect.message.contains("正在重启")
+        ) {
+            mutableUpdateState.update {
+                it.copy(
+                    esp32Uploading = false,
+                    message = "蓝牙已断开，ESP32 可能已重启；请重新连接后确认固件状态",
+                    progressText = "",
+                )
+            }
         }
     }
 
@@ -2681,7 +2696,44 @@ class ControlViewModel(application: Application) : AndroidViewModel(application)
         telemetryJob = viewModelScope.launch {
             nextTransport.telemetry.collect { telemetry ->
                 handleControllerErrorLine(telemetry.lastReceivedStatus)
+                handleOtaStatusLine(telemetry.lastReceivedStatus)
                 mutableUiState.update { it.copy(telemetry = telemetry) }
+            }
+        }
+    }
+
+    private fun handleOtaStatusLine(line: String) {
+        if (!line.startsWith("OTA;")) {
+            return
+        }
+        when {
+            line.startsWith("OTA;READY") -> {
+                mutableUpdateState.update {
+                    it.copy(message = "ESP32 已进入 OTA 接收模式")
+                }
+            }
+            line.startsWith("OTA;PROGRESS=") -> {
+                mutableUpdateState.update {
+                    it.copy(message = "ESP32 正在写入固件", progressText = line.removePrefix("OTA;PROGRESS="))
+                }
+            }
+            line.startsWith("OTA;OK") -> {
+                mutableUpdateState.update {
+                    it.copy(
+                        esp32Uploading = false,
+                        message = "ESP32 固件校验通过，设备正在重启；蓝牙断开后请重新连接",
+                        progressText = "",
+                    )
+                }
+            }
+            line.startsWith("OTA;ERR=") -> {
+                mutableUpdateState.update {
+                    it.copy(
+                        esp32Uploading = false,
+                        message = "ESP32 固件更新失败：${line.removePrefix("OTA;ERR=")}",
+                        progressText = "",
+                    )
+                }
             }
         }
     }

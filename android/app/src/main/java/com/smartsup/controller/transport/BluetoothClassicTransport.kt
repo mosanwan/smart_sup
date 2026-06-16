@@ -221,6 +221,13 @@ class BluetoothClassicTransport(
     }
 
     private fun Telemetry.withStatusLine(line: String): Telemetry {
+        if (line.startsWith("OTA;")) {
+            return copy(
+                controllerMessage = otaStatusMessage(line),
+                lastReceivedStatus = line,
+            )
+        }
+
         if (line.startsWith("ERR;")) {
             return copy(
                 controllerMessage = "ESP32 错误：${line.removePrefix("ERR;")}",
@@ -249,6 +256,16 @@ class BluetoothClassicTransport(
             statusFields = nextStatusFields,
             lastReceivedStatus = line,
         )
+    }
+
+    private fun otaStatusMessage(line: String): String {
+        return when {
+            line.startsWith("OTA;READY") -> "ESP32 OTA 准备接收"
+            line.startsWith("OTA;PROGRESS=") -> "ESP32 OTA 写入中 ${line.removePrefix("OTA;PROGRESS=")}"
+            line.startsWith("OTA;OK") -> "ESP32 OTA 校验通过，设备正在重启"
+            line.startsWith("OTA;ERR=") -> "ESP32 OTA 失败：${line.removePrefix("OTA;ERR=")}"
+            else -> "ESP32 OTA：$line"
+        }
     }
 
     private fun String.parseStatusFields(): Map<String, String> {
