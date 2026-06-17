@@ -483,12 +483,12 @@ private fun VoiceCommandListCard() {
             VoiceCommandItem(
                 name = "角度转向",
                 examples = "左转30度、右转十五度、往左90度",
-                command = "未锁航时用 MODE=TURN；锁航中改为 MODE=HEADING_LOCK;HOFF=...",
+                command = "App 用手机指南针本地计算目标航向，发送普通 L/R 心跳",
             ),
             VoiceCommandItem(
                 name = "保持航向",
                 examples = "保持航向、锁定当前航向、方向锁定、开启航向锁定",
-                command = "SRC=VOICE;ARM=1;MODE=HEADING_LOCK;HLOCK=1;BASE=...;HID=...",
+                command = "App 记录手机当前航向为目标，发送普通 L/R 心跳",
             ),
             VoiceCommandItem(
                 name = "取消航向锁定",

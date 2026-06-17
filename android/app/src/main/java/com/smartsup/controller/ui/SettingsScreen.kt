@@ -141,7 +141,7 @@ fun SettingsScreen(
             onHeadingLockNeutralReverseChange = onHeadingLockNeutralReverseChange,
         )
 
-        MagCalibrationSettingsCard(
+        PhoneHeadingSettingsCard(
             controlState = controlState,
             settingsState = settingsState,
             onUsePhoneHeadingChange = onUsePhoneHeadingChange,
@@ -546,7 +546,7 @@ private fun PercentSliderRow(
 }
 
 @Composable
-private fun MagCalibrationSettingsCard(
+private fun PhoneHeadingSettingsCard(
     controlState: ControlUiState,
     settingsState: SettingsUiState,
     onUsePhoneHeadingChange: (Boolean) -> Unit,
@@ -555,11 +555,6 @@ private fun MagCalibrationSettingsCard(
     onClearMagCalibration: () -> Unit,
     onRefreshMagCalibrationStatus: () -> Unit,
 ) {
-    val statusFields = controlState.telemetry.statusFields
-    val connected = controlState.connectionState == ConnectionState.Connected
-    val calibrationState = statusFields["MCAL"] ?: "UNKNOWN"
-    val calibrationActive = calibrationState == "ACTIVE"
-
     Card(
         colors = CardDefaults.cardColors(containerColor = MaterialTheme.colorScheme.surface),
         modifier = Modifier.fillMaxWidth(),
@@ -569,18 +564,12 @@ private fun MagCalibrationSettingsCard(
             verticalArrangement = Arrangement.spacedBy(12.dp),
         ) {
             SettingsSectionHeader(
-                title = "航向来源与校准",
+                title = "手机指南针航向",
                 icon = Icons.Outlined.Tune,
                 color = Color(0xFF00695C),
             )
             SettingsRow("连接", connectionText(controlState.connectionState))
-            SettingsRow("航向来源", headingSourceText(statusFields["HSRC"]))
-            SettingsRow("当前航向", statusFields["HDG"]?.let { "$it°" } ?: "--")
-            SwitchRow(
-                label = "使用手机指南针",
-                checked = settingsState.usePhoneHeading,
-                onCheckedChange = onUsePhoneHeadingChange,
-            )
+            SettingsRow("航向来源", "手机指南针")
             SettingsRow(
                 "手机航向",
                 controlState.phoneHeadingDegrees?.let { "${it.roundToInt()}°" } ?: "--",
@@ -591,59 +580,16 @@ private fun MagCalibrationSettingsCard(
                     if (settingsState.usePhoneHeading) "等待传感器" else "--"
                 },
             )
-            SettingsRow("校准状态", magCalibrationStateText(calibrationState))
-            SettingsRow("采样数量", statusFields["MCNT"] ?: "0")
             SettingsRow(
-                "覆盖范围",
-                listOfNotNull(statusFields["MRX"]?.let { "X $it" }, statusFields["MRY"]?.let { "Y $it" })
-                    .takeIf { it.isNotEmpty() }
-                    ?.joinToString(" / ")
-                    ?: "--",
+                "App 目标航向",
+                controlState.appHeadingLockTargetDegrees?.let { "${it.roundToInt()}°" } ?: "--",
             )
-
-            Row(
-                modifier = Modifier.fillMaxWidth(),
-                horizontalArrangement = Arrangement.spacedBy(10.dp),
-            ) {
-                SettingsActionButton(
-                    onClick = onStartMagCalibration,
-                    enabled = connected,
-                    text = "开始校准",
-                    icon = Icons.Outlined.Tune,
-                    color = Color(0xFF00695C),
-                    modifier = Modifier.weight(1f),
-                )
-                SettingsActionButton(
-                    onClick = onSaveMagCalibration,
-                    enabled = connected && calibrationActive,
-                    text = "保存校准",
-                    icon = Icons.Outlined.UploadFile,
-                    color = Color(0xFF2E7D32),
-                    modifier = Modifier.weight(1f),
-                )
-            }
-
-            Row(
-                modifier = Modifier.fillMaxWidth(),
-                horizontalArrangement = Arrangement.spacedBy(10.dp),
-            ) {
-                SettingsActionButton(
-                    onClick = onRefreshMagCalibrationStatus,
-                    enabled = connected,
-                    text = "刷新状态",
-                    icon = Icons.Outlined.Refresh,
-                    color = Color(0xFF1565C0),
-                    modifier = Modifier.weight(1f),
-                )
-                SettingsActionButton(
-                    onClick = onClearMagCalibration,
-                    enabled = connected && (calibrationActive || calibrationState == "SAVED"),
-                    text = "清除校准",
-                    icon = Icons.Outlined.LinkOff,
-                    color = Color(0xFFC62828),
-                    modifier = Modifier.weight(1f),
-                )
-            }
+            SettingsRow(
+                "App 航向误差",
+                controlState.appHeadingLockErrorDegrees?.let { "${it.roundToInt()}°" } ?: "--",
+            )
+            SettingsRow("App 差速修正", "${controlState.appHeadingLockCorrectionPercent}%")
+            SettingsRow("ESP32 航向闭环", "停用，仅执行左右 ESC 功率")
         }
     }
 }

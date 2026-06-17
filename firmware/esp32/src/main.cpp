@@ -61,7 +61,7 @@ constexpr int8_t TURN_MIN_OUTER_PERCENT = 14;
 constexpr int8_t TURN_MAX_OUTER_PERCENT = 24;
 constexpr float TURN_DONE_DEGREES = 3.0f;
 constexpr float TURN_SLOWDOWN_DEGREES = 45.0f;
-constexpr int8_t HEADING_LOCK_MIN_CORRECTION_PERCENT = 10;
+constexpr int8_t HEADING_LOCK_MIN_CORRECTION_PERCENT = 3;
 constexpr int8_t HEADING_LOCK_MAX_CORRECTION_PERCENT = 70;
 constexpr int8_t VOICE_HEADING_LOCK_MAX_OUTPUT_PERCENT = 100;
 constexpr int8_t APP_HEADING_LOCK_MAX_OUTPUT_PERCENT = 100;
@@ -110,6 +110,7 @@ constexpr float TRACKLOG_MAX_SPEED_MPS = 5.0f;
 constexpr uint32_t TRACKLOG_INVALID_SEQ24 = 0xFFFFFF;
 constexpr uint32_t TRACKLOG_MAX_SEQ24 = 0xFFFFFE;
 constexpr uint32_t TRACKLOG_MIN_VALID_UTC = 1609459200UL;
+constexpr uint32_t TRACKLOG_STALE_FUTURE_SECONDS = 7UL * 24UL * 3600UL;
 constexpr uint8_t ICM20948_ADDR_LOW = 0x68;
 constexpr uint8_t ICM20948_ADDR_HIGH = 0x69;
 constexpr uint8_t ICM20948_WHO_AM_I_VALUE = 0xEA;
@@ -257,6 +258,7 @@ uint8_t gpsSatellites = 0;
 uint32_t gpsUtcSeconds = 0;
 float gpsLatitudeDegrees = 0.0f;
 float gpsLongitudeDegrees = 0.0f;
+float gpsSpeedKmh = 0.0f;
 volatile uint32_t gpsPpsCount = 0;
 volatile uint32_t gpsLastPpsMicros = 0;
 const esp_partition_t* trackLogPartition = nullptr;
@@ -276,10 +278,12 @@ uint32_t trackLogLastRecordedUtc = 0;
 uint32_t trackLogDroppedInvalid = 0;
 uint32_t trackLogDroppedDrift = 0;
 uint32_t trackLogWriteErrors = 0;
+uint32_t trackLogSanitizeCount = 0;
 uint8_t trackLogStablePoints = 0;
 bool trackLogNeedsRestabilize = true;
 bool trackLogHasLastRecorded = false;
 bool trackLogHasLastCandidate = false;
+bool trackLogSanitizedThisBoot = false;
 TrackLogRecord trackLogLastRecorded = {};
 TrackLogRecord trackLogLastCandidate = {};
 
@@ -1023,10 +1027,17 @@ void parseGpsRmc(char* line) {
   if (fieldCount >= 3 && fields[2][0] != '\0') {
     gpsRmcStatusValid = fields[2][0] == 'A';
     gpsFixValid = gpsRmcStatusValid && gpsFixQuality > 0;
+    if (!gpsFixValid) {
+      gpsSpeedKmh = 0.0f;
+    }
   }
   if (gpsFixValid && fieldCount >= 7 && fields[3][0] != '\0' && fields[5][0] != '\0') {
     gpsLatitudeDegrees = nmeaCoordinateToDegrees(fields[3], fields[4][0], 2);
     gpsLongitudeDegrees = nmeaCoordinateToDegrees(fields[5], fields[6][0], 3);
+  }
+  if (gpsFixValid && fieldCount >= 8 && fields[7][0] != '\0') {
+    const float speedKnots = static_cast<float>(atof(fields[7]));
+    gpsSpeedKmh = speedKnots > 0.0f ? speedKnots * 1.852f : 0.0f;
   }
   if (fieldCount >= 10) {
     uint8_t hour = 0;
@@ -1190,6 +1201,65 @@ bool readTrackLogRecord(size_t index, TrackLogRecord& record) {
   ) == ESP_OK;
 }
 
+void resetTrackLogState() {
+  trackLogCount = 0;
+  trackLogOldestSeq = 0;
+  trackLogNewestSeq = 0;
+  trackLogWriteIndex = 0;
+  trackLogOldestIndex = 0;
+  trackLogNextSeq = 1;
+  trackLogLastConsideredUtc = 0;
+  trackLogLastRecordedUtc = 0;
+  trackLogStablePoints = 0;
+  trackLogNeedsRestabilize = true;
+  trackLogHasLastRecorded = false;
+  trackLogHasLastCandidate = false;
+  trackLogLastRecorded = {};
+  trackLogLastCandidate = {};
+}
+
+bool eraseTrackLogPartition(const char* reason) {
+  if (!trackLogReady || trackLogPartition == nullptr) {
+    return false;
+  }
+
+  Serial.print("GPS tracklog erase all reason=");
+  Serial.println(reason);
+  for (size_t offset = 0; offset < trackLogPartition->size; offset += TRACKLOG_FLASH_SECTOR_SIZE) {
+    const esp_err_t eraseResult = esp_partition_erase_range(
+      trackLogPartition,
+      offset,
+      TRACKLOG_FLASH_SECTOR_SIZE
+    );
+    if (eraseResult != ESP_OK) {
+      trackLogWriteErrors += 1;
+      Serial.print("GPS tracklog full erase failed offset=");
+      Serial.print(offset);
+      Serial.print(" err=");
+      Serial.println(static_cast<int>(eraseResult));
+      return false;
+    }
+  }
+
+  trackLogSanitizeCount += 1;
+  trackLogSanitizedThisBoot = true;
+  resetTrackLogState();
+  return true;
+}
+
+bool trackLogScanLooksSuspicious(uint32_t minSeq, uint32_t maxSeq, uint32_t count) {
+  if (count == 0) {
+    return false;
+  }
+  if (maxSeq < minSeq) {
+    return true;
+  }
+
+  const uint32_t span = maxSeq - minSeq + 1;
+  const uint32_t recordsPerSector = TRACKLOG_FLASH_SECTOR_SIZE / TRACKLOG_RECORD_SIZE;
+  return span > count + recordsPerSector;
+}
+
 void advanceTrackLogSessionId() {
   if (!nvsReady) {
     trackLogSessionId = 1;
@@ -1206,12 +1276,7 @@ void advanceTrackLogSessionId() {
 }
 
 void scanTrackLogPartition() {
-  trackLogCount = 0;
-  trackLogOldestSeq = 0;
-  trackLogNewestSeq = 0;
-  trackLogWriteIndex = 0;
-  trackLogOldestIndex = 0;
-  trackLogNextSeq = 1;
+  resetTrackLogState();
 
   uint32_t minSeq = TRACKLOG_INVALID_SEQ24;
   uint32_t maxSeq = 0;
@@ -1239,6 +1304,17 @@ void scanTrackLogPartition() {
 
   if (trackLogCount == 0) {
     trackLogHasLastRecorded = false;
+    return;
+  }
+
+  if (trackLogScanLooksSuspicious(minSeq, maxSeq, trackLogCount)) {
+    Serial.print("GPS tracklog suspicious scan count=");
+    Serial.print(trackLogCount);
+    Serial.print(" min=");
+    Serial.print(minSeq);
+    Serial.print(" max=");
+    Serial.println(maxSeq);
+    eraseTrackLogPartition("scan_seq_gap");
     return;
   }
 
@@ -1405,6 +1481,14 @@ void updateTrackLog(uint32_t now) {
     return;
   }
   trackLogLastConsideredUtc = candidate.utcSeconds;
+
+  if (
+    trackLogHasLastRecorded &&
+    trackLogLastRecordedUtc > candidate.utcSeconds &&
+    trackLogLastRecordedUtc - candidate.utcSeconds > TRACKLOG_STALE_FUTURE_SECONDS
+  ) {
+    eraseTrackLogPartition("stale_future_record");
+  }
 
   if (trackLogHasLastRecorded && candidate.utcSeconds <= trackLogLastRecordedUtc) {
     noteTrackLogInvalid(now);
@@ -2332,7 +2416,11 @@ void printTrackLogInfo(Print& output) {
   output.print(";DROP_DRIFT=");
   output.print(trackLogDroppedDrift);
   output.print(";WRITE_ERR=");
-  output.println(trackLogWriteErrors);
+  output.print(trackLogWriteErrors);
+  output.print(";SANITIZED=");
+  output.print(trackLogSanitizedThisBoot ? 1 : 0);
+  output.print(";SAN_COUNT=");
+  output.println(trackLogSanitizeCount);
 }
 
 uint16_t countTrackLogReadRecords(uint32_t fromSeq, uint16_t limit) {
@@ -2656,6 +2744,13 @@ void applyBluetoothLine(char* line) {
     return;
   }
 
+  if (nextMode != CommandMode::Throttle) {
+    forceNeutralAndDisarm();
+    SerialBT.println("ERR;APP_HEADING_CONTROL_ONLY");
+    Serial.println("Autonomous heading command rejected: heading control runs in Android App");
+    return;
+  }
+
   const uint32_t commandNow = millis();
   if (sawHeadingSource) {
     phoneHeadingEnabled = nextUsePhoneHeading;
@@ -2936,6 +3031,8 @@ void publishBluetoothStatus(uint32_t now) {
     SerialBT.print(gpsLatitudeDegrees, 6);
     SerialBT.print(";GPS_LON=");
     SerialBT.print(gpsLongitudeDegrees, 6);
+    SerialBT.print(";GPS_SPD_KMH=");
+    SerialBT.print(gpsSpeedKmh, 1);
   }
   SerialBT.print(";TRK=");
   SerialBT.print(trackLogReady ? 1 : 0);

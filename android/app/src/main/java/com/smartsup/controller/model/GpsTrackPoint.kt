@@ -26,6 +26,13 @@ data class TrackLogInfo(
     val writeErrors: Int,
 )
 
+data class GpsTrackSegment(
+    val id: String,
+    val startUtcSeconds: Long,
+    val endUtcSeconds: Long,
+    val pointCount: Int,
+)
+
 sealed interface TrackLogEvent {
     data class Info(val info: TrackLogInfo) : TrackLogEvent
     data class Begin(val fromSequence: Int, val count: Int) : TrackLogEvent
@@ -39,7 +46,12 @@ data class GpsTrackUiState(
     val lastSyncedSequence: Int = 0,
     val syncMessage: String = "轨迹同步未开始",
     val syncing: Boolean = false,
+    val syncStartSequence: Int? = null,
+    val syncTargetSequence: Int? = null,
+    val syncCurrentSequence: Int? = null,
     val latestInfo: TrackLogInfo? = null,
+    val tracks: List<GpsTrackSegment> = emptyList(),
+    val selectedTrackId: String? = null,
     val recentPoints: List<GpsTrackPoint> = emptyList(),
     val playbackIndex: Int = 0,
 )

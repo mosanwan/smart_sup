@@ -1,7 +1,5 @@
 package com.smartsup.controller.model
 
-import java.util.Locale
-
 data class ControlCommand(
     val leftThrottlePercent: Int = 0,
     val rightThrottlePercent: Int = 0,
@@ -61,25 +59,16 @@ data class ControlCommand(
 
     fun toWireLine(): String {
         val voiceLimitToken = if (source == CommandSource.Voice) ";VMAX=$voicePowerLimitPercent" else ""
-        val headingSourceToken = if (usePhoneHeading) {
-            ";H_SRC=PHONE" + phoneHeadingDegrees?.let {
-                ";PHDG=${String.format(Locale.US, "%.1f", it)}"
-            }.orEmpty()
-        } else {
-            ";H_SRC=IMU"
-        }
         return when (mode) {
             ControlCommandMode.Throttle -> {
                 "SRC=${source.wireValue};ARM=${if (armed) 1 else 0};L=$leftThrottlePercent;R=$rightThrottlePercent" +
-                    voiceLimitToken +
-                    headingSourceToken
+                    voiceLimitToken
             }
             ControlCommandMode.TurnAngle -> {
                 "SRC=${source.wireValue};ARM=1;MODE=${mode.wireValue};DIR=${turnDirection!!.wireValue};" +
                     "ANGLE=$turnAngleDegrees;TID=$turnRequestId;" +
                     "LREV=${if (leftEscReversed) 1 else 0};RREV=${if (rightEscReversed) 1 else 0}" +
-                    voiceLimitToken +
-                    headingSourceToken
+                    voiceLimitToken
             }
             ControlCommandMode.HeadingLock -> {
                 val idToken = if (headingLockEnabled) ";HID=$headingLockRequestId" else ""
@@ -91,8 +80,7 @@ data class ControlCommand(
                     idToken +
                     offsetToken +
                     ";LREV=${if (leftEscReversed) 1 else 0};RREV=${if (rightEscReversed) 1 else 0}" +
-                    voiceLimitToken +
-                    headingSourceToken
+                    voiceLimitToken
             }
         }
     }

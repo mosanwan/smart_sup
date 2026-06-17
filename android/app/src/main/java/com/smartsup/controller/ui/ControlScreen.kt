@@ -1,7 +1,11 @@
 package com.smartsup.controller.ui
 
+import android.graphics.Paint
+import android.graphics.Typeface
 import androidx.compose.foundation.Canvas
 import androidx.compose.foundation.border
+import androidx.compose.foundation.gestures.awaitEachGesture
+import androidx.compose.foundation.gestures.awaitFirstDown
 import androidx.compose.foundation.gestures.detectDragGestures
 import androidx.compose.foundation.gestures.detectTapGestures
 import androidx.compose.foundation.layout.Arrangement
@@ -36,7 +40,11 @@ import androidx.compose.material3.IconButtonDefaults
 import androidx.compose.material3.MaterialTheme
 import androidx.compose.material3.Surface
 import androidx.compose.material3.Text
+import androidx.compose.material3.TextButton
 import androidx.compose.runtime.Composable
+import androidx.compose.runtime.mutableStateOf
+import androidx.compose.runtime.remember
+import androidx.compose.runtime.rememberUpdatedState
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.geometry.CornerRadius
@@ -44,6 +52,10 @@ import androidx.compose.ui.geometry.Offset
 import androidx.compose.ui.geometry.Size
 import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.graphics.Path
+import androidx.compose.ui.graphics.StrokeCap
+import androidx.compose.ui.graphics.drawscope.Stroke
+import androidx.compose.ui.graphics.nativeCanvas
+import androidx.compose.ui.graphics.toArgb
 import androidx.compose.ui.graphics.vector.ImageVector
 import androidx.compose.ui.hapticfeedback.HapticFeedbackType
 import androidx.compose.ui.input.pointer.pointerInput
@@ -51,12 +63,17 @@ import androidx.compose.ui.platform.LocalHapticFeedback
 import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.text.style.TextAlign
 import androidx.compose.ui.text.style.TextOverflow
+import androidx.compose.ui.window.Dialog
 import androidx.compose.ui.unit.dp
 import com.smartsup.controller.model.ConnectionState
 import com.smartsup.controller.model.ControlUiState
 import com.smartsup.controller.model.ThrottleGear
 import com.smartsup.controller.model.VoiceAsrState
 import kotlin.math.abs
+import kotlin.math.asin
+import kotlin.math.cos
+import kotlin.math.roundToInt
+import kotlin.math.sin
 
 @Composable
 fun ControlScreen(
@@ -78,18 +95,23 @@ fun ControlScreen(
     onFineTuneIncrease: () -> Unit,
     onEnableHeadingLock: () -> Unit,
     onDisableHeadingLock: () -> Unit,
+    onSetTargetHeading: (Float) -> Unit,
+    onConnectBluetooth: () -> Unit,
     onToggleVoiceControl: () -> Unit,
     onEmergencyStop: () -> Unit,
 ) {
-    val showingHeadingLockOutput = state.headingLockEnabled &&
-        state.telemetry.statusFields["HLOCK"] == "ACTIVE"
+    val showingHeadingLockOutput = state.headingLockEnabled
     val leftDisplayThrottle = if (showingHeadingLockOutput) {
-        state.telemetry.leftOutputPercent?.toUserFacingThrottle(leftEscReversed) ?: state.leftThrottlePercent
+        state.appHeadingLeftOutputPercent
+            ?: state.telemetry.leftOutputPercent?.toUserFacingThrottle(leftEscReversed)
+            ?: state.leftThrottlePercent
     } else {
         state.leftThrottlePercent
     }
     val rightDisplayThrottle = if (showingHeadingLockOutput) {
-        state.telemetry.rightOutputPercent?.toUserFacingThrottle(rightEscReversed) ?: state.rightThrottlePercent
+        state.appHeadingRightOutputPercent
+            ?: state.telemetry.rightOutputPercent?.toUserFacingThrottle(rightEscReversed)
+            ?: state.rightThrottlePercent
     } else {
         state.rightThrottlePercent
     }
@@ -99,6 +121,17 @@ fun ControlScreen(
         abs(rightDisplayThrottle),
         1,
     )
+    val headingCorrectionPercent = if (showingHeadingLockOutput) {
+        state.appHeadingLockCorrectionPercent
+    } else {
+        0
+    }
+    val handleLeftThrottleChange: (Int) -> Unit = { outputPercent ->
+        onLeftThrottleChange(outputPercent - headingCorrectionPercent)
+    }
+    val handleRightThrottleChange: (Int) -> Unit = { outputPercent ->
+        onRightThrottleChange(outputPercent + headingCorrectionPercent)
+    }
 
     Column(
         modifier = modifier
@@ -109,6 +142,7 @@ fun ControlScreen(
         CompactStatusRow(
             state = state,
             maxThrottlePercent = maxThrottlePercent,
+            onConnectBluetooth = onConnectBluetooth,
             onToggleHeadingLock = {
                 if (state.headingLockEnabled) {
                     onDisableHeadingLock()
@@ -131,7 +165,7 @@ fun ControlScreen(
                 inputMaxThrottlePercent = maxThrottlePercent,
                 visualMaxThrottlePercent = visualThrottlePercent,
                 enabled = state.canSendThrottle,
-                onChange = onLeftThrottleChange,
+                onChange = handleLeftThrottleChange,
                 onRelease = onLeftThrottleRelease,
                 modifier = Modifier
                     .width(88.dp)
@@ -152,6 +186,7 @@ fun ControlScreen(
                 onFineTuneIncrease = onFineTuneIncrease,
                 onEnableHeadingLock = onEnableHeadingLock,
                 onDisableHeadingLock = onDisableHeadingLock,
+                onSetTargetHeading = onSetTargetHeading,
             )
 
             VerticalThrottle(
@@ -160,7 +195,7 @@ fun ControlScreen(
                 inputMaxThrottlePercent = maxThrottlePercent,
                 visualMaxThrottlePercent = visualThrottlePercent,
                 enabled = state.canSendThrottle,
-                onChange = onRightThrottleChange,
+                onChange = handleRightThrottleChange,
                 onRelease = onRightThrottleRelease,
                 modifier = Modifier
                     .width(88.dp)
@@ -181,6 +216,7 @@ fun ControlScreen(
 private fun CompactStatusRow(
     state: ControlUiState,
     maxThrottlePercent: Int,
+    onConnectBluetooth: () -> Unit,
     onToggleHeadingLock: () -> Unit,
     onToggleVoiceControl: () -> Unit,
 ) {
@@ -190,7 +226,11 @@ private fun CompactStatusRow(
     ) {
         IconStatusChip(
             icon = Icons.Outlined.Bluetooth,
-            contentDescription = "蓝牙连接状态",
+            contentDescription = if (state.connectionState == ConnectionState.Disconnected) {
+                "蓝牙未连接，点击连接已保存设备"
+            } else {
+                "蓝牙连接状态"
+            },
             value = connectionText(state.connectionState),
             color = when (state.connectionState) {
                 ConnectionState.Connected -> Color(0xFF1976D2)
@@ -198,6 +238,8 @@ private fun CompactStatusRow(
                 ConnectionState.Disconnected -> MaterialTheme.colorScheme.onSurfaceVariant
             },
             modifier = Modifier.weight(1f),
+            enabled = state.connectionState == ConnectionState.Disconnected,
+            onClick = onConnectBluetooth,
         )
         IconStatusChip(
             icon = Icons.Outlined.Mic,
@@ -510,6 +552,7 @@ private fun CenterControlPanel(
     onFineTuneIncrease: () -> Unit,
     onEnableHeadingLock: () -> Unit,
     onDisableHeadingLock: () -> Unit,
+    onSetTargetHeading: (Float) -> Unit,
 ) {
     Column(
         modifier = modifier.verticalScroll(rememberScrollState()),
@@ -549,8 +592,12 @@ private fun CenterControlPanel(
                     onEnableHeadingLock = onEnableHeadingLock,
                     onDisableHeadingLock = onDisableHeadingLock,
                 )
-                CompactInfoRow("目标航向", state.targetHeadingText())
-                CompactInfoRow("IMU", state.telemetry.imuAvailable.imuStatusText())
+                TargetHeadingValueRow(
+                    state = state,
+                    onSetTargetHeading = onSetTargetHeading,
+                )
+                CompactInfoRow("航向误差", state.appHeadingErrorText())
+                CompactInfoRow("手机指南针", state.phoneHeadingStatusText())
             }
         }
 
@@ -592,8 +639,9 @@ private fun CenterControlPanel(
                 CompactInfoRow("右 PWM", state.statusUnitText("RPWM", "us"))
                 CompactInfoRow("命令源", state.statusSourceText())
                 CompactInfoRow("模式", state.statusModeText())
-                CompactInfoRow("当前航向", state.headingText())
-                CompactInfoRow("目标航向", state.targetHeadingText())
+                CompactInfoRow("手机航向", state.headingText())
+                CompactInfoRow("App 目标航向", state.targetHeadingText())
+                CompactInfoRow("App 修正", state.appHeadingCorrectionText())
                 CompactInfoRow("转向", state.statusTurnText())
                 CompactInfoRow("故障", state.statusValue("FAULT"))
                 CompactInfoRow("编号", state.statusValue("ID"))
@@ -618,7 +666,7 @@ private fun HeadingValueRow(
         horizontalArrangement = Arrangement.SpaceBetween,
         verticalAlignment = Alignment.CenterVertically,
     ) {
-        Text("当前航向", color = MaterialTheme.colorScheme.onSurfaceVariant, style = MaterialTheme.typography.bodySmall)
+        Text("手机航向", color = MaterialTheme.colorScheme.onSurfaceVariant, style = MaterialTheme.typography.bodySmall)
         Surface(
             onClick = {
                 haptic.performHapticFeedback(HapticFeedbackType.LongPress)
@@ -662,6 +710,340 @@ private fun HeadingValueRow(
             }
         }
     }
+}
+
+@Composable
+private fun TargetHeadingValueRow(
+    state: ControlUiState,
+    onSetTargetHeading: (Float) -> Unit,
+) {
+    val haptic = LocalHapticFeedback.current
+    val dialogAnchor = remember { mutableStateOf<TargetHeadingDialogAnchor?>(null) }
+    val currentHeading = state.phoneHeadingDegrees
+    val actionEnabled = state.connectionState == ConnectionState.Connected &&
+        state.armed &&
+        state.phoneHeadingAvailable &&
+        currentHeading != null
+    Row(
+        modifier = Modifier.fillMaxWidth(),
+        horizontalArrangement = Arrangement.SpaceBetween,
+        verticalAlignment = Alignment.CenterVertically,
+    ) {
+        Text("目标航向", color = MaterialTheme.colorScheme.onSurfaceVariant, style = MaterialTheme.typography.bodySmall)
+        Surface(
+            onClick = {
+                haptic.performHapticFeedback(HapticFeedbackType.LongPress)
+                currentHeading?.let { heading ->
+                    dialogAnchor.value = TargetHeadingDialogAnchor(
+                        currentHeadingDegrees = heading,
+                        initialTargetHeadingDegrees = state.appHeadingLockTargetDegrees,
+                    )
+                }
+            },
+            enabled = actionEnabled,
+            color = Color.Transparent,
+            modifier = Modifier
+                .weight(1f)
+                .padding(start = 8.dp),
+        ) {
+            Text(
+                state.targetHeadingText(),
+                modifier = Modifier.fillMaxWidth(),
+                fontWeight = FontWeight.Medium,
+                style = MaterialTheme.typography.bodySmall,
+                maxLines = 1,
+                overflow = TextOverflow.Ellipsis,
+                textAlign = TextAlign.End,
+                color = if (actionEnabled) MaterialTheme.colorScheme.primary else MaterialTheme.colorScheme.onSurface,
+            )
+        }
+    }
+
+    val anchor = dialogAnchor.value
+    if (anchor != null) {
+        TargetHeadingDialog(
+            currentHeadingDegrees = anchor.currentHeadingDegrees,
+            initialTargetHeadingDegrees = anchor.initialTargetHeadingDegrees,
+            onDismiss = { dialogAnchor.value = null },
+            onConfirm = { targetHeading ->
+                dialogAnchor.value = null
+                onSetTargetHeading(targetHeading)
+            },
+        )
+    }
+}
+
+private data class TargetHeadingDialogAnchor(
+    val currentHeadingDegrees: Float,
+    val initialTargetHeadingDegrees: Float?,
+)
+
+@Composable
+private fun TargetHeadingDialog(
+    currentHeadingDegrees: Float,
+    initialTargetHeadingDegrees: Float?,
+    onDismiss: () -> Unit,
+    onConfirm: (Float) -> Unit,
+) {
+    val initialOffset = remember(currentHeadingDegrees, initialTargetHeadingDegrees) {
+        shortestHeadingOffset(
+            targetDegrees = initialTargetHeadingDegrees ?: currentHeadingDegrees,
+            currentDegrees = currentHeadingDegrees,
+        ).coerceIn(-TARGET_HEADING_ARC_DEGREES, TARGET_HEADING_ARC_DEGREES)
+    }
+    val selectedOffset = remember(currentHeadingDegrees, initialTargetHeadingDegrees) {
+        mutableStateOf(initialOffset)
+    }
+    val selectedHeading = normalizedHeadingDegrees(currentHeadingDegrees + selectedOffset.value)
+
+    Dialog(onDismissRequest = onDismiss) {
+        Surface(
+            shape = RoundedCornerShape(12.dp),
+            color = MaterialTheme.colorScheme.surface,
+            tonalElevation = 6.dp,
+            shadowElevation = 8.dp,
+        ) {
+            Column(
+                modifier = Modifier
+                    .fillMaxWidth()
+                    .padding(horizontal = 18.dp, vertical = 16.dp),
+                horizontalAlignment = Alignment.CenterHorizontally,
+                verticalArrangement = Arrangement.spacedBy(10.dp),
+            ) {
+                Text(
+                    "设定目标航向",
+                    style = MaterialTheme.typography.titleMedium,
+                    fontWeight = FontWeight.SemiBold,
+                )
+                Text(
+                    "当前 ${currentHeadingDegrees.headingDisplayText()} · 目标 ${selectedHeading.headingDisplayText()}",
+                    style = MaterialTheme.typography.bodySmall,
+                    color = MaterialTheme.colorScheme.onSurfaceVariant,
+                    textAlign = TextAlign.Center,
+                )
+                HeadingArcPicker(
+                    selectedOffsetDegrees = selectedOffset.value,
+                    onOffsetChange = { selectedOffset.value = it },
+                    onCommit = { committedOffset ->
+                        onConfirm(normalizedHeadingDegrees(currentHeadingDegrees + committedOffset))
+                    },
+                    modifier = Modifier
+                        .fillMaxWidth()
+                        .height(172.dp),
+                )
+                Text(
+                    "偏移 ${selectedOffset.value.roundToInt().signedDegreesText()} · 松开确认",
+                    style = MaterialTheme.typography.labelMedium,
+                    color = MaterialTheme.colorScheme.primary,
+                    textAlign = TextAlign.Center,
+                )
+                TextButton(onClick = onDismiss) {
+                    Text("取消")
+                }
+            }
+        }
+    }
+}
+
+@Composable
+private fun HeadingArcPicker(
+    selectedOffsetDegrees: Float,
+    onOffsetChange: (Float) -> Unit,
+    onCommit: (Float) -> Unit,
+    modifier: Modifier = Modifier,
+) {
+    val arcColor = Color(0xFFE53935)
+    val targetColor = Color(0xFFC62828)
+    val currentColor = MaterialTheme.colorScheme.onSurface
+    val labelColor = MaterialTheme.colorScheme.onSurfaceVariant
+    val surfaceColor = MaterialTheme.colorScheme.surface
+    val arcCenterTopPadding = 16.dp
+    val selectedOffsetState = rememberUpdatedState(selectedOffsetDegrees)
+    val onOffsetChangeState = rememberUpdatedState(onOffsetChange)
+    val onCommitState = rememberUpdatedState(onCommit)
+    Canvas(
+        modifier = modifier.pointerInput(Unit) {
+            awaitEachGesture {
+                var latestOffset = selectedOffsetState.value
+                fun updateOffset(offset: Offset) {
+                    latestOffset = headingOffsetFromArcPointer(
+                        pointer = offset,
+                        width = size.width.toFloat(),
+                        height = size.height.toFloat(),
+                        centerTopPaddingPx = arcCenterTopPadding.toPx(),
+                        previousOffsetDegrees = latestOffset,
+                    )
+                    onOffsetChangeState.value(latestOffset)
+                }
+
+                val down = awaitFirstDown(requireUnconsumed = false)
+                updateOffset(down.position)
+                down.consume()
+                do {
+                    val event = awaitPointerEvent()
+                    val change = event.changes.firstOrNull { it.id == down.id }
+                        ?: event.changes.firstOrNull()
+                    if (change != null) {
+                        if (change.pressed) {
+                            updateOffset(change.position)
+                        }
+                        change.consume()
+                    }
+                } while (event.changes.any { it.pressed })
+                onCommitState.value(latestOffset)
+            }
+        },
+    ) {
+        val strokeWidth = 15.dp.toPx()
+        val markerRadius = 4.dp.toPx()
+        val radius = headingArcRadius(size.width, size.height)
+        val center = Offset(size.width / 2f, radius + arcCenterTopPadding.toPx())
+        val arcTopLeft = Offset(center.x - radius, center.y - radius)
+        val arcSize = Size(radius * 2f, radius * 2f)
+        val selectedOffset = selectedOffsetDegrees.coerceIn(-TARGET_HEADING_ARC_DEGREES, TARGET_HEADING_ARC_DEGREES)
+        val selectedAngle = 270f + selectedOffset
+        val selectedRadians = Math.toRadians(selectedAngle.toDouble())
+        val selectedPoint = Offset(
+            x = center.x + cos(selectedRadians).toFloat() * radius,
+            y = center.y + sin(selectedRadians).toFloat() * radius,
+        )
+        val currentPoint = Offset(center.x, center.y - radius)
+        val currentTriangle = Path().apply {
+            moveTo(currentPoint.x, currentPoint.y - 17.dp.toPx())
+            lineTo(currentPoint.x - 9.dp.toPx(), currentPoint.y - 2.dp.toPx())
+            lineTo(currentPoint.x + 9.dp.toPx(), currentPoint.y - 2.dp.toPx())
+            close()
+        }
+        val labelPaint = Paint(Paint.ANTI_ALIAS_FLAG).apply {
+            color = labelColor.toArgb()
+            textAlign = Paint.Align.CENTER
+            textSize = 12.dp.toPx()
+            typeface = Typeface.create(Typeface.DEFAULT, Typeface.BOLD)
+        }
+
+        drawArc(
+            color = arcColor.copy(alpha = 0.2f),
+            startAngle = 180f,
+            sweepAngle = 180f,
+            useCenter = false,
+            topLeft = arcTopLeft,
+            size = arcSize,
+            style = Stroke(width = strokeWidth, cap = StrokeCap.Round),
+        )
+        if (selectedOffset != 0f) {
+            drawArc(
+                color = arcColor,
+                startAngle = if (selectedOffset < 0f) 270f + selectedOffset else 270f,
+                sweepAngle = abs(selectedOffset),
+                useCenter = false,
+                topLeft = arcTopLeft,
+                size = arcSize,
+                style = Stroke(width = strokeWidth, cap = StrokeCap.Round),
+            )
+        }
+        for (tickOffset in listOf(-90f, -60f, -45f, -30f, 0f, 30f, 45f, 60f, 90f)) {
+            val angle = 270f + tickOffset
+            val radians = Math.toRadians(angle.toDouble())
+            val tickOuterRadius = radius + 10.dp.toPx()
+            val tickInnerRadius = radius - 13.dp.toPx()
+            val outer = Offset(
+                x = center.x + cos(radians).toFloat() * tickOuterRadius,
+                y = center.y + sin(radians).toFloat() * tickOuterRadius,
+            )
+            val inner = Offset(
+                x = center.x + cos(radians).toFloat() * tickInnerRadius,
+                y = center.y + sin(radians).toFloat() * tickInnerRadius,
+            )
+            val marker = Offset(
+                x = center.x + cos(radians).toFloat() * radius,
+                y = center.y + sin(radians).toFloat() * radius,
+            )
+            drawLine(
+                color = currentColor.copy(alpha = if (tickOffset == 0f) 0.78f else 0.42f),
+                start = inner,
+                end = outer,
+                strokeWidth = if (tickOffset == 0f) 3.dp.toPx() else 2.dp.toPx(),
+                cap = StrokeCap.Round,
+            )
+            drawCircle(
+                color = if (tickOffset == 0f) currentColor else arcColor.copy(alpha = 0.62f),
+                radius = if (tickOffset == 0f) markerRadius + 1.dp.toPx() else markerRadius,
+                center = marker,
+            )
+            if (tickOffset in listOf(-90f, -45f, 0f, 45f, 90f)) {
+                val labelRadius = radius + 29.dp.toPx()
+                val labelPoint = Offset(
+                    x = center.x + cos(radians).toFloat() * labelRadius,
+                    y = center.y + sin(radians).toFloat() * labelRadius,
+                )
+                drawContext.canvas.nativeCanvas.drawText(
+                    tickOffset.roundToInt().signedDegreesText(),
+                    labelPoint.x,
+                    labelPoint.y + 4.dp.toPx(),
+                    labelPaint,
+                )
+            }
+        }
+        drawPath(path = currentTriangle, color = currentColor)
+        drawLine(
+            color = targetColor.copy(alpha = 0.55f),
+            start = center,
+            end = selectedPoint,
+            strokeWidth = 2.5.dp.toPx(),
+            cap = StrokeCap.Round,
+        )
+        drawCircle(
+            color = targetColor.copy(alpha = 0.18f),
+            radius = 25.dp.toPx(),
+            center = selectedPoint,
+        )
+        drawCircle(color = targetColor, radius = 13.dp.toPx(), center = selectedPoint)
+        drawCircle(color = surfaceColor, radius = 5.dp.toPx(), center = selectedPoint)
+    }
+}
+
+private fun headingOffsetFromArcPointer(
+    pointer: Offset,
+    width: Float,
+    height: Float,
+    centerTopPaddingPx: Float,
+    previousOffsetDegrees: Float,
+): Float {
+    if (width <= 0f || height <= 0f) {
+        return previousOffsetDegrees
+    }
+    val radius = headingArcRadius(width, height)
+    val center = Offset(width / 2f, radius + centerTopPaddingPx)
+    val horizontalRatio = ((pointer.x - center.x) / radius).coerceIn(-1f, 1f)
+    val degreesFromTop = Math.toDegrees(asin(horizontalRatio).toDouble()).toFloat()
+    return degreesFromTop.coerceIn(-TARGET_HEADING_ARC_DEGREES, TARGET_HEADING_ARC_DEGREES)
+}
+
+private fun headingArcRadius(width: Float, height: Float): Float {
+    return minOf(width * 0.43f, height * 0.72f)
+}
+
+private fun Float.headingDisplayText(): String {
+    return "${roundToInt()}°"
+}
+
+private fun Int.signedDegreesText(): String {
+    return if (this > 0) "+${this}°" else "${this}°"
+}
+
+private fun normalizedHeadingDegrees(degrees: Float): Float {
+    val normalized = degrees % 360f
+    return if (normalized < 0f) normalized + 360f else normalized
+}
+
+private fun shortestHeadingOffset(targetDegrees: Float, currentDegrees: Float): Float {
+    var delta = normalizedHeadingDegrees(targetDegrees) - normalizedHeadingDegrees(currentDegrees)
+    if (delta > 180f) {
+        delta -= 360f
+    } else if (delta < -180f) {
+        delta += 360f
+    }
+    return delta
 }
 
 @Composable
@@ -985,20 +1367,34 @@ private fun Float?.formatDegrees(): String {
     return this?.let { "%.1f°".format(it) } ?: "--"
 }
 
-private fun Boolean?.imuStatusText(): String {
-    return when (this) {
-        true -> "在线"
-        false -> "不可用"
-        null -> "--"
-    }
-}
+private const val TARGET_HEADING_ARC_DEGREES = 90f
 
 private fun ControlUiState.headingText(): String {
-    return if (telemetry.imuAvailable == false) "--" else telemetry.headingDegrees.formatDegrees()
+    return phoneHeadingDegrees.formatDegrees()
 }
 
 private fun ControlUiState.targetHeadingText(): String {
-    return if (telemetry.imuAvailable == false) "--" else telemetry.targetHeadingDegrees.formatDegrees()
+    return appHeadingLockTargetDegrees.formatDegrees()
+}
+
+private fun ControlUiState.appHeadingErrorText(): String {
+    return appHeadingLockErrorDegrees.formatDegrees()
+}
+
+private fun ControlUiState.appHeadingCorrectionText(): String {
+    return if (headingLockEnabled || appHeadingLockTargetDegrees != null) {
+        appHeadingLockCorrectionPercent.signedPercentText()
+    } else {
+        "--"
+    }
+}
+
+private fun ControlUiState.phoneHeadingStatusText(): String {
+    return when {
+        phoneHeadingAvailable -> "在线"
+        phoneHeadingSensorName.isNotBlank() -> "等待读数"
+        else -> "不可用"
+    }
 }
 
 private fun ControlUiState.statusValue(key: String): String {
