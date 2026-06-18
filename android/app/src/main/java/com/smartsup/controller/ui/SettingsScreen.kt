@@ -15,9 +15,14 @@ import androidx.activity.compose.rememberLauncherForActivityResult
 import androidx.activity.result.contract.ActivityResultContracts
 import androidx.compose.material3.Card
 import androidx.compose.material3.CardDefaults
+import androidx.compose.material3.DropdownMenuItem
+import androidx.compose.material3.ExperimentalMaterial3Api
+import androidx.compose.material3.ExposedDropdownMenuBox
+import androidx.compose.material3.ExposedDropdownMenuDefaults
 import androidx.compose.material3.HorizontalDivider
 import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.outlined.Bluetooth
+import androidx.compose.material.icons.outlined.CloudQueue
 import androidx.compose.material.icons.outlined.Download
 import androidx.compose.material.icons.outlined.Link
 import androidx.compose.material.icons.outlined.LinkOff
@@ -31,16 +36,22 @@ import androidx.compose.material.icons.outlined.Tune
 import androidx.compose.material.icons.outlined.UploadFile
 import androidx.compose.material3.Icon
 import androidx.compose.material3.MaterialTheme
+import androidx.compose.material3.OutlinedTextField
 import androidx.compose.material3.Slider
 import androidx.compose.material3.Surface
 import androidx.compose.material3.Switch
 import androidx.compose.material3.Text
 import androidx.compose.runtime.Composable
+import androidx.compose.runtime.getValue
+import androidx.compose.runtime.mutableStateOf
+import androidx.compose.runtime.remember
+import androidx.compose.runtime.setValue
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.graphics.vector.ImageVector
 import androidx.compose.ui.text.font.FontWeight
+import androidx.compose.ui.text.input.PasswordVisualTransformation
 import androidx.compose.ui.text.style.TextAlign
 import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.unit.dp
@@ -52,6 +63,29 @@ import com.smartsup.controller.model.SettingsUiState
 import com.smartsup.controller.model.ThrottleGear
 import com.smartsup.controller.model.UpdateUiState
 import kotlin.math.roundToInt
+
+private data class VoiceOption(
+    val id: String,
+    val label: String,
+)
+
+private const val DEFAULT_REALTIME_VOICE = "zh_female_vv_uranus_bigtts"
+
+private val REALTIME_VOICE_OPTIONS = listOf(
+    VoiceOption("zh_female_vv_uranus_bigtts", "温柔桃子 2.0"),
+    VoiceOption("zh_female_xiaohe_uranus_bigtts", "温柔小荷 2.0"),
+    VoiceOption("zh_male_m191_uranus_bigtts", "云舟男声 2.0"),
+    VoiceOption("zh_male_taocheng_uranus_bigtts", "青年小天 2.0"),
+    VoiceOption("zh_female_xiaoxue_uranus_bigtts", "故事小雪 2.0"),
+    VoiceOption("en_female_dacey_uranus_bigtts", "Dacey 英文女声 2.0"),
+    VoiceOption("en_male_tim_uranus_bigtts", "Tim 英文男声 2.0"),
+    VoiceOption("zh_female_shuangkuaisisi_moon_bigtts", "爽快思思 1.0"),
+    VoiceOption("zh_female_sajiaonvyou_moon_bigtts", "撒娇女友 1.0"),
+    VoiceOption("zh_male_aojiaobazong_moon_bigtts", "傲娇霸总 1.0"),
+    VoiceOption("zh_female_gaolengyujie_moon_bigtts", "高冷御姐 1.0"),
+    VoiceOption("zh_female_gaolengyujie_emo_v2_mars_bigtts", "多情绪御姐 1.0"),
+    VoiceOption("en_female_candice_emo_v2_mars_bigtts", "Candice 多情绪英文女声 1.0"),
+)
 
 @Composable
 fun SettingsScreen(
@@ -75,7 +109,13 @@ fun SettingsScreen(
     onHeadingLockToleranceChange: (Int) -> Unit,
     onHeadingLockFullCorrectionChange: (Int) -> Unit,
     onHeadingLockNeutralReverseChange: (Int) -> Unit,
+    onAutoNavigationGpsJumpResetChange: (Int) -> Unit,
     onUsePhoneHeadingChange: (Boolean) -> Unit,
+    onRealtimeVoiceEndpointChange: (String) -> Unit,
+    onRealtimeVoiceAppIdChange: (String) -> Unit,
+    onRealtimeVoiceApiKeyChange: (String) -> Unit,
+    onRealtimeVoiceModelChange: (String) -> Unit,
+    onRealtimeVoiceVoiceChange: (String) -> Unit,
     onStartMagCalibration: () -> Unit,
     onSaveMagCalibration: () -> Unit,
     onClearMagCalibration: () -> Unit,
@@ -139,6 +179,13 @@ fun SettingsScreen(
             onHeadingLockToleranceChange = onHeadingLockToleranceChange,
             onHeadingLockFullCorrectionChange = onHeadingLockFullCorrectionChange,
             onHeadingLockNeutralReverseChange = onHeadingLockNeutralReverseChange,
+            onAutoNavigationGpsJumpResetChange = onAutoNavigationGpsJumpResetChange,
+        )
+
+        RealtimeVoiceSettingsCard(
+            settingsState = settingsState,
+            onApiKeyChange = onRealtimeVoiceApiKeyChange,
+            onVoiceChange = onRealtimeVoiceVoiceChange,
         )
 
         PhoneHeadingSettingsCard(
@@ -151,10 +198,105 @@ fun SettingsScreen(
             onRefreshMagCalibrationStatus = onRefreshMagCalibrationStatus,
         )
 
+        // IMU 调试面板暂时关闭；新 IMU 到货后再恢复观测 UI。
+        // Esp32ImuObservationCard(controlState = controlState)
+
         GearPercentSettingsCard(
             settingsState = settingsState,
             onGearThrottleChange = onGearThrottleChange,
         )
+    }
+}
+
+@OptIn(ExperimentalMaterial3Api::class)
+@Composable
+private fun RealtimeVoiceSettingsCard(
+    settingsState: SettingsUiState,
+    onApiKeyChange: (String) -> Unit,
+    onVoiceChange: (String) -> Unit,
+) {
+    var voiceMenuExpanded by remember { mutableStateOf(false) }
+    val voiceOptions = remember(settingsState.realtimeVoiceVoice) {
+        val configured = settingsState.realtimeVoiceVoice.ifBlank { DEFAULT_REALTIME_VOICE }
+        val options = REALTIME_VOICE_OPTIONS
+            .let { list -> if (list.any { it.id == configured }) list else list + VoiceOption(configured, configured) }
+        options to options.first { it.id == configured }
+    }
+    val selectedVoice = voiceOptions.second
+    Card(
+        colors = CardDefaults.cardColors(containerColor = MaterialTheme.colorScheme.surface),
+        modifier = Modifier.fillMaxWidth(),
+    ) {
+        Column(
+            modifier = Modifier.padding(16.dp),
+            verticalArrangement = Arrangement.spacedBy(10.dp),
+        ) {
+            SettingsSectionHeader(
+                title = "云端实时语音",
+                icon = Icons.Outlined.CloudQueue,
+                color = Color(0xFF1565C0),
+            )
+            Text(
+                "未配置 API Key 时不会启动麦克风上传。云端 TTS 使用同一个 API Key 或 .env 中的 DOUBAO_API_KEY。",
+                style = MaterialTheme.typography.bodySmall,
+                color = MaterialTheme.colorScheme.onSurfaceVariant,
+            )
+            OutlinedTextField(
+                value = settingsState.realtimeVoiceApiKey,
+                onValueChange = onApiKeyChange,
+                label = { Text("火山引擎 API Key") },
+                placeholder = { Text("ARK_API_KEY") },
+                singleLine = true,
+                isError = settingsState.realtimeVoiceApiKey.isBlank(),
+                supportingText = {
+                    Text(
+                        if (settingsState.realtimeVoiceApiKey.isBlank()) {
+                            "请填写后再开启实时语音"
+                        } else {
+                            "用于方舟 Chat API，不会显示明文"
+                        },
+                    )
+                },
+                visualTransformation = PasswordVisualTransformation(),
+                modifier = Modifier.fillMaxWidth(),
+            )
+            ExposedDropdownMenuBox(
+                expanded = voiceMenuExpanded,
+                onExpandedChange = { voiceMenuExpanded = it },
+                modifier = Modifier.fillMaxWidth(),
+            ) {
+                OutlinedTextField(
+                    value = selectedVoice.label,
+                    onValueChange = {},
+                    readOnly = true,
+                    label = { Text("云端 TTS 音色") },
+                    trailingIcon = { ExposedDropdownMenuDefaults.TrailingIcon(expanded = voiceMenuExpanded) },
+                    colors = ExposedDropdownMenuDefaults.outlinedTextFieldColors(),
+                    modifier = Modifier
+                        .menuAnchor()
+                        .fillMaxWidth(),
+                )
+                ExposedDropdownMenu(
+                    expanded = voiceMenuExpanded,
+                    onDismissRequest = { voiceMenuExpanded = false },
+                ) {
+                    voiceOptions.first.forEach { option ->
+                        DropdownMenuItem(
+                            text = { Text(option.label) },
+                            onClick = {
+                                voiceMenuExpanded = false
+                                onVoiceChange(option.id)
+                            },
+                        )
+                    }
+                }
+            }
+            Text(
+                "仅在语音页切换为云端 TTS 时生效；本地 TTS 使用 Android 系统音色。",
+                style = MaterialTheme.typography.bodySmall,
+                color = MaterialTheme.colorScheme.onSurfaceVariant,
+            )
+        }
     }
 }
 
@@ -344,9 +486,12 @@ private fun UpdateSettingsCard(
                 color = Color(0xFFE65100),
             )
             SettingsRow("当前 App", BuildConfig.VERSION_NAME)
+            SettingsRow("当前 ESP32", updateState.currentEsp32FirmwareVersion ?: "--")
             SettingsRow("GitHub 最新", updateState.latestVersionName ?: "--")
+            SettingsRow("目标 ESP32", updateState.targetEsp32FirmwareVersion ?: "--")
             SettingsRow("App 产物", updateState.appAssetName ?: "--")
             SettingsRow("ESP32 固件", updateState.firmwareAssetName ?: "--")
+            SettingsRow("发布清单", updateState.firmwareManifestName ?: "--")
             SettingsRow("更新源", "GitHub Public Release")
             Text(
                 "当前仓库已公开，App 检查更新不需要 Token。",
@@ -380,7 +525,8 @@ private fun UpdateSettingsCard(
                 onClick = onUpdateEsp32FromGitHub,
                 enabled = !busy &&
                     controlState.connectionState == ConnectionState.Connected &&
-                    updateState.firmwareDownloadUrl != null,
+                    updateState.firmwareDownloadUrl != null &&
+                    updateState.firmwareManifestName != null,
                 text = "从 GitHub 更新 ESP32 固件",
                 icon = Icons.Outlined.SystemUpdate,
                 color = Color(0xFFE65100),
@@ -412,6 +558,7 @@ private fun SafetySettingsCard(
     onHeadingLockToleranceChange: (Int) -> Unit,
     onHeadingLockFullCorrectionChange: (Int) -> Unit,
     onHeadingLockNeutralReverseChange: (Int) -> Unit,
+    onAutoNavigationGpsJumpResetChange: (Int) -> Unit,
 ) {
     Card(
         colors = CardDefaults.cardColors(containerColor = MaterialTheme.colorScheme.surface),
@@ -488,6 +635,13 @@ private fun SafetySettingsCard(
                 steps = 99,
                 onValueChange = onHeadingLockNeutralReverseChange,
             )
+            MeterSliderRow(
+                label = "自动导航 GPS 跳变重置",
+                value = settingsState.autoNavigationGpsJumpResetMeters,
+                valueRange = 3f..30f,
+                steps = 26,
+                onValueChange = onAutoNavigationGpsJumpResetChange,
+            )
             SettingsRow("上电默认", "锁定")
             SettingsRow("失联处理", "油门回空挡")
             SettingsRow("急停后", "保持锁定")
@@ -546,6 +700,31 @@ private fun PercentSliderRow(
 }
 
 @Composable
+private fun MeterSliderRow(
+    label: String,
+    value: Int,
+    valueRange: ClosedFloatingPointRange<Float>,
+    steps: Int,
+    onValueChange: (Int) -> Unit,
+) {
+    Column(verticalArrangement = Arrangement.spacedBy(4.dp)) {
+        Row(
+            modifier = Modifier.fillMaxWidth(),
+            horizontalArrangement = Arrangement.SpaceBetween,
+        ) {
+            Text(label, color = MaterialTheme.colorScheme.onSurfaceVariant)
+            Text("${value}m", fontWeight = FontWeight.Medium)
+        }
+        Slider(
+            value = value.toFloat(),
+            onValueChange = { onValueChange(it.roundToInt()) },
+            valueRange = valueRange,
+            steps = steps,
+        )
+    }
+}
+
+@Composable
 private fun PhoneHeadingSettingsCard(
     controlState: ControlUiState,
     settingsState: SettingsUiState,
@@ -590,6 +769,69 @@ private fun PhoneHeadingSettingsCard(
             )
             SettingsRow("App 差速修正", "${controlState.appHeadingLockCorrectionPercent}%")
             SettingsRow("ESP32 航向闭环", "停用，仅执行左右 ESC 功率")
+        }
+    }
+}
+
+@Composable
+private fun Esp32ImuObservationCard(
+    controlState: ControlUiState,
+) {
+    val isConnected = controlState.connectionState == ConnectionState.Connected
+    val fields = if (isConnected) controlState.telemetry.statusFields else emptyMap()
+    val espHeading = if (isConnected) {
+        fields["IHDG"]?.toFloatOrNull() ?: controlState.telemetry.headingDegrees
+    } else {
+        null
+    }
+    val imuAvailable = if (isConnected) controlState.telemetry.imuAvailable else null
+    val phoneHeading = controlState.phoneHeadingDegrees
+
+    Card(
+        colors = CardDefaults.cardColors(containerColor = MaterialTheme.colorScheme.surface),
+        modifier = Modifier.fillMaxWidth(),
+    ) {
+        Column(
+            modifier = Modifier.padding(16.dp),
+            verticalArrangement = Arrangement.spacedBy(12.dp),
+        ) {
+            SettingsSectionHeader(
+                title = "ESP32 IMU 观测",
+                icon = Icons.Outlined.Settings,
+                color = Color(0xFF455A64),
+            )
+            SettingsRow("连接", connectionText(controlState.connectionState))
+            SettingsRow("记录样本", "${controlState.imuTelemetryLogSampleCount} 条")
+            SettingsRow("记录文件", controlState.imuTelemetryLogPath.ifBlank { "--" })
+            SettingsRow("观测状态", imuObservationStateText(isConnected, fields))
+            SettingsRow("IMU", imuAvailableText(fields["IMU"], imuAvailable))
+            SettingsRow("磁力计", imuAvailableText(fields["MAG"], null))
+            SettingsRow("航向来源", headingSourceText(fields["HSRC"]))
+            SettingsRow("融合质量", fields["IQUAL"] ?: "--")
+            SettingsRow("手机航向", phoneHeading?.let { "${it.roundToInt()}°" } ?: "--")
+            SettingsRow(
+                "ESP32 航向",
+                espHeading?.let { "${it.roundToInt()}°" } ?: fields.imuValue("IHDG", "°"),
+            )
+            SettingsRow("裸磁航向", fields.imuValue("IMHDG", "°"))
+            SettingsRow("Mahony yaw", fields.imuValue("IAHRS", "°"))
+            SettingsRow("手机 - ESP32", headingDeltaText(phoneHeading, espHeading))
+            HorizontalDivider()
+            SettingsRow("Mahony 姿态", fields.imuTriplet("IROLL", "IPITCH", "IHDG", "°"))
+            SettingsRow("加速度", fields.imuTriplet("IAX", "IAY", "IAZ", "g"))
+            SettingsRow("加速度模长", fields.imuValue("IAN", "g"))
+            SettingsRow("陀螺仪", fields.imuTriplet("IGX", "IGY", "IGZ", "dps"))
+            SettingsRow("陀螺零偏", fields.imuValue("IGZB", "dps"))
+            SettingsRow("磁力计原始", fields.imuTriplet("IMX", "IMY", "IMZ", "raw"))
+            SettingsRow("磁场强度", fields.imuValue("IMAG", "raw"))
+            SettingsRow("磁力计校准", magCalibrationStateText(fields["MCAL"] ?: "UNKNOWN"))
+            SettingsRow("校准样本", fields["MCNT"] ?: "--")
+            SettingsRow("校准范围", magRangeText(fields["MRX"], fields["MRY"]))
+            Text(
+                "仅用于对比和记录，不参与自动驾驶控制闭环。",
+                style = MaterialTheme.typography.bodySmall,
+                color = MaterialTheme.colorScheme.onSurfaceVariant,
+            )
         }
     }
 }
@@ -766,6 +1008,7 @@ private fun connectionText(connectionState: ConnectionState): String {
 private fun headingSourceText(source: String?): String {
     return when (source) {
         "PHONE" -> "手机指南针"
+        "FUSION" -> "融合航向"
         "MAG" -> "磁力计"
         "NONE" -> "无"
         null -> "--"
@@ -780,6 +1023,73 @@ private fun magCalibrationStateText(state: String): String {
         "NONE" -> "未保存"
         "UNKNOWN" -> "--"
         else -> state
+    }
+}
+
+private fun imuObservationStateText(isConnected: Boolean, fields: Map<String, String>): String {
+    return when {
+        !isConnected -> "未连接 ESP32"
+        fields["IMU"] == "0" -> "IMU 不可用"
+        !fields.containsKey("IAX") -> "等待 ESP32 新字段"
+        else -> "观测中"
+    }
+}
+
+private fun imuAvailableText(rawStatus: String?, fallback: Boolean?): String {
+    return when (rawStatus) {
+        "1" -> "可用"
+        "0" -> "不可用"
+        null -> when (fallback) {
+            true -> "可用"
+            false -> "不可用"
+            null -> "--"
+        }
+        else -> rawStatus
+    }
+}
+
+private fun Map<String, String>.imuValue(key: String, suffix: String = ""): String {
+    val value = this[key] ?: return "--"
+    return if (suffix.isBlank()) value else "$value $suffix"
+}
+
+private fun Map<String, String>.imuTriplet(
+    xKey: String,
+    yKey: String,
+    zKey: String,
+    suffix: String,
+): String {
+    val x = this[xKey] ?: return "--"
+    val y = this[yKey] ?: return "--"
+    val z = this[zKey] ?: return "--"
+    return "$x / $y / $z $suffix"
+}
+
+private fun headingDeltaText(phoneHeading: Float?, espHeading: Float?): String {
+    if (phoneHeading == null || espHeading == null) {
+        return "--"
+    }
+    val delta = shortestHeadingDelta(phoneHeading, espHeading)
+    return "${delta.roundToInt()}°"
+}
+
+private fun shortestHeadingDelta(target: Float, current: Float): Float {
+    var delta = (target - current) % 360f
+    if (delta > 180f) {
+        delta -= 360f
+    }
+    if (delta < -180f) {
+        delta += 360f
+    }
+    return delta
+}
+
+private fun magRangeText(rangeX: String?, rangeY: String?): String {
+    return when {
+        rangeX != null && rangeY != null -> "$rangeX / $rangeY"
+        rangeX != null -> rangeX
+        rangeY != null -> rangeY
+        else -> "--"
     }
 }
 

@@ -73,6 +73,21 @@ class GitHubReleaseClient(
         }
     }
 
+    fun fetchText(
+        url: String,
+        apiAssetDownload: Boolean = false,
+    ): String {
+        val connection = openConnection(
+            url = url,
+            accept = if (apiAssetDownload) {
+                "application/octet-stream"
+            } else {
+                "application/vnd.github+json"
+            },
+        )
+        return connection.inputStream.bufferedReader().use { it.readText() }
+    }
+
     private fun openConnection(url: String, accept: String): HttpURLConnection {
         val connection = URL(url).openConnection() as HttpURLConnection
         connection.connectTimeout = CONNECT_TIMEOUT_MS

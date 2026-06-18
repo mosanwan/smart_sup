@@ -20,6 +20,7 @@ import java.io.BufferedReader
 import java.io.InputStreamReader
 import java.io.OutputStream
 import java.util.UUID
+import kotlinx.coroutines.CompletableDeferred
 import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.Job
@@ -33,6 +34,7 @@ import kotlinx.coroutines.flow.asSharedFlow
 import kotlinx.coroutines.flow.StateFlow
 import kotlinx.coroutines.flow.asStateFlow
 import kotlinx.coroutines.withContext
+import kotlinx.coroutines.withTimeout
 
 class BluetoothClassicTransport(
     private val context: Context,
@@ -41,6 +43,11 @@ class BluetoothClassicTransport(
     private var socket: BluetoothSocket? = null
     private var outputStream: OutputStream? = null
     private var lastVisibleCommandLine: String? = null
+    private var otaReadySignal: CompletableDeferred<Unit>? = null
+    private var otaDoneSignal: CompletableDeferred<Unit>? = null
+    @Volatile private var otaRemoteWrittenBytes = 0
+    @Volatile private var otaRemoteExpectedBytes = 0
+    @Volatile private var otaUploadInProgress = false
     private val scope = CoroutineScope(SupervisorJob() + Dispatchers.IO)
     private var readJob: Job? = null
     private val telemetryState = MutableStateFlow(
@@ -140,6 +147,7 @@ class BluetoothClassicTransport(
     private fun writeAsciiLine(line: String) {
         val visibleLine = line.trim()
         require(visibleLine.isNotEmpty()) { "蓝牙命令不能为空" }
+        check(!otaUploadInProgress) { "ESP32 OTA 进行中，禁止发送普通命令" }
         val stream = outputStream ?: error("蓝牙输出流未连接")
         stream.write("$visibleLine\n".toByteArray(Charsets.US_ASCII))
         stream.flush()
@@ -163,31 +171,91 @@ class BluetoothClassicTransport(
         send(ControlCommand.Idle)
         delay(300)
 
-        val header = "OTA_BEGIN;SIZE=${firmware.size};MD5=$md5Hex\n"
-        stream.write(header.toByteArray(Charsets.US_ASCII))
-        stream.flush()
-        telemetryState.value = telemetryState.value.copy(
-            controllerMessage = "ESP32 OTA 已开始",
-            lastSentCommand = "OTA_BEGIN;SIZE=${firmware.size};MD5=$md5Hex",
-        )
-        delay(700)
+        val readySignal = CompletableDeferred<Unit>()
+        val doneSignal = CompletableDeferred<Unit>()
+        otaReadySignal = readySignal
+        otaDoneSignal = doneSignal
+        otaRemoteWrittenBytes = 0
+        otaRemoteExpectedBytes = firmware.size
+        otaUploadInProgress = true
 
-        var sentBytes = 0
-        while (sentBytes < firmware.size) {
-            val nextSize = minOf(OTA_CHUNK_SIZE, firmware.size - sentBytes)
-            stream.write(firmware, sentBytes, nextSize)
+        try {
+            val header = "OTA_BEGIN;SIZE=${firmware.size};MD5=$md5Hex\n"
+            stream.write(header.toByteArray(Charsets.US_ASCII))
             stream.flush()
-            sentBytes += nextSize
-            onProgress(sentBytes, firmware.size)
             telemetryState.value = telemetryState.value.copy(
-                controllerMessage = "ESP32 OTA 发送中 ${sentBytes * 100 / firmware.size}%",
+                controllerMessage = "ESP32 OTA 已请求，等待设备进入接收模式",
+                lastSentCommand = "OTA_BEGIN;SIZE=${firmware.size};MD5=$md5Hex",
             )
-            delay(OTA_CHUNK_DELAY_MS)
-        }
 
-        telemetryState.value = telemetryState.value.copy(
-            controllerMessage = "ESP32 OTA 已发送完成，等待设备校验并重启",
-        )
+            withTimeout(OTA_READY_TIMEOUT_MS) { readySignal.await() }
+
+            var sentBytes = 0
+            while (sentBytes < firmware.size) {
+                val nextSize = minOf(OTA_CHUNK_SIZE, firmware.size - sentBytes)
+                stream.write(firmware, sentBytes, nextSize)
+                stream.flush()
+                sentBytes += nextSize
+                val progressBytes = otaRemoteWrittenBytes.takeIf { it > 0 } ?: sentBytes
+                onProgress(progressBytes.coerceAtMost(firmware.size), firmware.size)
+                telemetryState.value = telemetryState.value.copy(
+                    controllerMessage = "ESP32 OTA 发送中 ${sentBytes * 100 / firmware.size}%；ESP 已写入 ${progressBytes * 100 / firmware.size}%",
+                )
+                waitForOtaReceiveWindow(
+                    sentBytes = sentBytes,
+                    totalBytes = firmware.size,
+                    doneSignal = doneSignal,
+                    onProgress = onProgress,
+                )
+                delay(OTA_CHUNK_DELAY_MS)
+            }
+
+            telemetryState.value = telemetryState.value.copy(
+                controllerMessage = "ESP32 OTA 已发送完成，等待设备写完尾部并校验",
+            )
+            withTimeout(OTA_DONE_TIMEOUT_MS) { doneSignal.await() }
+        } finally {
+            otaUploadInProgress = false
+            otaReadySignal = null
+            otaDoneSignal = null
+            otaRemoteWrittenBytes = 0
+            otaRemoteExpectedBytes = 0
+        }
+    }
+
+    private suspend fun waitForOtaReceiveWindow(
+        sentBytes: Int,
+        totalBytes: Int,
+        doneSignal: CompletableDeferred<Unit>,
+        onProgress: (sentBytes: Int, totalBytes: Int) -> Unit,
+    ) {
+        var lastRemoteBytes = otaRemoteWrittenBytes
+        var lastRemoteChangeAt = System.currentTimeMillis()
+        while (sentBytes - otaRemoteWrittenBytes > OTA_MAX_IN_FLIGHT_BYTES &&
+            otaRemoteWrittenBytes < totalBytes
+        ) {
+            if (doneSignal.isCompleted) {
+                doneSignal.await()
+                return
+            }
+
+            val remoteBytes = otaRemoteWrittenBytes
+            if (remoteBytes != lastRemoteBytes) {
+                lastRemoteBytes = remoteBytes
+                lastRemoteChangeAt = System.currentTimeMillis()
+                onProgress(remoteBytes, totalBytes)
+            }
+
+            val inFlightBytes = sentBytes - remoteBytes
+            telemetryState.value = telemetryState.value.copy(
+                controllerMessage = "ESP32 OTA 等待写入反馈：已写入 ${remoteBytes * 100 / totalBytes}%，在途 ${inFlightBytes} bytes",
+            )
+
+            check(System.currentTimeMillis() - lastRemoteChangeAt <= OTA_PROGRESS_STALL_TIMEOUT_MS) {
+                "ESP32 OTA 写入进度超时"
+            }
+            delay(OTA_WINDOW_WAIT_MS)
+        }
     }
 
     private fun startReader(nextSocket: BluetoothSocket) {
@@ -201,8 +269,11 @@ class BluetoothClassicTransport(
                         handleReceivedLine(line)
                     }
                 }
+                error("蓝牙读取结束")
             }.onFailure { error ->
                 Log.w(TAG, "reader stopped", error)
+                otaReadySignal?.completeExceptionally(error)
+                otaDoneSignal?.completeExceptionally(error)
                 telemetryState.value = telemetryState.value.copy(
                     controllerMessage = "蓝牙读取停止：${error.message ?: "未知错误"}",
                 )
@@ -211,6 +282,7 @@ class BluetoothClassicTransport(
     }
 
     private fun handleReceivedLine(line: String) {
+        handleOtaSignal(line)
         parseTrackLogEvent(line)?.let { event ->
             trackLogEventFlow.tryEmit(event)
             telemetryState.value = telemetryState.value.copy(lastReceivedStatus = line)
@@ -218,6 +290,44 @@ class BluetoothClassicTransport(
         }
 
         telemetryState.value = telemetryState.value.withStatusLine(line)
+    }
+
+    private fun handleOtaSignal(line: String) {
+        if (!line.startsWith("OTA;")) {
+            return
+        }
+        when {
+            line.startsWith("OTA;READY") -> {
+                line.parseSemicolonFields()["SIZE"]?.toIntOrNull()?.let { otaRemoteExpectedBytes = it }
+                otaReadySignal?.complete(Unit)
+            }
+            line.startsWith("OTA;PROGRESS=") -> {
+                parseOtaProgress(line)?.let { (writtenBytes, expectedBytes) ->
+                    otaRemoteWrittenBytes = writtenBytes
+                    otaRemoteExpectedBytes = expectedBytes
+                }
+            }
+            line.startsWith("OTA;OK") -> {
+                line.parseSemicolonFields()["BYTES"]?.toIntOrNull()?.let { otaRemoteWrittenBytes = it }
+                otaReadySignal?.complete(Unit)
+                otaDoneSignal?.complete(Unit)
+            }
+            line.startsWith("OTA;ERR=") -> {
+                val error = IllegalStateException("ESP32 OTA 失败：${line.removePrefix("OTA;ERR=")}")
+                otaReadySignal?.completeExceptionally(error)
+                otaDoneSignal?.completeExceptionally(error)
+            }
+        }
+    }
+
+    private fun parseOtaProgress(line: String): Pair<Int, Int>? {
+        val parts = line.removePrefix("OTA;PROGRESS=").split('/', limit = 2)
+        if (parts.size != 2) {
+            return null
+        }
+        val writtenBytes = parts[0].toIntOrNull() ?: return null
+        val expectedBytes = parts[1].toIntOrNull() ?: return null
+        return writtenBytes to expectedBytes
     }
 
     private fun Telemetry.withStatusLine(line: String): Telemetry {
@@ -235,7 +345,7 @@ class BluetoothClassicTransport(
             )
         }
 
-        val fields = line.parseStatusFields()
+        val fields = line.parseControllerFields()
         val isFullStatus = fields.containsKey("L") || fields.containsKey("R") || fields.containsKey("LPWM")
         val nextStatusFields = when {
             fields.isEmpty() -> statusFields
@@ -268,8 +378,8 @@ class BluetoothClassicTransport(
         }
     }
 
-    private fun String.parseStatusFields(): Map<String, String> {
-        if (!startsWith("STATUS;")) {
+    private fun String.parseControllerFields(): Map<String, String> {
+        if (!startsWith("STATUS;") && !startsWith("INFO;")) {
             return emptyMap()
         }
         return parseSemicolonFields()
@@ -363,8 +473,13 @@ class BluetoothClassicTransport(
     companion object {
         private const val TAG = "SmartSupBt"
         private const val BOND_TIMEOUT_MS = 30_000L
-        private const val OTA_CHUNK_SIZE = 512
-        private const val OTA_CHUNK_DELAY_MS = 8L
+        private const val OTA_CHUNK_SIZE = 256
+        private const val OTA_CHUNK_DELAY_MS = 6L
+        private const val OTA_MAX_IN_FLIGHT_BYTES = 12 * 1024
+        private const val OTA_WINDOW_WAIT_MS = 80L
+        private const val OTA_PROGRESS_STALL_TIMEOUT_MS = 12_000L
+        private const val OTA_READY_TIMEOUT_MS = 5_000L
+        private const val OTA_DONE_TIMEOUT_MS = 45_000L
         private const val TRACK_EVENT_BUFFER_CAPACITY = 256
         private const val SPP_CHANNEL = 1
         private val SPP_UUID: UUID = UUID.fromString("00001101-0000-1000-8000-00805F9B34FB")

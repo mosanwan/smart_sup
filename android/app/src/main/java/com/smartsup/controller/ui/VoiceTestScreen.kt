@@ -14,6 +14,7 @@ import androidx.compose.foundation.verticalScroll
 import androidx.compose.material.icons.automirrored.outlined.PlaylistAddCheck
 import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.outlined.CheckCircle
+import androidx.compose.material.icons.outlined.CloudQueue
 import androidx.compose.material.icons.outlined.ErrorOutline
 import androidx.compose.material.icons.outlined.Info
 import androidx.compose.material.icons.outlined.Mic
@@ -45,11 +46,20 @@ import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.unit.dp
 import com.smartsup.controller.model.ConnectionState
 import com.smartsup.controller.model.ControlUiState
+import com.smartsup.controller.model.RealtimeTtsMode
+import com.smartsup.controller.model.SettingsUiState
 
 @Composable
 fun VoiceTestScreen(
     state: ControlUiState,
+    settingsState: SettingsUiState,
     modifier: Modifier = Modifier,
+    onToggleRealtimeVoice: () -> Unit,
+    onPushToTalkStart: () -> Unit,
+    onPushToTalkStop: () -> Unit,
+    onRealtimeTtsModeChange: (RealtimeTtsMode) -> Unit,
+    onWakeWordRequiredChange: (Boolean) -> Unit,
+    onRealtimeControlEvent: (String) -> Unit,
     onVoiceInputChange: (String) -> Unit,
     onVoiceSamplingEnabledChange: (Boolean) -> Unit,
     onNextVoiceSampleTarget: () -> Unit,
@@ -66,7 +76,18 @@ fun VoiceTestScreen(
         verticalArrangement = Arrangement.spacedBy(10.dp),
     ) {
         VoiceStatusCard(
-            value = state.voiceAsrStatus,
+            value = state.realtimeVoiceStatus,
+        )
+
+        RealtimeVoiceAgentCard(
+            state = state,
+            settingsState = settingsState,
+            onToggleRealtimeVoice = onToggleRealtimeVoice,
+            onPushToTalkStart = onPushToTalkStart,
+            onPushToTalkStop = onPushToTalkStop,
+            onRealtimeTtsModeChange = onRealtimeTtsModeChange,
+            onWakeWordRequiredChange = onWakeWordRequiredChange,
+            onRealtimeControlEvent = onRealtimeControlEvent,
         )
 
         VoiceTranscriptionCard(
@@ -145,12 +166,12 @@ private fun VoiceStatusCard(value: String) {
         ) {
             Icon(
                 imageVector = Icons.Outlined.Mic,
-                contentDescription = "ASR 运行状态",
+                contentDescription = "实时语音状态",
                 tint = color,
                 modifier = Modifier.size(20.dp),
             )
             Text(
-                "ASR 运行状态",
+                "实时语音状态",
                 style = MaterialTheme.typography.labelLarge,
                 fontWeight = FontWeight.SemiBold,
                 color = color,
@@ -169,6 +190,175 @@ private fun VoiceStatusCard(value: String) {
 }
 
 @Composable
+private fun RealtimeVoiceAgentCard(
+    state: ControlUiState,
+    settingsState: SettingsUiState,
+    onToggleRealtimeVoice: () -> Unit,
+    onPushToTalkStart: () -> Unit,
+    onPushToTalkStop: () -> Unit,
+    onRealtimeTtsModeChange: (RealtimeTtsMode) -> Unit,
+    onWakeWordRequiredChange: (Boolean) -> Unit,
+    onRealtimeControlEvent: (String) -> Unit,
+) {
+    val color = if (state.voiceControlEnabled) Color(0xFF2E7D32) else Color(0xFF546E7A)
+    Card(
+        colors = CardDefaults.cardColors(containerColor = color.copy(alpha = 0.1f)),
+        modifier = Modifier.fillMaxWidth(),
+    ) {
+        Column(
+            modifier = Modifier.padding(12.dp),
+            verticalArrangement = Arrangement.spacedBy(10.dp),
+        ) {
+            VoiceSectionHeader(
+                title = "云端实时语音 Agent",
+                icon = Icons.Outlined.CloudQueue,
+                color = color,
+            )
+            Text(
+                "模式：${state.realtimeVoiceMode.name}；${state.realtimeVoiceMetrics}",
+                style = MaterialTheme.typography.bodySmall,
+                color = MaterialTheme.colorScheme.onSurfaceVariant,
+            )
+            Row(
+                modifier = Modifier.fillMaxWidth(),
+                horizontalArrangement = Arrangement.spacedBy(10.dp),
+                verticalAlignment = Alignment.CenterVertically,
+            ) {
+                Column(modifier = Modifier.weight(1f)) {
+                    Text(
+                        "TTS：${if (settingsState.realtimeTtsMode == RealtimeTtsMode.Cloud) "云端" else "本地"}",
+                        style = MaterialTheme.typography.labelLarge,
+                        fontWeight = FontWeight.SemiBold,
+                    )
+                    Text(
+                        if (settingsState.realtimeTtsMode == RealtimeTtsMode.Cloud) {
+                            if (settingsState.cloudTtsConfigured) {
+                                "云端音色：${settingsState.realtimeVoiceVoice}"
+                            } else {
+                                "缺少 API Key，将回退本地 TTS"
+                            }
+                        } else {
+                            "使用 Android 系统 TTS，设置页音色不生效"
+                        },
+                        style = MaterialTheme.typography.bodySmall,
+                        color = MaterialTheme.colorScheme.onSurfaceVariant,
+                        maxLines = 1,
+                        overflow = TextOverflow.Ellipsis,
+                    )
+                }
+                Switch(
+                    checked = settingsState.realtimeTtsMode == RealtimeTtsMode.Cloud,
+                    onCheckedChange = {
+                        onRealtimeTtsModeChange(if (it) RealtimeTtsMode.Cloud else RealtimeTtsMode.Local)
+                    },
+                )
+            }
+            Row(
+                modifier = Modifier.fillMaxWidth(),
+                horizontalArrangement = Arrangement.spacedBy(10.dp),
+                verticalAlignment = Alignment.CenterVertically,
+            ) {
+                Column(modifier = Modifier.weight(1f)) {
+                    Text(
+                        "唤醒词：${if (state.realtimeWakeWordRequired) "豆包" else "关闭"}",
+                        style = MaterialTheme.typography.labelLarge,
+                        fontWeight = FontWeight.SemiBold,
+                    )
+                    Text(
+                        if (state.realtimeWakeWordRequired) {
+                            "没有“豆包”前缀的语音不会发送给方舟"
+                        } else {
+                            "检测到人声后直接发送给方舟"
+                        },
+                        style = MaterialTheme.typography.bodySmall,
+                        color = MaterialTheme.colorScheme.onSurfaceVariant,
+                        maxLines = 1,
+                        overflow = TextOverflow.Ellipsis,
+                    )
+                }
+                Switch(
+                    checked = state.realtimeWakeWordRequired,
+                    onCheckedChange = onWakeWordRequiredChange,
+                )
+            }
+            Row(
+                modifier = Modifier.fillMaxWidth(),
+                horizontalArrangement = Arrangement.spacedBy(8.dp),
+            ) {
+                VoiceActionButton(
+                    text = if (state.voiceControlEnabled) "关闭实时" else "开启实时",
+                    icon = Icons.Outlined.Mic,
+                    color = color,
+                    enabled = true,
+                    onClick = onToggleRealtimeVoice,
+                    modifier = Modifier.weight(1f),
+                )
+                VoiceActionButton(
+                    text = "按住说话",
+                    icon = Icons.Outlined.Mic,
+                    color = Color(0xFF1565C0),
+                    enabled = true,
+                    onClick = onPushToTalkStart,
+                    modifier = Modifier.weight(1f),
+                )
+                VoiceActionButton(
+                    text = "结束",
+                    icon = Icons.Outlined.CheckCircle,
+                    color = Color(0xFFE65100),
+                    enabled = state.voiceControlEnabled,
+                    onClick = onPushToTalkStop,
+                    modifier = Modifier.weight(1f),
+                )
+            }
+            Row(
+                modifier = Modifier.fillMaxWidth(),
+                horizontalArrangement = Arrangement.spacedBy(8.dp),
+            ) {
+                VoiceActionButton(
+                    text = "状态",
+                    icon = Icons.Outlined.Info,
+                    color = Color(0xFF1565C0),
+                    enabled = true,
+                    onClick = {
+                        onRealtimeControlEvent(
+                            """{"type":"control_event","action":"explain_status","reason":"手动模拟状态说明"}""",
+                        )
+                    },
+                    modifier = Modifier.weight(1f),
+                )
+                VoiceActionButton(
+                    text = "停止",
+                    icon = Icons.Outlined.Security,
+                    color = Color(0xFFC62828),
+                    enabled = true,
+                    onClick = {
+                        onRealtimeControlEvent(
+                            """{"type":"control_event","action":"stop","reason":"手动模拟停止"}""",
+                        )
+                    },
+                    modifier = Modifier.weight(1f),
+                )
+                VoiceActionButton(
+                    text = "低速",
+                    icon = Icons.Outlined.Terminal,
+                    color = Color(0xFF2E7D32),
+                    enabled = true,
+                    onClick = {
+                        onRealtimeControlEvent(
+                            """{"type":"control_event","action":"set_limited_power","left_percent":12,"right_percent":12,"duration_ms":1500,"reason":"手动模拟低速推进"}""",
+                        )
+                    },
+                    modifier = Modifier.weight(1f),
+                )
+            }
+            VoiceSampleField("实时转写", state.realtimeVoiceTranscript.ifBlank { "等待云端转写" })
+            VoiceSampleField("实时回复", state.realtimeVoiceReply.ifBlank { "等待云端音频回复" })
+            VoiceSampleField("控制事件", state.realtimeVoiceControlEvent)
+        }
+    }
+}
+
+@Composable
 private fun VoiceTranscriptionCard(
     value: String,
     onValueChange: (String) -> Unit,
@@ -182,7 +372,7 @@ private fun VoiceTranscriptionCard(
             verticalArrangement = Arrangement.spacedBy(8.dp),
         ) {
             VoiceSectionHeader(
-                title = "ASR 转写文本",
+                title = "转写文本 / 调试输入",
                 icon = Icons.Outlined.Terminal,
                 color = Color(0xFF546E7A),
             )
@@ -312,7 +502,7 @@ private fun VoiceSamplingDialog(
                 OutlinedTextField(
                     value = state.voiceInputText,
                     onValueChange = onVoiceInputChange,
-                    label = { Text("ASR 转写文本") },
+                label = { Text("转写文本 / 调试输入") },
                     modifier = Modifier
                         .fillMaxWidth()
                         .heightIn(min = 88.dp),
@@ -336,7 +526,7 @@ private fun VoiceSamplingDialog(
                     fontWeight = FontWeight.Medium,
                 )
 
-                VoiceSampleField("本次 ASR", state.voiceSamplePendingText.ifBlank { "无待保存样本" })
+                VoiceSampleField("本次转写", state.voiceSamplePendingText.ifBlank { "无待保存样本" })
                 VoiceSampleField("解析结果", state.voiceSamplePendingCommand)
                 VoiceSampleField("保存状态", "${state.voiceSampleLastMessage}；已保存 ${state.voiceSampleSavedCount} 条")
 

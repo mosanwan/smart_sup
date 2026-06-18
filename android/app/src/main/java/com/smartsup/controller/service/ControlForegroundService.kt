@@ -12,10 +12,14 @@ import android.content.pm.PackageManager
 import android.content.pm.ServiceInfo
 import android.os.Build
 import android.os.IBinder
+import android.os.PowerManager
 import com.smartsup.controller.MainActivity
 import com.smartsup.controller.R
 
 class ControlForegroundService : Service() {
+    private var wakeLock: PowerManager.WakeLock? = null
+    private var microphoneActive = false
+
     override fun onCreate() {
         super.onCreate()
         createNotificationChannel()
@@ -28,6 +32,8 @@ class ControlForegroundService : Service() {
             return START_NOT_STICKY
         }
 
+        microphoneActive = intent?.getBooleanExtra(EXTRA_MICROPHONE_ACTIVE, false) == true
+        acquireWakeLock()
         val notification = buildNotification()
         if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.Q) {
             startForeground(
@@ -43,16 +49,21 @@ class ControlForegroundService : Service() {
 
     override fun onBind(intent: Intent?): IBinder? = null
 
+    override fun onDestroy() {
+        releaseWakeLock()
+        super.onDestroy()
+    }
+
     private fun createNotificationChannel() {
         if (Build.VERSION.SDK_INT < Build.VERSION_CODES.O) {
             return
         }
         val channel = NotificationChannel(
             CHANNEL_ID,
-            "后台声控",
+            "后台控制保活",
             NotificationManager.IMPORTANCE_LOW,
         ).apply {
-            description = "保持 Smart SUP 后台语音监听和蓝牙控制"
+            description = "保持 Smart SUP 后台蓝牙控制心跳和语音监听"
             setShowBadge(false)
         }
         getSystemService(NotificationManager::class.java)
@@ -68,19 +79,54 @@ class ControlForegroundService : Service() {
         )
         return Notification.Builder(this, CHANNEL_ID)
             .setSmallIcon(R.drawable.ic_launcher)
-            .setContentTitle("Smart SUP 声控运行中")
-            .setContentText("后台持续监听麦克风，并保持蓝牙控制进程")
+            .setContentTitle("Smart SUP 控制运行中")
+            .setContentText(
+                if (microphoneActive) {
+                    "保持蓝牙控制心跳，并进行实时语音监听"
+                } else {
+                    "保持蓝牙控制心跳，防止后台暂停后触发主控失联"
+                },
+            )
             .setContentIntent(openIntent)
             .setOngoing(true)
             .build()
     }
 
     private fun foregroundServiceTypes(): Int {
-        var types = ServiceInfo.FOREGROUND_SERVICE_TYPE_MICROPHONE
+        var types = 0
         if (hasConnectedDevicePermission()) {
             types = types or ServiceInfo.FOREGROUND_SERVICE_TYPE_CONNECTED_DEVICE
         }
+        if (microphoneActive) {
+            types = types or ServiceInfo.FOREGROUND_SERVICE_TYPE_MICROPHONE
+        }
+        if (types == 0) {
+            types = ServiceInfo.FOREGROUND_SERVICE_TYPE_CONNECTED_DEVICE
+        }
         return types
+    }
+
+    private fun acquireWakeLock() {
+        if (wakeLock?.isHeld == true) {
+            return
+        }
+        val powerManager = getSystemService(PowerManager::class.java)
+        wakeLock = powerManager.newWakeLock(
+            PowerManager.PARTIAL_WAKE_LOCK,
+            "SmartSup:ControlHeartbeat",
+        ).apply {
+            setReferenceCounted(false)
+            acquire()
+        }
+    }
+
+    private fun releaseWakeLock() {
+        wakeLock?.let { lock ->
+            if (lock.isHeld) {
+                lock.release()
+            }
+        }
+        wakeLock = null
     }
 
     private fun hasConnectedDevicePermission(): Boolean {
@@ -95,9 +141,11 @@ class ControlForegroundService : Service() {
         private const val CHANNEL_ID = "smart_sup_background_voice"
         private const val NOTIFICATION_ID = 1001
         private const val ACTION_STOP = "com.smartsup.controller.service.STOP_BACKGROUND_VOICE"
+        private const val EXTRA_MICROPHONE_ACTIVE = "microphone_active"
 
-        fun start(context: Context) {
+        fun start(context: Context, microphoneActive: Boolean = false) {
             val intent = Intent(context, ControlForegroundService::class.java)
+                .putExtra(EXTRA_MICROPHONE_ACTIVE, microphoneActive)
             if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.O) {
                 context.startForegroundService(intent)
             } else {

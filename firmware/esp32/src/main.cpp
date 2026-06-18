@@ -1,6 +1,7 @@
 #include <Arduino.h>
 #include "BluetoothSerial.h"
 #include "esp_partition.h"
+#include <Adafruit_AHRS.h>
 #include <Preferences.h>
 #include <Update.h>
 #include <Wire.h>
@@ -8,9 +9,14 @@
 #include "factory_unit_id.h"
 #endif
 
+#ifndef SMART_SUP_VERSION
+#define SMART_SUP_VERSION "dev"
+#endif
+
 namespace {
 BluetoothSerial SerialBT;
 Preferences preferences;
+Adafruit_Mahony imuMahonyFilter;
 
 constexpr uint8_t LEFT_ESC_PIN = 25;
 constexpr uint8_t RIGHT_ESC_PIN = 26;
@@ -22,6 +28,7 @@ constexpr int8_t GPS_RX_PIN = 16;
 constexpr int8_t GPS_TX_PIN = -1;
 constexpr uint8_t GPS_PPS_PIN = 13;
 constexpr char BT_DEVICE_NAME_PREFIX[] = "SmartSUP-";
+constexpr char FIRMWARE_VERSION[] = SMART_SUP_VERSION;
 constexpr char NVS_NAMESPACE[] = "smart_sup";
 constexpr char NVS_UNIT_ID_KEY[] = "unit_id";
 constexpr char NVS_TRACK_SESSION_KEY[] = "track_sid";
@@ -84,6 +91,32 @@ constexpr float MAG_HEADING_OFFSET_DEGREES = 0.0f;
 constexpr float MAG_HEADING_FILTER_ALPHA = 0.22f;
 constexpr uint32_t MAG_HEADING_INTERVAL_MS = 20;
 constexpr uint32_t PHONE_HEADING_TIMEOUT_MS = 1000;
+constexpr float IMU_FUSION_SAMPLE_RATE_HZ = 50.0f;
+constexpr float IMU_FUSION_MAG_ALPHA_MOVING = 0.008f;
+constexpr float IMU_FUSION_MAG_ALPHA_STILL = 0.050f;
+constexpr float IMU_FUSION_MAG_ALPHA_RECOVER = 0.120f;
+constexpr float IMU_FUSION_STILL_GYRO_DPS = 1.5f;
+constexpr float IMU_FUSION_RECOVER_ERROR_DEGREES = 8.0f;
+constexpr float IMU_FUSION_MAX_MAG_CORRECTION_MOVING_DPS = 30.0f;
+constexpr float IMU_FUSION_MAX_MAG_CORRECTION_STILL_DPS = 100.0f;
+constexpr float IMU_TURNING_GYRO_DPS = 8.0f;
+constexpr float IMU_AHRS_YAW_OFFSET_ALPHA_STILL = 0.014f;
+constexpr float IMU_AHRS_YAW_OFFSET_ALPHA_MOVING = 0.002f;
+constexpr float IMU_AHRS_YAW_OFFSET_ALPHA_RECOVER = 0.035f;
+constexpr float IMU_HEADING_OUTPUT_ALPHA_STILL = 0.10f;
+constexpr float IMU_HEADING_OUTPUT_ALPHA_MOVING = 0.28f;
+constexpr float IMU_HEADING_OUTPUT_ALPHA_RECOVER = 0.20f;
+constexpr float IMU_HEADING_OUTPUT_MAX_DPS_STILL = 8.0f;
+constexpr float IMU_HEADING_OUTPUT_MAX_DPS_MOVING = 35.0f;
+constexpr float IMU_HEADING_OUTPUT_MAX_DPS_RECOVER = 22.0f;
+constexpr uint32_t IMU_TURN_RECOVERY_MS = 1200;
+constexpr uint32_t IMU_FUSION_SETTLING_MS = 2000;
+constexpr float IMU_ACCEL_NORM_MIN_G = 0.65f;
+constexpr float IMU_ACCEL_NORM_MAX_G = 1.35f;
+constexpr float IMU_MAG_DISTURBANCE_RATIO = 0.30f;
+constexpr uint16_t IMU_GYRO_BIAS_SAMPLES = 200;
+constexpr float IMU_GYRO_BIAS_STABLE_RANGE_DPS = 3.0f;
+constexpr float IMU_GYRO_SATURATION_DPS = 230.0f;
 constexpr uint16_t MAG_CAL_MIN_SAMPLES = 80;
 constexpr int32_t MAG_CAL_MIN_RANGE = 100;
 constexpr float MAG_CAL_MIN_SCALE = 0.2f;
@@ -122,10 +155,12 @@ constexpr uint8_t ICM20948_PWR_MGMT_1 = 0x06;
 constexpr uint8_t ICM20948_PWR_MGMT_2 = 0x07;
 constexpr uint8_t ICM20948_INT_PIN_CFG = 0x0F;
 constexpr uint8_t ICM20948_USER_CTRL = 0x03;
+constexpr uint8_t ICM20948_ACCEL_XOUT_H = 0x2D;
 constexpr uint8_t ICM20948_GYRO_ZOUT_H = 0x37;
 constexpr uint8_t ICM20948_GYRO_SMPLRT_DIV = 0x00;
 constexpr uint8_t ICM20948_GYRO_CONFIG_1 = 0x01;
 constexpr uint8_t ICM20948_GYRO_CONFIG_2 = 0x02;
+constexpr float ICM20948_ACCEL_2G_LSB_PER_G = 16384.0f;
 constexpr uint8_t AK09916_ADDR = 0x0C;
 constexpr uint8_t AK09916_WIA2 = 0x01;
 constexpr uint8_t AK09916_WIA2_VALUE = 0x09;
@@ -192,12 +227,14 @@ const char* unitIdSource = "FALLBACK";
 bool imuAvailable = false;
 bool magnetometerAvailable = false;
 bool headingFilterInitialized = false;
+bool imuHeadingFilterInitialized = false;
 bool magCalibrationValid = false;
 bool magCalibrationActive = false;
 bool phoneHeadingEnabled = false;
 uint8_t imuAddress = ICM20948_ADDR_LOW;
 uint8_t imuFailureCount = 0;
 float headingDegrees = 0.0f;
+float imuHeadingDegrees = 0.0f;
 float phoneHeadingDegrees = 0.0f;
 uint32_t lastPhoneHeadingMs = 0;
 float magOffsetX = 0.0f;
@@ -210,6 +247,33 @@ int32_t magCalibrationMinY = 0;
 int32_t magCalibrationMaxY = 0;
 uint16_t magCalibrationSamples = 0;
 float gyroZBiasDps = 0.0f;
+bool gyroZBiasCalibrated = false;
+float imuAccelXG = 0.0f;
+float imuAccelYG = 0.0f;
+float imuAccelZG = 0.0f;
+float imuAccelNormG = 0.0f;
+float imuGyroXDps = 0.0f;
+float imuGyroYDps = 0.0f;
+float imuGyroZDps = 0.0f;
+int16_t imuMagRawX = 0;
+int16_t imuMagRawY = 0;
+int16_t imuMagRawZ = 0;
+float imuMagNormRaw = 0.0f;
+float imuMagHeadingDegrees = 0.0f;
+float imuMagCalX = 0.0f;
+float imuMagCalY = 0.0f;
+float imuMagCalZ = 0.0f;
+float imuAharsRawYawDegrees = 0.0f;
+float imuAharsYawOffsetDegrees = 0.0f;
+bool imuAharsYawOffsetInitialized = false;
+float imuRollDegrees = 0.0f;
+float imuPitchDegrees = 0.0f;
+float imuMagNormReferenceRaw = 0.0f;
+bool imuMagNormReferenceInitialized = false;
+uint32_t imuFusionInitializedMs = 0;
+uint32_t imuLastMagCorrectionMs = 0;
+uint32_t imuLastTurningMs = 0;
+const char* imuFusionQuality = "STALE";
 float lastTurnErrorDegrees = 0.0f;
 bool turnControlActive = false;
 bool turnControlCompleted = false;
@@ -473,15 +537,15 @@ bool hasFreshPhoneHeading(uint32_t now) {
 }
 
 bool hasUsableHeading(uint32_t now) {
-  return hasFreshPhoneHeading(now) || (!phoneHeadingEnabled && imuAvailable);
+  return hasFreshPhoneHeading(now) || (!phoneHeadingEnabled && imuAvailable && magnetometerAvailable);
 }
 
 const char* activeHeadingSourceName(uint32_t now) {
   if (hasFreshPhoneHeading(now)) {
     return "PHONE";
   }
-  if (!phoneHeadingEnabled && magnetometerAvailable) {
-    return "MAG";
+  if (!phoneHeadingEnabled && magnetometerAvailable && imuHeadingFilterInitialized) {
+    return "FUSION";
   }
   return "NONE";
 }
@@ -542,6 +606,33 @@ bool readGyroZDps(float& gyroZDps) {
     return false;
   }
   gyroZDps = (static_cast<float>(rawValue) / ICM20948_GYRO_250DPS_LSB_PER_DPS) * IMU_YAW_SIGN;
+  return true;
+}
+
+bool readImuMotionSample() {
+  uint8_t buffer[12] = {};
+  if (!imuSelectBank(ICM20948_BANK_0) || !imuRead(ICM20948_ACCEL_XOUT_H, buffer, sizeof(buffer))) {
+    return false;
+  }
+
+  const int16_t rawAccelX = static_cast<int16_t>((static_cast<uint16_t>(buffer[0]) << 8) | buffer[1]);
+  const int16_t rawAccelY = static_cast<int16_t>((static_cast<uint16_t>(buffer[2]) << 8) | buffer[3]);
+  const int16_t rawAccelZ = static_cast<int16_t>((static_cast<uint16_t>(buffer[4]) << 8) | buffer[5]);
+  const int16_t rawGyroX = static_cast<int16_t>((static_cast<uint16_t>(buffer[6]) << 8) | buffer[7]);
+  const int16_t rawGyroY = static_cast<int16_t>((static_cast<uint16_t>(buffer[8]) << 8) | buffer[9]);
+  const int16_t rawGyroZ = static_cast<int16_t>((static_cast<uint16_t>(buffer[10]) << 8) | buffer[11]);
+
+  imuAccelXG = static_cast<float>(rawAccelX) / ICM20948_ACCEL_2G_LSB_PER_G;
+  imuAccelYG = static_cast<float>(rawAccelY) / ICM20948_ACCEL_2G_LSB_PER_G;
+  imuAccelZG = static_cast<float>(rawAccelZ) / ICM20948_ACCEL_2G_LSB_PER_G;
+  imuAccelNormG = sqrtf(
+    imuAccelXG * imuAccelXG +
+      imuAccelYG * imuAccelYG +
+      imuAccelZG * imuAccelZG
+  );
+  imuGyroXDps = static_cast<float>(rawGyroX) / ICM20948_GYRO_250DPS_LSB_PER_DPS;
+  imuGyroYDps = static_cast<float>(rawGyroY) / ICM20948_GYRO_250DPS_LSB_PER_DPS;
+  imuGyroZDps = ((static_cast<float>(rawGyroZ) / ICM20948_GYRO_250DPS_LSB_PER_DPS) * IMU_YAW_SIGN) - gyroZBiasDps;
   return true;
 }
 
@@ -757,13 +848,25 @@ bool readMagHeadingDegrees(float& heading, bool& hasNewHeading) {
 
   const int16_t rawX = static_cast<int16_t>((static_cast<uint16_t>(buffer[2]) << 8) | buffer[1]);
   const int16_t rawY = static_cast<int16_t>((static_cast<uint16_t>(buffer[4]) << 8) | buffer[3]);
-  if (rawX == 0 && rawY == 0) {
+  const int16_t rawZ = static_cast<int16_t>((static_cast<uint16_t>(buffer[6]) << 8) | buffer[5]);
+  imuMagRawX = rawX;
+  imuMagRawY = rawY;
+  imuMagRawZ = rawZ;
+  imuMagNormRaw = sqrtf(
+    static_cast<float>(rawX) * static_cast<float>(rawX) +
+      static_cast<float>(rawY) * static_cast<float>(rawY) +
+      static_cast<float>(rawZ) * static_cast<float>(rawZ)
+  );
+  if (rawX == 0 && rawY == 0 && rawZ == 0) {
     return true;
   }
   updateMagCalibrationSample(rawX, rawY);
 
   const float calibratedX = magCalibrationValid ? (static_cast<float>(rawX) - magOffsetX) * magScaleX : static_cast<float>(rawX);
   const float calibratedY = magCalibrationValid ? (static_cast<float>(rawY) - magOffsetY) * magScaleY : static_cast<float>(rawY);
+  imuMagCalX = calibratedX;
+  imuMagCalY = calibratedY;
+  imuMagCalZ = static_cast<float>(rawZ);
   if (fabsf(calibratedX) < 0.001f && fabsf(calibratedY) < 0.001f) {
     return true;
   }
@@ -776,18 +879,298 @@ bool readMagHeadingDegrees(float& heading, bool& hasNewHeading) {
   return true;
 }
 
-void calibrateGyroBias() {
+float clampFloat(float value, float minValue, float maxValue) {
+  if (value < minValue) {
+    return minValue;
+  }
+  if (value > maxValue) {
+    return maxValue;
+  }
+  return value;
+}
+
+bool accelNormSane() {
+  return isfinite(imuAccelNormG) &&
+    imuAccelNormG >= IMU_ACCEL_NORM_MIN_G &&
+    imuAccelNormG <= IMU_ACCEL_NORM_MAX_G;
+}
+
+bool gyroYawSane() {
+  return isfinite(imuGyroZDps) && fabsf(imuGyroZDps) < IMU_GYRO_SATURATION_DPS;
+}
+
+bool magNormSane() {
+  if (!isfinite(imuMagNormRaw) || imuMagNormRaw < 1.0f) {
+    return false;
+  }
+
+  if (!imuMagNormReferenceInitialized) {
+    imuMagNormReferenceRaw = imuMagNormRaw;
+    imuMagNormReferenceInitialized = true;
+    return true;
+  }
+
+  const float allowedDelta = imuMagNormReferenceRaw * IMU_MAG_DISTURBANCE_RATIO;
+  if (fabsf(imuMagNormRaw - imuMagNormReferenceRaw) > allowedDelta) {
+    return false;
+  }
+
+  imuMagNormReferenceRaw = imuMagNormReferenceRaw * 0.995f + imuMagNormRaw * 0.005f;
+  return true;
+}
+
+float ahrsAccelXG() {
+  return imuAccelXG;
+}
+
+float ahrsAccelYG() {
+  return -imuAccelYG;
+}
+
+float ahrsAccelZG() {
+  return -imuAccelZG;
+}
+
+float ahrsGyroXDps() {
+  return imuGyroXDps;
+}
+
+float ahrsGyroYDps() {
+  return -imuGyroYDps;
+}
+
+float ahrsGyroZDps() {
+  return imuGyroZDps;
+}
+
+float ahrsMagX() {
+  return imuMagCalX;
+}
+
+float ahrsMagY() {
+  return -imuMagCalY;
+}
+
+float ahrsMagZ() {
+  return -imuMagCalZ;
+}
+
+float normalizeBoatTiltDegrees(float angleDegrees) {
+  float normalized = normalizeAngle180(angleDegrees);
+  if (normalized > 90.0f) {
+    normalized -= 180.0f;
+  } else if (normalized < -90.0f) {
+    normalized += 180.0f;
+  }
+  return normalized;
+}
+
+bool imuIsTurning() {
+  return isfinite(imuGyroZDps) && fabsf(imuGyroZDps) >= IMU_TURNING_GYRO_DPS;
+}
+
+bool imuIsRecoveringFromTurn(uint32_t now) {
+  return imuLastTurningMs != 0 && now - imuLastTurningMs <= IMU_TURN_RECOVERY_MS;
+}
+
+float imuYawOffsetCorrectionAlpha(uint32_t now) {
+  if (imuIsTurning()) {
+    return IMU_AHRS_YAW_OFFSET_ALPHA_MOVING;
+  }
+  return imuIsRecoveringFromTurn(now)
+    ? IMU_AHRS_YAW_OFFSET_ALPHA_RECOVER
+    : IMU_AHRS_YAW_OFFSET_ALPHA_STILL;
+}
+
+float imuHeadingOutputAlpha(uint32_t now) {
+  if (imuIsTurning()) {
+    return IMU_HEADING_OUTPUT_ALPHA_MOVING;
+  }
+  return imuIsRecoveringFromTurn(now)
+    ? IMU_HEADING_OUTPUT_ALPHA_RECOVER
+    : IMU_HEADING_OUTPUT_ALPHA_STILL;
+}
+
+float imuHeadingOutputMaxStepDegrees(uint32_t now, float dtSeconds) {
+  const float maxDps = imuIsTurning()
+    ? IMU_HEADING_OUTPUT_MAX_DPS_MOVING
+    : (imuIsRecoveringFromTurn(now)
+      ? IMU_HEADING_OUTPUT_MAX_DPS_RECOVER
+      : IMU_HEADING_OUTPUT_MAX_DPS_STILL);
+  return maxDps * clampFloat(dtSeconds, 0.001f, 0.12f);
+}
+
+void correctAhrsYawOffsetTowardMag(float magHeadingDegrees, uint32_t now) {
+  const float targetOffsetDegrees = shortestAngleError(magHeadingDegrees, imuAharsRawYawDegrees);
+  const float offsetErrorDegrees = shortestAngleError(targetOffsetDegrees, imuAharsYawOffsetDegrees);
+  imuAharsYawOffsetDegrees = normalizeAngle180(
+    imuAharsYawOffsetDegrees + offsetErrorDegrees * imuYawOffsetCorrectionAlpha(now)
+  );
+}
+
+void updateImuHeadingOutput(float targetHeadingDegrees, uint32_t now, float dtSeconds) {
+  const float alpha = imuHeadingOutputAlpha(now);
+  const float outputErrorDegrees = shortestAngleError(targetHeadingDegrees, imuHeadingDegrees);
+  const float maxStepDegrees = imuHeadingOutputMaxStepDegrees(now, dtSeconds);
+  const float outputStepDegrees = clampFloat(
+    outputErrorDegrees * alpha,
+    -maxStepDegrees,
+    maxStepDegrees
+  );
+  imuHeadingDegrees = normalizeAngle180(imuHeadingDegrees + outputStepDegrees);
+}
+
+void updateImuFusionQuality(uint32_t now, bool hasFreshMagCorrection) {
+  if (!imuHeadingFilterInitialized) {
+    imuFusionQuality = "STALE";
+  } else if (!gyroZBiasCalibrated) {
+    imuFusionQuality = "GYRO_SETTLING";
+  } else if (!accelNormSane()) {
+    imuFusionQuality = "ACCEL_UNSTABLE";
+  } else if (!gyroYawSane()) {
+    imuFusionQuality = "GYRO_SATURATED";
+  } else if (!hasFreshMagCorrection && imuIsTurning()) {
+    imuFusionQuality = "GYRO_TURNING";
+  } else if (hasFreshMagCorrection && imuIsRecoveringFromTurn(now)) {
+    imuFusionQuality = "GYRO_RECOVER";
+  } else if (!hasFreshMagCorrection) {
+    imuFusionQuality = "MAG_DISTURBED";
+  } else if (now - imuFusionInitializedMs < IMU_FUSION_SETTLING_MS) {
+    imuFusionQuality = "GYRO_SETTLING";
+  } else if (!magCalibrationValid) {
+    imuFusionQuality = "CAL_REQUIRED";
+  } else {
+    imuFusionQuality = "OK";
+  }
+}
+
+void updateImuFusion(float magHeadingDegrees, bool hasNewMagHeading, float dtSeconds, uint32_t now) {
+  const float safeDt = clampFloat(dtSeconds, 0.001f, 0.12f);
+  bool hasFreshMagCorrection = false;
+  if (imuIsTurning()) {
+    imuLastTurningMs = now;
+  }
+
+  if (!imuHeadingFilterInitialized) {
+    if (hasNewMagHeading && magNormSane()) {
+      imuMagHeadingDegrees = magHeadingDegrees;
+      imuMahonyFilter.begin(IMU_FUSION_SAMPLE_RATE_HZ);
+      imuMahonyFilter.setQuaternion(1.0f, 0.0f, 0.0f, 0.0f);
+      imuMahonyFilter.update(
+        ahrsGyroXDps(),
+        ahrsGyroYDps(),
+        ahrsGyroZDps(),
+        ahrsAccelXG(),
+        ahrsAccelYG(),
+        ahrsAccelZG(),
+        ahrsMagX(),
+        ahrsMagY(),
+        ahrsMagZ(),
+        safeDt
+      );
+      imuAharsRawYawDegrees = normalizeAngle180(imuMahonyFilter.getYaw());
+      imuAharsYawOffsetDegrees = shortestAngleError(magHeadingDegrees, imuAharsRawYawDegrees);
+      imuAharsYawOffsetInitialized = true;
+      imuHeadingDegrees = normalizeAngle180(imuAharsRawYawDegrees + imuAharsYawOffsetDegrees);
+      imuRollDegrees = normalizeBoatTiltDegrees(imuMahonyFilter.getRoll());
+      imuPitchDegrees = normalizeBoatTiltDegrees(imuMahonyFilter.getPitch());
+      imuHeadingFilterInitialized = true;
+      imuFusionInitializedMs = now;
+      imuLastMagCorrectionMs = now;
+      hasFreshMagCorrection = true;
+    }
+    updateImuFusionQuality(now, hasFreshMagCorrection);
+    return;
+  }
+
+  if (hasNewMagHeading) {
+    imuMagHeadingDegrees = magHeadingDegrees;
+    const bool canUseMagCorrection = magNormSane() && !imuIsTurning();
+    if (canUseMagCorrection) {
+      imuMahonyFilter.update(
+        ahrsGyroXDps(),
+        ahrsGyroYDps(),
+        ahrsGyroZDps(),
+        ahrsAccelXG(),
+        ahrsAccelYG(),
+        ahrsAccelZG(),
+        ahrsMagX(),
+        ahrsMagY(),
+        ahrsMagZ(),
+        safeDt
+      );
+      imuLastMagCorrectionMs = now;
+      hasFreshMagCorrection = true;
+    } else {
+      imuMahonyFilter.updateIMU(
+        ahrsGyroXDps(),
+        ahrsGyroYDps(),
+        ahrsGyroZDps(),
+        ahrsAccelXG(),
+        ahrsAccelYG(),
+        ahrsAccelZG(),
+        safeDt
+      );
+    }
+  } else {
+    imuMahonyFilter.updateIMU(
+      ahrsGyroXDps(),
+      ahrsGyroYDps(),
+      ahrsGyroZDps(),
+      ahrsAccelXG(),
+      ahrsAccelYG(),
+      ahrsAccelZG(),
+      safeDt
+    );
+  }
+
+  imuAharsRawYawDegrees = normalizeAngle180(imuMahonyFilter.getYaw());
+  if (!imuAharsYawOffsetInitialized && hasNewMagHeading) {
+    imuAharsYawOffsetDegrees = shortestAngleError(magHeadingDegrees, imuAharsRawYawDegrees);
+    imuAharsYawOffsetInitialized = true;
+  } else if (hasFreshMagCorrection) {
+    correctAhrsYawOffsetTowardMag(imuMagHeadingDegrees, now);
+  }
+  const float nextHeadingDegrees = normalizeAngle180(imuAharsRawYawDegrees + imuAharsYawOffsetDegrees);
+  updateImuHeadingOutput(nextHeadingDegrees, now, safeDt);
+  imuRollDegrees = normalizeBoatTiltDegrees(imuMahonyFilter.getRoll());
+  imuPitchDegrees = normalizeBoatTiltDegrees(imuMahonyFilter.getPitch());
+
+  const bool hasRecentMagCorrection = !imuIsTurning() && (now - imuLastMagCorrectionMs < 500);
+  updateImuFusionQuality(now, hasFreshMagCorrection || hasRecentMagCorrection);
+}
+
+bool calibrateGyroBias() {
   float sum = 0.0f;
+  float minValue = 1000000.0f;
+  float maxValue = -1000000.0f;
   uint16_t samples = 0;
-  for (uint16_t i = 0; i < 200; ++i) {
+  for (uint16_t i = 0; i < IMU_GYRO_BIAS_SAMPLES; ++i) {
     float gyroZDps = 0.0f;
     if (readGyroZDps(gyroZDps)) {
       sum += gyroZDps;
+      minValue = min(minValue, gyroZDps);
+      maxValue = max(maxValue, gyroZDps);
       samples += 1;
     }
     delay(5);
   }
-  gyroZBiasDps = samples > 0 ? sum / samples : 0.0f;
+  if (samples < IMU_GYRO_BIAS_SAMPLES * 4 / 5) {
+    gyroZBiasDps = 0.0f;
+    gyroZBiasCalibrated = false;
+    return false;
+  }
+
+  const float range = maxValue - minValue;
+  if (!isfinite(range) || range > IMU_GYRO_BIAS_STABLE_RANGE_DPS) {
+    gyroZBiasDps = 0.0f;
+    gyroZBiasCalibrated = false;
+    return false;
+  }
+
+  gyroZBiasDps = sum / static_cast<float>(samples);
+  gyroZBiasCalibrated = true;
+  return true;
 }
 
 void setupImu() {
@@ -815,21 +1198,34 @@ void setupImu() {
 
   magnetometerAvailable = setupMagnetometer();
   if (!magnetometerAvailable) {
-    imuAvailable = false;
-    Serial.println("ICM20948 detected, but AK09916 magnetometer unavailable; heading disabled");
-    return;
+    Serial.println("ICM20948 detected, but AK09916 magnetometer unavailable; fusion heading disabled");
+  } else {
+    loadMagCalibration();
   }
-  loadMagCalibration();
 
   imuAvailable = true;
   imuFailureCount = 0;
-  gyroZBiasDps = 0.0f;
+  if (!calibrateGyroBias()) {
+    Serial.println("Gyro Z bias calibration skipped; keep board still on next boot for better fusion");
+  }
   lastImuUpdateMs = millis();
   lastMagHeadingReadMs = 0;
   headingFilterInitialized = false;
+  imuHeadingFilterInitialized = false;
+  imuAharsYawOffsetInitialized = false;
+  imuAharsRawYawDegrees = 0.0f;
+  imuAharsYawOffsetDegrees = 0.0f;
+  imuRollDegrees = 0.0f;
+  imuPitchDegrees = 0.0f;
+  imuMagNormReferenceInitialized = false;
+  imuFusionInitializedMs = 0;
+  imuLastMagCorrectionMs = 0;
+  imuMahonyFilter.begin(IMU_FUSION_SAMPLE_RATE_HZ);
+  imuFusionQuality = magnetometerAvailable ? "GYRO_SETTLING" : "MAG_UNAVAILABLE";
   Serial.print("ICM20948 ready addr=0x");
   Serial.print(imuAddress, HEX);
-  Serial.println(" heading_source=AK09916_MAG");
+  Serial.print(" heading_source=");
+  Serial.println(magnetometerAvailable ? "GYRO_MAG_FUSION" : "GYRO_ONLY");
 }
 
 void startGpsSerial(uint32_t baud) {
@@ -1546,19 +1942,20 @@ void updateImu(uint32_t now) {
       Serial.println("Phone heading timeout; autonomous control disabled");
       SerialBT.println("STATUS;ARMED=0;FAULT=PHONE_HEADING_TIMEOUT");
     }
-    return;
   }
   if (!imuAvailable) {
     return;
   }
-  if (!magnetometerAvailable || now - lastMagHeadingReadMs < MAG_HEADING_INTERVAL_MS) {
+  if (now - lastMagHeadingReadMs < MAG_HEADING_INTERVAL_MS) {
     return;
   }
+  const float dtSeconds = lastImuUpdateMs == 0
+    ? static_cast<float>(MAG_HEADING_INTERVAL_MS) / 1000.0f
+    : static_cast<float>(now - lastImuUpdateMs) / 1000.0f;
   lastMagHeadingReadMs = now;
+  lastImuUpdateMs = now;
 
-  float nextHeadingDegrees = headingDegrees;
-  bool hasNewHeading = false;
-  if (!readMagHeadingDegrees(nextHeadingDegrees, hasNewHeading)) {
+  if (!readImuMotionSample()) {
     imuFailureCount += 1;
     if (imuFailureCount >= IMU_FAILURE_LIMIT) {
       imuAvailable = false;
@@ -1567,21 +1964,46 @@ void updateImu(uint32_t now) {
       headingLockActive = false;
       requestedLeftPercent = 0;
       requestedRightPercent = 0;
-      Serial.println("IMU magnetometer read failed; angle turn and heading lock disabled");
-      SerialBT.println("STATUS;FAULT=IMU_READ_FAILED");
+      Serial.println("ICM20948 motion read failed; IMU telemetry disabled");
+      SerialBT.println("STATUS;FAULT=IMU_MOTION_READ_FAILED");
+    }
+    return;
+  }
+
+  if (!magnetometerAvailable) {
+    imuFailureCount = 0;
+    imuFusionQuality = "MAG_UNAVAILABLE";
+    if (imuHeadingFilterInitialized) {
+      updateImuFusion(imuMagHeadingDegrees, false, dtSeconds, now);
+      if (!phoneHeadingEnabled) {
+        headingDegrees = imuHeadingDegrees;
+        headingFilterInitialized = true;
+      }
+    }
+    return;
+  }
+
+  float nextHeadingDegrees = imuHeadingFilterInitialized ? imuMagHeadingDegrees : headingDegrees;
+  bool hasNewHeading = false;
+  if (!readMagHeadingDegrees(nextHeadingDegrees, hasNewHeading)) {
+    imuFailureCount += 1;
+    if (imuFailureCount >= IMU_FAILURE_LIMIT) {
+      magnetometerAvailable = false;
+      turnControlActive = false;
+      headingLockActive = false;
+      requestedLeftPercent = 0;
+      requestedRightPercent = 0;
+      Serial.println("IMU magnetometer read failed; ESP32 magnetic heading disabled");
+      SerialBT.println("STATUS;FAULT=IMU_MAG_READ_FAILED");
     }
     return;
   }
 
   imuFailureCount = 0;
-  if (hasNewHeading) {
-    if (!headingFilterInitialized) {
-      headingDegrees = nextHeadingDegrees;
-      headingFilterInitialized = true;
-    } else {
-      const float deltaDegrees = shortestAngleError(nextHeadingDegrees, headingDegrees);
-      headingDegrees = normalizeAngle180(headingDegrees + deltaDegrees * MAG_HEADING_FILTER_ALPHA);
-    }
+  updateImuFusion(nextHeadingDegrees, hasNewHeading, dtSeconds, now);
+  if (!phoneHeadingEnabled && imuHeadingFilterInitialized) {
+    headingDegrees = imuHeadingDegrees;
+    headingFilterInitialized = true;
   }
 }
 
@@ -1953,9 +2375,28 @@ void printIdentity(Print& output) {
   output.println(unitIdProvisioned ? 1 : 0);
 }
 
+void printControllerInfo(Print& output) {
+  output.print("INFO;FW=");
+  output.print(FIRMWARE_VERSION);
+  output.print(";ID=");
+  printPaddedUnitId(output, unitId);
+  output.print(";BT=");
+  output.print(btDeviceName);
+  output.print(";ID_SRC=");
+  output.print(unitIdSource);
+  output.print(";PROVISIONED=");
+  output.print(unitIdProvisioned ? 1 : 0);
+  output.println(";OTA=1");
+}
+
 bool applyIdentityLine(char* line, Print& response) {
   if (strcmp(line, "ID?") == 0 || strcmp(line, "ID") == 0) {
     printIdentity(response);
+    return true;
+  }
+
+  if (strcmp(line, "INFO?") == 0 || strcmp(line, "INFO") == 0) {
+    printControllerInfo(response);
     return true;
   }
 
@@ -2972,6 +3413,10 @@ void publishBluetoothStatus(uint32_t now) {
 
   SerialBT.print("STATUS;ARMED=");
   SerialBT.print(armed ? 1 : 0);
+  SerialBT.print(";T=");
+  SerialBT.print(now);
+  SerialBT.print(";FW=");
+  SerialBT.print(FIRMWARE_VERSION);
   SerialBT.print(";L=");
   SerialBT.print(requestedLeftPercent);
   SerialBT.print(";R=");
@@ -2986,8 +3431,24 @@ void publishBluetoothStatus(uint32_t now) {
   SerialBT.print(rightPulseUs);
   SerialBT.print(";IMU=");
   SerialBT.print(imuAvailable ? 1 : 0);
+  SerialBT.print(";MAG=");
+  SerialBT.print(magnetometerAvailable ? 1 : 0);
   SerialBT.print(";HDG=");
   SerialBT.print(headingDegrees, 1);
+  SerialBT.print(";IHDG=");
+  SerialBT.print(imuHeadingDegrees, 1);
+  SerialBT.print(";IMHDG=");
+  SerialBT.print(imuMagHeadingDegrees, 1);
+  SerialBT.print(";IAHRS=");
+  SerialBT.print(imuAharsRawYawDegrees, 1);
+  SerialBT.print(";IROLL=");
+  SerialBT.print(imuRollDegrees, 1);
+  SerialBT.print(";IPITCH=");
+  SerialBT.print(imuPitchDegrees, 1);
+  SerialBT.print(";IQUAL=");
+  SerialBT.print(imuFusionQuality);
+  SerialBT.print(";IGZB=");
+  SerialBT.print(gyroZBiasDps, 3);
   SerialBT.print(";HSRC=");
   SerialBT.print(activeHeadingSourceName(now));
   if (phoneHeadingEnabled) {
@@ -3004,6 +3465,30 @@ void publishBluetoothStatus(uint32_t now) {
   SerialBT.print(magCalibrationSamples > 0 ? magCalibrationMaxX - magCalibrationMinX : 0);
   SerialBT.print(";MRY=");
   SerialBT.print(magCalibrationSamples > 0 ? magCalibrationMaxY - magCalibrationMinY : 0);
+  if (imuAvailable) {
+    SerialBT.print(";IAX=");
+    SerialBT.print(imuAccelXG, 3);
+    SerialBT.print(";IAY=");
+    SerialBT.print(imuAccelYG, 3);
+    SerialBT.print(";IAZ=");
+    SerialBT.print(imuAccelZG, 3);
+    SerialBT.print(";IAN=");
+    SerialBT.print(imuAccelNormG, 3);
+    SerialBT.print(";IGX=");
+    SerialBT.print(imuGyroXDps, 2);
+    SerialBT.print(";IGY=");
+    SerialBT.print(imuGyroYDps, 2);
+    SerialBT.print(";IGZ=");
+    SerialBT.print(imuGyroZDps, 2);
+    SerialBT.print(";IMX=");
+    SerialBT.print(imuMagRawX);
+    SerialBT.print(";IMY=");
+    SerialBT.print(imuMagRawY);
+    SerialBT.print(";IMZ=");
+    SerialBT.print(imuMagRawZ);
+    SerialBT.print(";IMAG=");
+    SerialBT.print(imuMagNormRaw, 1);
+  }
   SerialBT.print(";GPS=");
   SerialBT.print(gpsLastByteMs != 0 && now - gpsLastByteMs <= GPS_PRESENT_TIMEOUT_MS ? 1 : 0);
   SerialBT.print(";PPS=");

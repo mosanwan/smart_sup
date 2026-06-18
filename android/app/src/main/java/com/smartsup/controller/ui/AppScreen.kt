@@ -31,10 +31,21 @@ import androidx.compose.ui.Modifier
 import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.platform.LocalContext
 import androidx.core.content.ContextCompat
+import com.smartsup.controller.BuildConfig
 import com.smartsup.controller.control.ControlViewModel
 import com.smartsup.controller.model.AppTab
+import com.smartsup.controller.model.ConnectionState
+import com.smartsup.controller.model.ControlUiState
+import com.smartsup.controller.model.RealtimeVoiceMode
+import com.smartsup.controller.model.SettingsUiState
 import com.smartsup.controller.service.ControlForegroundService
+import com.smartsup.controller.voice.ArkAudioAgentConfig
+import com.smartsup.controller.voice.ArkAudioAgentSession
 import com.smartsup.controller.voice.QwenAsrSession
+import com.smartsup.controller.voice.RealtimeVoiceModeValue
+import java.text.SimpleDateFormat
+import java.util.Date
+import java.util.Locale
 
 @Composable
 fun AppScreen(viewModel: ControlViewModel) {
@@ -42,6 +53,11 @@ fun AppScreen(viewModel: ControlViewModel) {
     val settingsState by viewModel.settingsState.collectAsState()
     val updateState by viewModel.updateState.collectAsState()
     var selectedTab by rememberSaveable { mutableStateOf(AppTab.Control) }
+
+    AppForegroundKeepAliveHost(
+        connected = controlState.connectionState == ConnectionState.Connected,
+        microphoneRequested = controlState.voiceControlEnabled || controlState.voiceSamplingEnabled,
+    )
 
     AppAsrHost(
         voiceControlEnabled = controlState.voiceControlEnabled,
@@ -53,6 +69,23 @@ fun AppScreen(viewModel: ControlViewModel) {
         onPartialText = viewModel::setVoiceInputText,
         onFinalText = viewModel::acceptVoiceRecognition,
         onFinalSegment = viewModel::acceptVoiceSample,
+    )
+
+    AppRealtimeVoiceHost(
+        voiceControlEnabled = controlState.voiceControlEnabled,
+        realtimeVoiceMode = controlState.realtimeVoiceMode,
+        arkApiKey = settingsState.realtimeVoiceApiKey,
+        model = settingsState.realtimeVoiceModel,
+        voice = settingsState.realtimeVoiceVoice,
+        ttsMode = settingsState.realtimeTtsMode,
+        cloudTtsApiKey = BuildConfig.DOUBAO_API_KEY.ifBlank { settingsState.realtimeVoiceApiKey },
+        wakeWordRequired = controlState.realtimeWakeWordRequired,
+        systemStateProvider = { buildArkAgentStatePrompt(controlState, settingsState) },
+        onStatusChange = viewModel::setRealtimeVoiceStatus,
+        onTranscript = viewModel::setRealtimeVoiceTranscript,
+        onReply = viewModel::setRealtimeVoiceReply,
+        onControlEvent = viewModel::acceptRealtimeVoiceControlEventJson,
+        onMetrics = viewModel::setRealtimeVoiceMetrics,
     )
 
     Scaffold(
@@ -131,7 +164,14 @@ fun AppScreen(viewModel: ControlViewModel) {
             )
             AppTab.Voice -> VoiceTestScreen(
                 state = controlState,
+                settingsState = settingsState,
                 modifier = modifier,
+                onToggleRealtimeVoice = viewModel::toggleVoiceControl,
+                onPushToTalkStart = viewModel::startRealtimePushToTalk,
+                onPushToTalkStop = viewModel::stopRealtimePushToTalk,
+                onRealtimeTtsModeChange = viewModel::setRealtimeTtsMode,
+                onWakeWordRequiredChange = viewModel::setRealtimeWakeWordRequired,
+                onRealtimeControlEvent = viewModel::acceptRealtimeVoiceControlEventJson,
                 onVoiceInputChange = viewModel::setVoiceInputText,
                 onVoiceSamplingEnabledChange = viewModel::setVoiceSamplingEnabled,
                 onNextVoiceSampleTarget = viewModel::nextVoiceSampleTarget,
@@ -159,7 +199,13 @@ fun AppScreen(viewModel: ControlViewModel) {
                 onHeadingLockToleranceChange = viewModel::setHeadingLockToleranceDegrees,
                 onHeadingLockFullCorrectionChange = viewModel::setHeadingLockFullCorrectionDegrees,
                 onHeadingLockNeutralReverseChange = viewModel::setHeadingLockNeutralReversePercent,
+                onAutoNavigationGpsJumpResetChange = viewModel::setAutoNavigationGpsJumpResetMeters,
                 onUsePhoneHeadingChange = viewModel::setUsePhoneHeading,
+                onRealtimeVoiceEndpointChange = viewModel::setRealtimeVoiceEndpoint,
+                onRealtimeVoiceAppIdChange = viewModel::setRealtimeVoiceAppId,
+                onRealtimeVoiceApiKeyChange = viewModel::setRealtimeVoiceApiKey,
+                onRealtimeVoiceModelChange = viewModel::setRealtimeVoiceModel,
+                onRealtimeVoiceVoiceChange = viewModel::setRealtimeVoiceVoice,
                 onStartMagCalibration = viewModel::startMagCalibration,
                 onSaveMagCalibration = viewModel::saveMagCalibration,
                 onClearMagCalibration = viewModel::clearMagCalibration,
@@ -171,6 +217,128 @@ fun AppScreen(viewModel: ControlViewModel) {
             )
         }
     }
+}
+
+@Composable
+private fun AppForegroundKeepAliveHost(
+    connected: Boolean,
+    microphoneRequested: Boolean,
+) {
+    val context = LocalContext.current
+    val microphoneGranted = ContextCompat.checkSelfPermission(
+        context,
+        Manifest.permission.RECORD_AUDIO,
+    ) == PackageManager.PERMISSION_GRANTED
+    LaunchedEffect(connected, microphoneRequested, microphoneGranted) {
+        if (!connected && (!microphoneRequested || !microphoneGranted)) {
+            ControlForegroundService.stop(context)
+            return@LaunchedEffect
+        }
+        ControlForegroundService.start(
+            context = context,
+            microphoneActive = microphoneRequested && microphoneGranted,
+        )
+    }
+}
+
+@Composable
+private fun AppRealtimeVoiceHost(
+    voiceControlEnabled: Boolean,
+    realtimeVoiceMode: RealtimeVoiceMode,
+    arkApiKey: String,
+    model: String,
+    voice: String,
+    ttsMode: com.smartsup.controller.model.RealtimeTtsMode,
+    cloudTtsApiKey: String,
+    wakeWordRequired: Boolean,
+    systemStateProvider: () -> String,
+    onStatusChange: (String) -> Unit,
+    onTranscript: (String) -> Unit,
+    onReply: (String) -> Unit,
+    onControlEvent: (String) -> String,
+    onMetrics: (String) -> Unit,
+) {
+    val context = LocalContext.current
+    val latestOnStatusChange = rememberUpdatedState(onStatusChange)
+    val latestOnTranscript = rememberUpdatedState(onTranscript)
+    val latestOnReply = rememberUpdatedState(onReply)
+    val latestOnControlEvent = rememberUpdatedState(onControlEvent)
+    val latestOnMetrics = rememberUpdatedState(onMetrics)
+    val latestSystemStateProvider = rememberUpdatedState(systemStateProvider)
+    val session = remember(context, arkApiKey, model, voice, ttsMode, cloudTtsApiKey, wakeWordRequired) {
+        ArkAudioAgentSession(
+            context = context,
+            config = ArkAudioAgentConfig(
+                arkApiKey = arkApiKey,
+                model = model,
+                voice = voice,
+                ttsMode = ttsMode,
+                cloudTtsApiKey = cloudTtsApiKey,
+                wakeWordRequired = wakeWordRequired,
+                wakeWordAsrApiKey = cloudTtsApiKey,
+            ),
+            systemStateProvider = { latestSystemStateProvider.value() },
+            onStatus = { latestOnStatusChange.value(it) },
+            onTranscript = { latestOnTranscript.value(it) },
+            onReply = { latestOnReply.value(it) },
+            onControlEvent = { latestOnControlEvent.value(it) },
+            onMetrics = { latestOnMetrics.value(it) },
+        )
+    }
+
+    LaunchedEffect(voiceControlEnabled, realtimeVoiceMode, session) {
+        if (!voiceControlEnabled || realtimeVoiceMode == RealtimeVoiceMode.Off) {
+            session.stop()
+            return@LaunchedEffect
+        }
+        val mode = when (realtimeVoiceMode) {
+            RealtimeVoiceMode.PushToTalk -> RealtimeVoiceModeValue.PushToTalk
+            RealtimeVoiceMode.Live -> RealtimeVoiceModeValue.Live
+            RealtimeVoiceMode.Off -> RealtimeVoiceModeValue.Live
+        }
+        session.start(mode)
+    }
+
+    DisposableEffect(session) {
+        onDispose { session.destroy() }
+    }
+}
+
+private fun buildArkAgentStatePrompt(
+    state: ControlUiState,
+    settings: SettingsUiState,
+): String {
+    val fields = state.telemetry.statusFields
+    val gpsModule = when (fields["GPS"]) {
+        "1" -> "在线"
+        "0" -> "离线"
+        else -> "--"
+    }
+    val gpsFix = when (fields["GPS_FIX"]) {
+        "1" -> "已定位"
+        "0" -> "未定位"
+        else -> "--"
+    }
+    val phoneHeading = state.phoneHeadingDegrees
+        ?.takeIf { state.phoneHeadingAvailable }
+        ?.let { "${"%.1f".format(Locale.US, it)}°" }
+        ?: "不可用"
+    val connected = if (state.connectionState == ConnectionState.Connected) "已连接" else "未连接"
+    val unlocked = if (state.armed) "已解锁" else "未解锁"
+    val leftOutputPercent = state.appHeadingLeftOutputPercent ?: state.leftThrottlePercent
+    val rightOutputPercent = state.appHeadingRightOutputPercent ?: state.rightThrottlePercent
+    val timeText = SimpleDateFormat("yyyy-MM-dd HH:mm:ss", Locale.CHINA).format(Date())
+    return listOf(
+        "当前状态：",
+        "- 时间：$timeText",
+        "- 主控：$connected；解锁：$unlocked；声控上限：${settings.voicePowerLimitPercent}%",
+        "- 推进器目标：左推进器${state.leftThrottlePercent}%，右推进器${state.rightThrottlePercent}%；来源：${state.commandSource.name}",
+        "- 推进器当前输出：左推进器${leftOutputPercent}%，右推进器${rightOutputPercent}%",
+        "- 手机航向：$phoneHeading；航向锁定：${if (state.headingLockEnabled) "开启" else "关闭"}",
+        "- GPS：模块$gpsModule；定位$gpsFix；卫星${fields["GPS_SAT"] ?: "--"}；天线${fields["GPS_ANT"] ?: "--"}",
+        "- 电池：${state.telemetry.batteryVoltage?.let { "%.1fV".format(Locale.US, it) } ?: "--"}；故障：${fields["FAULT"] ?: "无"}",
+        "状态约束：未连接或未解锁时，不要调用推进/转向工具；可说明需要先连接并手动解锁。停/停止推进调用空挡工具；关闭/停止声控调用关闭语音工具；急停/锁主控不开放。",
+    ).joinToString("\n")
 }
 
 @Composable
@@ -220,26 +388,24 @@ private fun AppAsrHost(
         )
     }
 
-    LaunchedEffect(Unit) {
-        if (!hasRecordAudioPermission) {
+    LaunchedEffect(voiceControlEnabled, voiceSamplingEnabled, hasRecordAudioPermission) {
+        val shouldRequestMic = voiceControlEnabled || voiceSamplingEnabled
+        if (shouldRequestMic && !hasRecordAudioPermission) {
             permissionLauncher.launch(Manifest.permission.RECORD_AUDIO)
         }
     }
 
     LaunchedEffect(hasRecordAudioPermission, voiceControlEnabled, voiceSamplingEnabled, qwenAsrSession) {
-        val shouldRunAsr = hasRecordAudioPermission &&
-            (voiceControlEnabled || voiceSamplingEnabled)
+        val shouldRunAsr = hasRecordAudioPermission && voiceSamplingEnabled
         if (shouldRunAsr) {
-            ControlForegroundService.start(context)
-            latestOnStarting.value("Qwen ASR：初始化模型")
+            latestOnStarting.value("本地 ASR：采样模式初始化")
             qwenAsrSession.start()
         } else {
             qwenAsrSession.stop()
-            ControlForegroundService.stop(context)
             latestOnStopped.value(
                 when {
-                    !hasRecordAudioPermission -> "Qwen ASR：等待录音权限"
-                    else -> "Qwen ASR：已暂停"
+                    !hasRecordAudioPermission && (voiceControlEnabled || voiceSamplingEnabled) -> "本地 ASR：等待录音权限"
+                    else -> "本地 ASR：已暂缓"
                 },
             )
         }

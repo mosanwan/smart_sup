@@ -42,7 +42,7 @@ class GpsTrackStore(context: Context) {
         return pointCount() > 0
     }
 
-    fun readPoints(limit: Int = 2000): List<GpsTrackPoint> {
+    fun readPoints(limit: Int = TRACK_POINT_LOAD_LIMIT): List<GpsTrackPoint> {
         return readAllPoints().takeLast(limit)
     }
 
@@ -50,7 +50,7 @@ class GpsTrackStore(context: Context) {
         return buildTrackGroups(readAllPoints()).map { it.segment }
     }
 
-    fun readTrackPoints(trackId: String?, limit: Int = 2000): List<GpsTrackPoint> {
+    fun readTrackPoints(trackId: String?, limit: Int = TRACK_POINT_LOAD_LIMIT): List<GpsTrackPoint> {
         val groups = buildTrackGroups(readAllPoints())
         val selected = trackId?.let { id -> groups.firstOrNull { it.segment.id == id } } ?: groups.lastOrNull()
         return selected?.points.orEmpty().takeLast(limit)
@@ -174,5 +174,6 @@ class GpsTrackStore(context: Context) {
     companion object {
         private const val TRACK_HEADER = "session_id,seq,utc,lat_e7,lon_e7\n"
         private const val TRACK_SPLIT_GAP_SECONDS = 2L * 3600L
+        private const val TRACK_POINT_LOAD_LIMIT = 20_000
     }
 }

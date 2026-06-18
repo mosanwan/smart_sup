@@ -33,6 +33,7 @@ class MockControlTransport : ControlTransport {
             rightOutputPercent = 0,
             statusFields = mapOf(
                 "ARMED" to "0",
+                "FW" to "mock",
                 "L" to "0",
                 "R" to "0",
                 "CMD_SRC" to "APP",
@@ -100,6 +101,7 @@ class MockControlTransport : ControlTransport {
         onProgress(firmware.size, firmware.size)
         telemetryState.value = telemetryState.value.copy(
             controllerMessage = "模拟 OTA：${firmware.size} bytes / MD5 $md5Hex",
+            lastReceivedStatus = "OTA;OK;BYTES=${firmware.size}",
         )
     }
 }

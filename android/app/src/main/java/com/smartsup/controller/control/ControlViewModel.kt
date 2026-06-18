@@ -29,9 +29,12 @@ import com.smartsup.controller.model.ConnectionState
 import com.smartsup.controller.model.ControlCommand
 import com.smartsup.controller.model.ControlCommandMode
 import com.smartsup.controller.model.ControlUiState
+import com.smartsup.controller.model.FirmwareReleaseManifest
 import com.smartsup.controller.model.NavigationRoute
 import com.smartsup.controller.model.NavigationRoutePoint
 import com.smartsup.controller.model.ReleaseInfo
+import com.smartsup.controller.model.RealtimeVoiceMode
+import com.smartsup.controller.model.RealtimeTtsMode
 import com.smartsup.controller.model.SettingsUiState
 import com.smartsup.controller.model.ThrottleGear
 import com.smartsup.controller.model.TrackLogEvent
@@ -45,6 +48,7 @@ import com.smartsup.controller.voice.VoiceCommandEvaluation
 import com.smartsup.controller.voice.VoiceCommandAction
 import com.smartsup.controller.voice.VoiceCommandParser
 import com.smartsup.controller.voice.VoiceParseResult
+import com.smartsup.controller.voice.RealtimeVoiceControlEvent
 import com.smartsup.controller.voice.VoiceSampleMetadata
 import com.smartsup.controller.voice.VoiceSampleStore
 import com.smartsup.controller.voice.VoiceSampleTarget
@@ -67,6 +71,7 @@ import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.delay
 import kotlinx.coroutines.launch
 import kotlinx.coroutines.withContext
+import org.json.JSONObject
 
 class ControlViewModel(application: Application) : AndroidViewModel(application) {
     private val preferences = application.getSharedPreferences(PREFERENCES_NAME, Context.MODE_PRIVATE)
@@ -75,6 +80,8 @@ class ControlViewModel(application: Application) : AndroidViewModel(application)
     private var trackLogJob: Job? = null
     private var trackLogSyncJob: Job? = null
     private var commandHeartbeatJob: Job? = null
+    private var realtimeVoiceActionTimeoutJob: Job? = null
+    private var realtimeVoiceActionToken = 0
     private var autoReconnectAttempted = false
     private var discoveryReceiverRegistered = false
     private var lastHandledControllerErrorLine: String? = null
@@ -82,6 +89,7 @@ class ControlViewModel(application: Application) : AndroidViewModel(application)
         preferences.getString(KEY_GITHUB_TOKEN, null)
     }
     private val gpsTrackStore = GpsTrackStore(application)
+    private val imuTelemetryLogStore by lazy { ImuTelemetryLogStore(application) }
     private val autoNavigationRouteStore = AutoNavigationRouteStore(application)
     private val appUpdateInstaller = AppUpdateInstaller(application)
     private val sensorManager = application.getSystemService(SensorManager::class.java)
@@ -89,12 +97,18 @@ class ControlViewModel(application: Application) : AndroidViewModel(application)
     private val phoneHeadingOrientation = FloatArray(3)
     private var phoneHeadingSensorRegistered = false
     private var phoneHeadingLastUpdateMs = 0L
+    private var lastLoggedImuStatusLine: String? = null
     private var latestRelease: ReleaseInfo? = null
+    private var latestFirmwareManifest: FirmwareReleaseManifest? = null
+    private var esp32OtaExclusive = false
+    private var pendingEsp32FirmwareVersion: String? = null
     private var downloadedApk: File? = null
     private var activeTurnCommand: ControlCommand? = null
     private var activeHeadingLockCommand: ControlCommand? = null
     private var appHeadingControlTargetDegrees: Float? = null
     private var appHeadingControlStartedAtMs = 0L
+    private var autoNavigationFilteredPoint: NavigationRoutePoint? = null
+    private var autoNavigationLastRawPoint: NavigationRoutePoint? = null
     private var voiceTurnRequestCounter = 0
     private var headingLockRequestCounter = 0
     private var voiceSampleTargetIndex = 0
@@ -134,7 +148,7 @@ class ControlViewModel(application: Application) : AndroidViewModel(application)
     private val voiceSampleTargets = listOf(
         VoiceSampleTarget("开始声控", "开始声控", "本地状态：恢复执行语音控制命令"),
         VoiceSampleTarget("停止声控", "停止声控", "SRC=VOICE;ARM=0;L=0;R=0"),
-        VoiceSampleTarget("停止", "停止", "SRC=VOICE;ARM=0;L=0;R=0"),
+        VoiceSampleTarget("停止", "停止", "SRC=VOICE;ARM=1;L=0;R=0"),
         VoiceSampleTarget("快点", "快点", "当前目标按微调步进加速"),
         VoiceSampleTarget("慢点", "慢点", "当前目标按微调步进减速"),
         VoiceSampleTarget("空档", "空档", "SRC=VOICE;ARM=1;L=0;R=0"),
@@ -185,7 +199,11 @@ class ControlViewModel(application: Application) : AndroidViewModel(application)
         }
     }
 
-    private val mutableUiState = MutableStateFlow(ControlUiState())
+    private val mutableUiState = MutableStateFlow(
+        ControlUiState(
+            realtimeWakeWordRequired = preferences.getBoolean(KEY_REALTIME_WAKE_WORD_REQUIRED, false),
+        ),
+    )
     val uiState: StateFlow<ControlUiState> = mutableUiState.asStateFlow()
 
     private val mutableSettingsState = MutableStateFlow(loadSettingsState())
@@ -253,19 +271,34 @@ class ControlViewModel(application: Application) : AndroidViewModel(application)
                 clearAutonomousCommands()
                 collectTelemetry(nextTransport)
                 collectTrackLogEvents(nextTransport)
+                val pendingVersion = pendingEsp32FirmwareVersion
                 mutableUiState.update {
                     it.copy(
                         connectionState = ConnectionState.Connected,
-                        statusMessage = "已连接 ${deviceInfo.name}，仍处于锁定状态",
+                        statusMessage = if (pendingVersion == null) {
+                            "已连接 ${deviceInfo.name}，仍处于锁定状态"
+                        } else {
+                            "已连接 ${deviceInfo.name}，正在验证 ESP32 固件 $pendingVersion"
+                        },
                     )
                 }
                 mutableSettingsState.update {
-                    it.copy(message = "已保存并连接 ${deviceInfo.name}")
+                    it.copy(
+                        message = if (pendingVersion == null) {
+                            "已保存并连接 ${deviceInfo.name}"
+                        } else {
+                            "已重连 ${deviceInfo.name}，正在验证 ESP32 固件版本"
+                        },
+                    )
                 }
-                startCommandHeartbeat()
-                sendIdle()
-                requestTrackLogSync()
-                speakVoiceReply("主控已连接")
+                runCatching { nextTransport.sendRawLine("INFO?") }
+                if (pendingVersion == null) {
+                    esp32OtaExclusive = false
+                    startCommandHeartbeat()
+                    sendIdle()
+                    requestTrackLogSync()
+                    speakVoiceReply("主控已连接")
+                }
             }.onFailure { error ->
                 transport = null
                 mutableUiState.update {
@@ -299,8 +332,11 @@ class ControlViewModel(application: Application) : AndroidViewModel(application)
             trackLogJob?.cancel()
             trackLogSyncJob?.cancel()
             commandHeartbeatJob?.cancel()
+            esp32OtaExclusive = false
+            pendingEsp32FirmwareVersion = null
             clearAutonomousCommands()
             mutableUiState.value = ControlUiState(
+                realtimeWakeWordRequired = preferences.getBoolean(KEY_REALTIME_WAKE_WORD_REQUIRED, false),
                 statusMessage = "已断开，推进输出保持空闲",
             )
             mutableSettingsState.update { it.copy(message = "已断开 ESP32 连接") }
@@ -310,7 +346,7 @@ class ControlViewModel(application: Application) : AndroidViewModel(application)
     fun setArmed(armed: Boolean) {
         val canArm = armed && mutableUiState.value.connectionState == ConnectionState.Connected
         val replyText = when {
-            canArm -> replyWithDetail("已解锁")
+            canArm -> "主控已解锁"
             armed -> replyWithDetail("未连接，不能解锁")
             else -> replyWithDetail("已锁定")
         }
@@ -470,6 +506,8 @@ class ControlViewModel(application: Application) : AndroidViewModel(application)
 
     fun emergencyStop() {
         clearAutonomousCommands()
+        autoNavigationFilteredPoint = null
+        autoNavigationLastRawPoint = null
         mutableUiState.update {
             it.copy(
                 armed = false,
@@ -690,6 +728,17 @@ class ControlViewModel(application: Application) : AndroidViewModel(application)
         sendCurrentCommand()
     }
 
+    fun setAutoNavigationGpsJumpResetMeters(meters: Int) {
+        val constrained = coerceAutoNavigationGpsJumpResetMeters(meters)
+        preferences.edit().putInt(KEY_AUTO_NAVIGATION_GPS_JUMP_RESET_METERS, constrained).apply()
+        autoNavigationFilteredPoint = null
+        autoNavigationLastRawPoint = null
+        mutableSettingsState.update { it.copy(autoNavigationGpsJumpResetMeters = constrained) }
+        mutableUiState.update {
+            it.copy(statusMessage = "自动导航 GPS 跳变重置阈值已设置为 ${constrained}m")
+        }
+    }
+
     fun setUsePhoneHeading(enabled: Boolean) {
         preferences.edit().putBoolean(KEY_USE_PHONE_HEADING, true).apply()
         mutableSettingsState.update { it.copy(usePhoneHeading = true) }
@@ -701,6 +750,56 @@ class ControlViewModel(application: Application) : AndroidViewModel(application)
             )
         }
         sendCurrentCommand()
+    }
+
+    fun setRealtimeVoiceEndpoint(value: String) {
+        val trimmed = value.trim().ifBlank { REALTIME_VOICE_ENDPOINT_DEFAULT }
+        preferences.edit().putString(KEY_REALTIME_VOICE_ENDPOINT, trimmed).apply()
+        mutableSettingsState.update { it.copy(realtimeVoiceEndpoint = trimmed) }
+    }
+
+    fun setRealtimeVoiceAppId(value: String) {
+        val trimmed = value.trim()
+        preferences.edit().putString(KEY_REALTIME_VOICE_APP_ID, trimmed).apply()
+        mutableSettingsState.update { it.copy(realtimeVoiceAppId = trimmed) }
+    }
+
+    fun setRealtimeVoiceApiKey(value: String) {
+        val trimmed = value.trim()
+        preferences.edit().putString(KEY_REALTIME_VOICE_API_KEY, trimmed).apply()
+        mutableSettingsState.update {
+            it.copy(
+                realtimeVoiceApiKey = trimmed,
+                cloudTtsConfigured = trimmed.isNotBlank() || BuildConfig.DOUBAO_API_KEY.isNotBlank(),
+            )
+        }
+    }
+
+    fun setRealtimeVoiceModel(value: String) {
+        val trimmed = value.trim().ifBlank { REALTIME_VOICE_MODEL_DEFAULT }
+        preferences.edit().putString(KEY_REALTIME_VOICE_MODEL, trimmed).apply()
+        mutableSettingsState.update { it.copy(realtimeVoiceModel = trimmed) }
+    }
+
+    fun setRealtimeVoiceVoice(value: String) {
+        val trimmed = normalizeRealtimeVoiceVoice(value.trim().ifBlank { REALTIME_VOICE_VOICE_DEFAULT })
+        preferences.edit().putString(KEY_REALTIME_VOICE_VOICE, trimmed).apply()
+        mutableSettingsState.update { it.copy(realtimeVoiceVoice = trimmed) }
+    }
+
+    fun setRealtimeTtsMode(mode: RealtimeTtsMode) {
+        preferences.edit().putString(KEY_REALTIME_TTS_MODE, mode.name).apply()
+        mutableSettingsState.update { it.copy(realtimeTtsMode = mode) }
+        val settings = mutableSettingsState.value
+        mutableUiState.update {
+            it.copy(
+                statusMessage = if (mode == RealtimeTtsMode.Cloud && !settings.cloudTtsConfigured) {
+                    "云端 TTS 需要配置火山引擎 API Key"
+                } else {
+                    "TTS 已切换为${if (mode == RealtimeTtsMode.Cloud) "云端" else "本地"}"
+                },
+            )
+        }
     }
 
     fun enableHeadingLock() {
@@ -798,6 +897,10 @@ class ControlViewModel(application: Application) : AndroidViewModel(application)
         val nextTransport = transport
         if (nextTransport == null) {
             refreshGpsTrackState("未连接 ESP32，无法同步轨迹")
+            return
+        }
+        if (esp32OtaExclusive) {
+            refreshGpsTrackState("ESP32 OTA 进行中，暂不同步轨迹")
             return
         }
         viewModelScope.launch {
@@ -1055,6 +1158,8 @@ class ControlViewModel(application: Application) : AndroidViewModel(application)
         }
 
         clearAutonomousCommands()
+        autoNavigationFilteredPoint = null
+        autoNavigationLastRawPoint = null
         mutableUiState.update {
             it.copy(
                 armed = true,
@@ -1124,39 +1229,207 @@ class ControlViewModel(application: Application) : AndroidViewModel(application)
         setVoiceControlEnabled(!mutableUiState.value.voiceControlEnabled)
     }
 
+    fun setRealtimeWakeWordRequired(required: Boolean) {
+        preferences.edit().putBoolean(KEY_REALTIME_WAKE_WORD_REQUIRED, required).apply()
+        mutableUiState.update {
+            it.copy(
+                realtimeWakeWordRequired = required,
+                realtimeVoiceStatus = if (required) {
+                    "Ark Agent：唤醒词模式，等待“豆包”"
+                } else {
+                    "Ark Agent：直接听指令"
+                },
+                realtimeVoiceControlEvent = if (required) {
+                    "唤醒词模式：无“豆包”前缀不发送方舟"
+                } else {
+                    "直接模式：检测人声后提交方舟"
+                },
+                statusMessage = if (required) {
+                    "已开启唤醒词模式：指令必须以“豆包”开头"
+                } else {
+                    "已关闭唤醒词模式：检测到人声后直接提交"
+                },
+            )
+        }
+    }
+
     fun setVoiceControlEnabled(enabled: Boolean) {
-        val shouldClearVoiceOutput = !enabled && mutableUiState.value.commandSource == CommandSource.Voice
-        if (shouldClearVoiceOutput) {
-            clearAutonomousCommands()
+        if (enabled && mutableSettingsState.value.realtimeVoiceApiKey.isBlank()) {
+            mutableUiState.update {
+                it.copy(
+                    voiceControlEnabled = false,
+                    realtimeVoiceMode = RealtimeVoiceMode.Off,
+                    realtimeVoiceStatus = "Ark Agent：未配置火山引擎 API Key",
+                    realtimeVoiceControlEvent = "无控制事件",
+                    voiceResultMessage = "请先在设置页填写火山引擎 API Key",
+                    voiceCommandPreview = "缺少火山引擎 API Key：不启动",
+                    statusMessage = "请先在设置页填写火山引擎 API Key",
+                )
+            }
+            return
         }
         mutableUiState.update {
             it.copy(
                 voiceControlEnabled = enabled,
                 voiceSamplingEnabled = if (enabled) it.voiceSamplingEnabled else false,
-                voiceAsrState = if (enabled) VoiceAsrState.Starting else VoiceAsrState.Stopped,
-                voiceAsrStatus = if (enabled) "Qwen ASR：初始化模型" else "Qwen ASR：已暂停",
-                armed = if (shouldClearVoiceOutput) false else it.armed,
-                leftThrottlePercent = if (shouldClearVoiceOutput) 0 else it.leftThrottlePercent,
-                rightThrottlePercent = if (shouldClearVoiceOutput) 0 else it.rightThrottlePercent,
-                commandSource = if (shouldClearVoiceOutput) CommandSource.App else it.commandSource,
-                headingLockEnabled = if (shouldClearVoiceOutput) false else it.headingLockEnabled,
-                selectedGear = if (shouldClearVoiceOutput) ThrottleGear.Neutral else it.selectedGear,
-                throttleTrimPercent = if (shouldClearVoiceOutput) 0 else it.throttleTrimPercent,
-                voiceResultMessage = if (enabled) "声控开启中" else "声控已关闭",
+                voiceAsrState = if (it.voiceSamplingEnabled && !enabled) VoiceAsrState.Starting else VoiceAsrState.Stopped,
+                voiceAsrStatus = if (it.voiceSamplingEnabled && !enabled) {
+                    "本地 ASR：采样模式初始化"
+                } else {
+                    "本地 ASR：已暂缓"
+                },
+                realtimeVoiceMode = if (enabled) RealtimeVoiceMode.Live else RealtimeVoiceMode.Off,
+                realtimeVoiceStatus = if (enabled) {
+                    if (it.realtimeWakeWordRequired) {
+                        "Ark Agent：唤醒词模式，等待“豆包”"
+                    } else {
+                        "Ark Agent：实时监听中，检测人声后自动提交"
+                    }
+                } else {
+                    "Ark Agent：未录音"
+                },
+                realtimeVoiceControlEvent = if (enabled) {
+                    if (it.realtimeWakeWordRequired) {
+                        "等待“豆包”开头的指令"
+                    } else {
+                        "等待云端控制事件"
+                    }
+                } else {
+                    "无控制事件"
+                },
+                voiceResultMessage = if (enabled) {
+                    if (it.realtimeWakeWordRequired) {
+                        "Ark 音频 Agent 已开启：无“豆包”前缀不发送方舟"
+                    } else {
+                        "Ark 音频 Agent 已开启，检测人声后自动提交"
+                    }
+                } else {
+                    "声控已关闭"
+                },
                 voiceCommandPreview = if (enabled) it.voiceCommandPreview else "声控关闭：不发送",
-                statusMessage = if (enabled) "声控开启中，等待 ASR 模型就绪" else "声控已关闭",
+                statusMessage = if (enabled) {
+                    if (it.realtimeWakeWordRequired) {
+                        "Ark 音频 Agent 唤醒词模式：静音不上传，无唤醒词不发方舟"
+                    } else {
+                        "Ark 音频 Agent 实时监听：静音不上传"
+                    }
+                } else {
+                    "声控已关闭"
+                },
             )
         }
-        if (shouldClearVoiceOutput) {
-            sendCurrentCommand()
+    }
+
+    fun startRealtimePushToTalk() {
+        if (mutableSettingsState.value.realtimeVoiceApiKey.isBlank()) {
+            mutableUiState.update {
+                it.copy(
+                    voiceControlEnabled = false,
+                    realtimeVoiceMode = RealtimeVoiceMode.Off,
+                    realtimeVoiceStatus = "Ark Agent：未配置火山引擎 API Key",
+                    voiceResultMessage = "请先在设置页填写火山引擎 API Key",
+                    statusMessage = "请先在设置页填写火山引擎 API Key",
+                )
+            }
+            return
         }
+        mutableUiState.update {
+            it.copy(
+                voiceControlEnabled = true,
+                realtimeVoiceMode = RealtimeVoiceMode.PushToTalk,
+                realtimeVoiceStatus = "Ark Agent：按住录音中",
+                realtimeVoiceControlEvent = if (it.realtimeWakeWordRequired) {
+                    "松开后先检查“豆包”唤醒词"
+                } else {
+                    "等待方舟工具调用"
+                },
+                voiceResultMessage = "按住说话已开始，松开发送方舟",
+                statusMessage = "Ark 音频 Agent：松开后提交音频",
+            )
+        }
+    }
+
+    private fun disableRealtimeVoiceControlByAgent(reason: String): String {
+        clearRealtimeVoiceActionTimeout()
+        val resultText = "已关闭语音控制"
+        mutableUiState.update {
+            it.copy(
+                voiceControlEnabled = false,
+                voiceSamplingEnabled = false,
+                voiceAsrState = VoiceAsrState.Stopped,
+                voiceAsrStatus = "本地 ASR：已暂缓",
+                realtimeVoiceMode = RealtimeVoiceMode.Off,
+                realtimeVoiceStatus = "Ark Agent：已关闭",
+                realtimeVoiceControlEvent = "关闭语音控制：$reason",
+                realtimeVoiceReply = resultText,
+                voiceResultMessage = "实时语音：已关闭",
+                voiceCommandPreview = "disable_voice_control：不发送推进控制",
+                statusMessage = "实时语音已关闭：$reason",
+                realtimeWakeWordRequired = it.realtimeWakeWordRequired,
+            )
+        }
+        return resultText
+    }
+
+    fun stopRealtimePushToTalk() {
+        mutableUiState.update {
+            it.copy(
+                voiceControlEnabled = false,
+                realtimeVoiceMode = RealtimeVoiceMode.Off,
+                realtimeVoiceStatus = "Ark Agent：正在提交或已结束",
+                voiceResultMessage = "按住说话已结束，等待方舟响应",
+            )
+        }
+    }
+
+    fun setRealtimeVoiceTranscript(text: String) {
+        mutableUiState.update {
+            it.copy(
+                realtimeVoiceTranscript = text,
+                voiceInputText = text,
+            )
+        }
+    }
+
+    fun setRealtimeVoiceReply(text: String) {
+        mutableUiState.update {
+            it.copy(realtimeVoiceReply = text)
+        }
+    }
+
+    fun setRealtimeVoiceStatus(text: String) {
+        mutableUiState.update {
+            it.copy(realtimeVoiceStatus = text)
+        }
+    }
+
+    fun setRealtimeVoiceMetrics(text: String) {
+        mutableUiState.update {
+            it.copy(realtimeVoiceMetrics = text)
+        }
+    }
+
+    fun acceptRealtimeVoiceControlEventJson(jsonText: String): String {
+        val event = RealtimeVoiceControlEvent.parse(jsonText).getOrElse { error ->
+            val resultText = "拒绝执行：${error.message ?: "控制事件解析失败"}"
+            mutableUiState.update {
+                it.copy(
+                    realtimeVoiceControlEvent = resultText,
+                    realtimeVoiceReply = resultText,
+                    voiceResultMessage = "实时语音事件拒绝：${error.message ?: "解析失败"}",
+                    statusMessage = "实时语音事件拒绝",
+                )
+            }
+            return resultText
+        }
+        return executeRealtimeVoiceControlEvent(event, jsonText)
     }
 
     fun setVoiceAsrStatus(message: String) {
         mutableUiState.update {
             it.copy(
                 voiceAsrStatus = message,
-                voiceAsrState = voiceAsrStateFor(message, it.voiceControlEnabled || it.voiceSamplingEnabled),
+                voiceAsrState = voiceAsrStateFor(message, it.voiceSamplingEnabled),
             )
         }
     }
@@ -1432,25 +1705,49 @@ class ControlViewModel(application: Application) : AndroidViewModel(application)
             }
 
             runCatching {
-                withContext(Dispatchers.IO) { releaseClient.fetchLatestRelease() }
-            }.onSuccess { release ->
+                withContext(Dispatchers.IO) {
+                    val release = releaseClient.fetchLatestRelease()
+                    val manifestAsset = release.firmwareManifestAsset
+                    val manifest = manifestAsset?.let { asset ->
+                        parseFirmwareManifest(
+                            releaseClient.fetchText(
+                                url = asset.apiUrl,
+                                apiAssetDownload = true,
+                            ),
+                        )
+                    }
+                    ReleaseCheckResult(release = release, firmwareManifest = manifest)
+                }
+            }.onSuccess { result ->
+                val release = result.release
+                val manifest = result.firmwareManifest
                 latestRelease = release
+                latestFirmwareManifest = manifest
                 val apkAsset = release.apkAsset
-                val firmwareAsset = release.firmwareAsset
+                val firmwareAsset = manifest?.let { release.assets.firstOrNull { asset -> asset.name == it.firmwareAssetName } }
+                    ?: release.firmwareAsset
+                val manifestAsset = release.firmwareManifestAsset
                 val updateAvailable = isReleaseNewerThanInstalled(release.tagName)
                 mutableUpdateState.update {
                     it.copy(
                         checking = false,
                         latestVersionName = release.tagName,
+                        targetEsp32FirmwareVersion = manifest?.firmwareVersion,
                         appUpdateAvailable = updateAvailable && apkAsset != null,
                         appAssetName = apkAsset?.name,
                         firmwareAssetName = firmwareAsset?.name,
+                        firmwareManifestName = manifestAsset?.name,
                         appDownloadUrl = apkAsset?.downloadUrl,
                         firmwareDownloadUrl = firmwareAsset?.downloadUrl,
+                        firmwareManifestDownloadUrl = manifestAsset?.downloadUrl,
                         appAssetApiUrl = apkAsset?.apiUrl,
                         firmwareAssetApiUrl = firmwareAsset?.apiUrl,
+                        firmwareManifestApiUrl = manifestAsset?.apiUrl,
                         message = when {
                             apkAsset == null && firmwareAsset == null -> "Release ${release.tagName} 没有 APK 或 ESP32 固件资产"
+                            manifestAsset == null -> "Release ${release.tagName} 缺少 ESP32 发布清单，GitHub 固件刷写已禁用"
+                            manifest == null -> "Release ${release.tagName} 发布清单解析失败，GitHub 固件刷写已禁用"
+                            firmwareAsset?.name != manifest.firmwareAssetName -> "Release ${release.tagName} 找不到清单指定固件 ${manifest.firmwareAssetName}"
                             updateAvailable -> "发现新版本 ${release.tagName}"
                             else -> "当前 App 已是最新版本，Release ${release.tagName} 可用于 ESP32 固件"
                         },
@@ -1526,8 +1823,25 @@ class ControlViewModel(application: Application) : AndroidViewModel(application)
             val state = mutableUpdateState.value
             val url = state.firmwareAssetApiUrl ?: state.firmwareDownloadUrl
             val assetName = state.firmwareAssetName
+            val manifest = latestFirmwareManifest
             if (url == null || assetName == null) {
                 mutableUpdateState.update { it.copy(message = "没有可用的 ESP32 固件资产") }
+                return@launch
+            }
+            if (manifest == null) {
+                mutableUpdateState.update { it.copy(message = "缺少 ESP32 发布清单，不能从 GitHub 自动刷写固件") }
+                return@launch
+            }
+            if (manifest.board != ESP32_BOARD_ID) {
+                mutableUpdateState.update { it.copy(message = "固件板型不匹配：${manifest.board}") }
+                return@launch
+            }
+            if (manifest.firmwareAssetName != assetName) {
+                mutableUpdateState.update { it.copy(message = "固件资产与清单不一致：$assetName") }
+                return@launch
+            }
+            if (manifest.minAppVersion?.let { isVersionGreaterThan(it, BuildConfig.VERSION_NAME) } == true) {
+                mutableUpdateState.update { it.copy(message = "请先升级 App 到 ${manifest.minAppVersion} 或更高版本") }
                 return@launch
             }
 
@@ -1555,13 +1869,26 @@ class ControlViewModel(application: Application) : AndroidViewModel(application)
                     firmwareFile.readBytes()
                 }
             }.onSuccess { firmwareBytes ->
+                val sizeMatches = manifest.sizeBytes <= 0 || firmwareBytes.size.toLong() == manifest.sizeBytes
+                val sha256 = sha256Hex(firmwareBytes)
+                if (!sizeMatches || !sha256.equals(manifest.sha256Hex, ignoreCase = true)) {
+                    mutableUpdateState.update {
+                        it.copy(
+                            downloading = false,
+                            message = "ESP32 固件校验失败：大小或 SHA-256 与发布清单不一致",
+                            progressText = "",
+                        )
+                    }
+                    return@launch
+                }
                 mutableUpdateState.update {
                     it.copy(
                         downloading = false,
+                        targetEsp32FirmwareVersion = manifest.firmwareVersion,
                         progressText = "",
                     )
                 }
-                uploadEsp32FirmwareBytes(firmwareBytes, "GitHub 固件")
+                uploadEsp32FirmwareBytes(firmwareBytes, "GitHub 固件", manifest.firmwareVersion)
             }.onFailure { error ->
                 mutableUpdateState.update {
                     it.copy(
@@ -1583,7 +1910,7 @@ class ControlViewModel(application: Application) : AndroidViewModel(application)
                         ?: error("无法读取选择的固件文件")
                 }
             }.onSuccess { firmwareBytes ->
-                uploadEsp32FirmwareBytes(firmwareBytes, "本地固件")
+                uploadEsp32FirmwareBytes(firmwareBytes, "本地固件", targetVersion = null)
             }.onFailure { error ->
                 mutableUpdateState.update {
                     it.copy(message = "读取本地固件失败：${error.message ?: "未知错误"}")
@@ -1598,6 +1925,11 @@ class ControlViewModel(application: Application) : AndroidViewModel(application)
         val commandLine: String,
     )
 
+    private data class ReleaseCheckResult(
+        val release: ReleaseInfo,
+        val firmwareManifest: FirmwareReleaseManifest?,
+    )
+
     private data class FineTuneTarget(
         val leftPercent: Int,
         val rightPercent: Int,
@@ -1608,6 +1940,524 @@ class ControlViewModel(application: Application) : AndroidViewModel(application)
     private fun previewVoiceCommand(text: String): VoicePreview {
         val evaluation = VoiceCommandParser.evaluate(text)
         return previewVoiceEvaluation(evaluation)
+    }
+
+    private fun executeRealtimeVoiceControlEvent(
+        event: RealtimeVoiceControlEvent,
+        rawJson: String,
+    ): String {
+        mutableUiState.update {
+            it.copy(realtimeVoiceControlEvent = formatRealtimeVoiceEvent(event))
+        }
+        return when (event) {
+            is RealtimeVoiceControlEvent.Stop -> {
+                executeRealtimeNeutral(event.reason)
+            }
+            is RealtimeVoiceControlEvent.ExplainStatus -> {
+                val resultText = buildRealtimeStatusReply()
+                mutableUiState.update {
+                    it.copy(
+                        realtimeVoiceControlEvent = "状态回复：不改变推进输出",
+                        voiceResultMessage = "实时语音：已回复状态",
+                        realtimeVoiceReply = resultText,
+                        voiceCommandPreview = "状态回复：不发送控制",
+                        statusMessage = "实时语音已回复状态，不改变推进输出",
+                    )
+                }
+                resultText
+            }
+            is RealtimeVoiceControlEvent.SetGear -> executeRealtimeSetGear(event)
+            is RealtimeVoiceControlEvent.PivotTurn -> executeRealtimePivotTurn(event)
+            is RealtimeVoiceControlEvent.SetLimitedPower -> executeRealtimeLimitedPower(event)
+            is RealtimeVoiceControlEvent.AdjustHeadingTarget -> executeRealtimeHeadingTarget(event)
+            is RealtimeVoiceControlEvent.SetHeadingTarget -> executeRealtimeSetHeadingTarget(event)
+            is RealtimeVoiceControlEvent.CancelHeadingLock -> executeRealtimeCancelHeadingLock(event)
+            is RealtimeVoiceControlEvent.DisableVoiceControl -> disableRealtimeVoiceControlByAgent(event.reason)
+        }
+    }
+
+    private fun formatRealtimeVoiceEvent(event: RealtimeVoiceControlEvent): String {
+        return when (event) {
+            is RealtimeVoiceControlEvent.Stop ->
+                "空挡：${event.reason}"
+            is RealtimeVoiceControlEvent.SetGear ->
+                "档位：${event.gear}；${event.reason}"
+            is RealtimeVoiceControlEvent.PivotTurn ->
+                "原地掉头：${event.direction}；${event.reason}"
+            is RealtimeVoiceControlEvent.SetLimitedPower ->
+                if (event.durationMs != null) {
+                    "限幅推进：L=${event.leftPercent}%，R=${event.rightPercent}%，${event.durationMs}ms；${event.reason}"
+                } else {
+                    "限幅推进：L=${event.leftPercent}%，R=${event.rightPercent}%；${event.reason}"
+                }
+            is RealtimeVoiceControlEvent.AdjustHeadingTarget ->
+                "调整航向：${event.deltaDegrees}°，基础 ${event.basePowerPercent}%，${event.durationMs}ms；${event.reason}"
+            is RealtimeVoiceControlEvent.SetHeadingTarget ->
+                "目标航向：${event.targetHeadingDegrees}°，基础 ${event.basePowerPercent}%；${event.reason}"
+            is RealtimeVoiceControlEvent.CancelHeadingLock ->
+                "取消航向锁定：${event.reason}"
+            is RealtimeVoiceControlEvent.DisableVoiceControl ->
+                "关闭语音控制：${event.reason}"
+            is RealtimeVoiceControlEvent.ExplainStatus ->
+                "状态回复：不改变推进输出"
+        }
+    }
+
+    private fun buildRealtimeStatusReply(): String {
+        val state = mutableUiState.value
+        val connectionText = if (state.connectionState == ConnectionState.Connected) {
+            "主控已连接"
+        } else {
+            "主控未连接"
+        }
+        val armedText = if (state.armed) "已解锁" else "未解锁"
+        val headingText = if (state.headingLockEnabled) {
+            "航向锁定中"
+        } else {
+            "未锁定航向"
+        }
+        return "我在。$connectionText，$armedText，当前档位${state.selectedGear.label}，$headingText。"
+    }
+
+    private fun executeRealtimeSetGear(event: RealtimeVoiceControlEvent.SetGear): String {
+        val gear = realtimeVoiceGear(event.gear)
+            ?: return rejectRealtimeVoiceEvent("不支持的档位：${event.gear}", "set_gear：不发送")
+        if (gear == ThrottleGear.Neutral) {
+            return executeRealtimeNeutral(event.reason)
+        }
+        val state = mutableUiState.value
+        val gearThrottle = coerceCommandPercentForSource(gearPercent(gear), CommandSource.Voice)
+        val command = ControlCommand(
+            armed = true,
+            leftThrottlePercent = gearThrottle,
+            rightThrottlePercent = gearThrottle,
+            source = CommandSource.Voice,
+        )
+        val commandLine = formatCommandLine(prepareRuntimeCommand(command))
+        if (state.connectionState != ConnectionState.Connected) {
+            return rejectRealtimeVoiceEvent("未连接 ESP32", commandLine)
+        }
+        if (!state.armed) {
+            return rejectRealtimeVoiceEvent("语音不能解锁，请先手动解锁", commandLine)
+        }
+        clearRealtimeVoiceActionTimeout()
+        val headingLockKept = updateActiveHeadingLockSource(CommandSource.Voice)
+        if (!headingLockKept) {
+            clearAutonomousCommands()
+        }
+        val resultText = "已设置${gear.label}"
+        mutableUiState.update {
+            it.copy(
+                leftThrottlePercent = gearThrottle,
+                rightThrottlePercent = gearThrottle,
+                commandSource = CommandSource.Voice,
+                headingLockEnabled = if (headingLockKept) true else false,
+                selectedGear = gear,
+                throttleTrimPercent = 0,
+                voiceResultMessage = "实时语音：已设置${gear.label}",
+                realtimeVoiceReply = resultText,
+                voiceCommandPreview = commandLine,
+                statusMessage = if (headingLockKept) {
+                    "实时语音档位：${gear.label} ${gearThrottle.signedPercentText()}，航向锁定保持"
+                } else {
+                    "实时语音档位：${gear.label} ${gearThrottle.signedPercentText()}"
+                },
+            )
+        }
+        sendCurrentCommand()
+        return resultText
+    }
+
+    private fun executeRealtimePivotTurn(event: RealtimeVoiceControlEvent.PivotTurn): String {
+        val state = mutableUiState.value
+        if (state.connectionState != ConnectionState.Connected) {
+            return rejectRealtimeVoiceEvent("未连接 ESP32", "pivot_turn：不发送")
+        }
+        if (!state.armed) {
+            return rejectRealtimeVoiceEvent("语音不能解锁，请先手动解锁", "pivot_turn：不发送")
+        }
+        val currentHeading = currentPhoneHeadingDegreesOrNull()
+        if (currentHeading == null) {
+            return rejectRealtimeVoiceEvent("手机指南针暂无有效读数", "pivot_turn：不发送")
+        }
+
+        clearRealtimeVoiceActionTimeout()
+        val headingLockWasActive = isHeadingLockActiveForState(state)
+        val startHeading = if (headingLockWasActive) {
+            appHeadingControlTargetDegrees ?: currentHeading
+        } else {
+            currentHeading
+        }
+        val directionText = if (event.direction == "left") "左" else "右"
+        val targetHeading = normalizeCompassDegrees(
+            startHeading + if (event.direction == "left") -179f else 179f,
+        )
+        clearAutonomousCommands()
+        val neutralCommandLine = formatCommandLine(
+            prepareRuntimeCommand(
+                ControlCommand(
+                    armed = true,
+                    leftThrottlePercent = 0,
+                    rightThrottlePercent = 0,
+                    source = CommandSource.Voice,
+                ),
+            ),
+        )
+        val token = realtimeVoiceActionToken
+        val resultText = "已进入空挡，1秒后开始${directionText}原地掉头"
+        mutableUiState.update {
+            it.copy(
+                leftThrottlePercent = 0,
+                rightThrottlePercent = 0,
+                commandSource = CommandSource.Voice,
+                headingLockEnabled = false,
+                selectedGear = ThrottleGear.Neutral,
+                throttleTrimPercent = 0,
+                voiceResultMessage = "实时语音：准备${directionText}原地掉头",
+                realtimeVoiceReply = resultText,
+                voiceCommandPreview = neutralCommandLine,
+                statusMessage = "实时语音${directionText}原地掉头：已先切空挡，等待1秒",
+            )
+        }
+        sendCurrentCommand()
+        realtimeVoiceActionTimeoutJob?.cancel()
+        realtimeVoiceActionTimeoutJob = viewModelScope.launch {
+            delay(PIVOT_TURN_NEUTRAL_DELAY_MS)
+            if (token != realtimeVoiceActionToken) {
+                return@launch
+            }
+            if (mutableUiState.value.connectionState != ConnectionState.Connected || !mutableUiState.value.armed) {
+                mutableUiState.update {
+                    it.copy(statusMessage = "实时语音${directionText}原地掉头取消：主控未连接或未解锁")
+                }
+                return@launch
+            }
+            if (currentPhoneHeadingDegreesOrNull() == null) {
+                mutableUiState.update {
+                    it.copy(statusMessage = "实时语音${directionText}原地掉头取消：手机指南针暂无有效读数")
+                }
+                return@launch
+            }
+            val runtimeCommand = prepareRuntimeCommand(
+                command = ControlCommand(
+                    armed = true,
+                    source = CommandSource.Voice,
+                    mode = ControlCommandMode.HeadingLock,
+                    headingLockEnabled = true,
+                    headingLockRequestId = 1,
+                    headingLockBaseThrottlePercent = 0,
+                ),
+                allocateHeadingLockRequestId = true,
+            )
+            startAppHeadingLock(runtimeCommand, targetHeading)
+            val commandLine = formatCommandLine(runtimeCommand)
+            mutableUiState.update {
+                it.copy(
+                    leftThrottlePercent = 0,
+                    rightThrottlePercent = 0,
+                    commandSource = CommandSource.Voice,
+                    headingLockEnabled = true,
+                    selectedGear = ThrottleGear.Neutral,
+                    throttleTrimPercent = 0,
+                    realtimeVoiceReply = "已开始${directionText}原地掉头",
+                    voiceCommandPreview = commandLine,
+                    statusMessage = "实时语音${directionText}原地掉头：空挡锁航目标 ${targetHeading.roundToInt()}°",
+                )
+            }
+            sendCurrentCommand()
+        }
+        return resultText
+    }
+
+    private fun realtimeVoiceGear(gear: String): ThrottleGear? {
+        return when (gear) {
+            "reverse_3" -> ThrottleGear.Reverse3
+            "reverse_2" -> ThrottleGear.Reverse2
+            "reverse_1" -> ThrottleGear.Reverse1
+            "neutral" -> ThrottleGear.Neutral
+            "forward_1" -> ThrottleGear.Forward1
+            "forward_2" -> ThrottleGear.Forward2
+            "forward_3" -> ThrottleGear.Forward3
+            "forward_4" -> ThrottleGear.Forward4
+            else -> null
+        }
+    }
+
+    private fun executeRealtimeNeutral(reason: String): String {
+        clearRealtimeVoiceActionTimeout()
+        clearAutonomousCommands()
+        val state = mutableUiState.value
+        val commandLine = formatCommandLine(
+            prepareRuntimeCommand(
+                ControlCommand(
+                    armed = state.armed,
+                    leftThrottlePercent = 0,
+                    rightThrottlePercent = 0,
+                    source = CommandSource.Voice,
+                ),
+            ),
+        )
+        if (state.connectionState != ConnectionState.Connected) {
+            return rejectRealtimeVoiceEvent("未连接 ESP32", commandLine)
+        }
+        val resultText = "已进入空挡"
+        mutableUiState.update {
+            it.copy(
+                leftThrottlePercent = 0,
+                rightThrottlePercent = 0,
+                commandSource = CommandSource.Voice,
+                headingLockEnabled = false,
+                selectedGear = ThrottleGear.Neutral,
+                throttleTrimPercent = 0,
+                voiceResultMessage = "实时语音：已进入空挡",
+                realtimeVoiceReply = resultText,
+                voiceCommandPreview = commandLine,
+                statusMessage = "实时语音空挡：$reason",
+            )
+        }
+        sendCurrentCommand()
+        return resultText
+    }
+
+    private fun executeRealtimeLimitedPower(event: RealtimeVoiceControlEvent.SetLimitedPower): String {
+        val state = mutableUiState.value
+        val left = coerceCommandPercentForSource(event.leftPercent, CommandSource.Voice)
+        val right = coerceCommandPercentForSource(event.rightPercent, CommandSource.Voice)
+        val commandLine = formatCommandLine(
+            prepareRuntimeCommand(
+                ControlCommand(
+                    armed = true,
+                    leftThrottlePercent = left,
+                    rightThrottlePercent = right,
+                    source = CommandSource.Voice,
+                ),
+            ),
+        )
+        if (state.connectionState != ConnectionState.Connected) {
+            return rejectRealtimeVoiceEvent("未连接 ESP32", commandLine)
+        }
+        if (!state.armed) {
+            return rejectRealtimeVoiceEvent("语音不能解锁，请先手动解锁", commandLine)
+        }
+        clearRealtimeVoiceActionTimeout()
+        clearAutonomousCommands()
+        val resultText = "已设置左右推进：左 ${left.signedPercentText()}，右 ${right.signedPercentText()}"
+        mutableUiState.update {
+            it.copy(
+                leftThrottlePercent = left,
+                rightThrottlePercent = right,
+                commandSource = CommandSource.Voice,
+                headingLockEnabled = false,
+                selectedGear = ThrottleGear.Neutral,
+                throttleTrimPercent = 0,
+                voiceResultMessage = "实时语音：已设置左右推进",
+                realtimeVoiceReply = resultText,
+                voiceCommandPreview = commandLine,
+                statusMessage = "实时语音左右推进：左 ${left.signedPercentText()}，右 ${right.signedPercentText()}",
+            )
+        }
+        sendCurrentCommand()
+        event.durationMs?.let {
+            scheduleRealtimeVoiceNeutral(it, "实时语音限幅推进已到期，回空挡")
+        }
+        return resultText
+    }
+
+    private fun executeRealtimeHeadingTarget(event: RealtimeVoiceControlEvent.AdjustHeadingTarget): String {
+        val state = mutableUiState.value
+        if (state.connectionState != ConnectionState.Connected) {
+            return rejectRealtimeVoiceEvent("未连接 ESP32", "adjust_heading_target：不发送")
+        }
+        if (!state.armed) {
+            return rejectRealtimeVoiceEvent("语音不能解锁，请先手动解锁", "adjust_heading_target：不发送")
+        }
+        val currentHeading = currentPhoneHeadingDegreesOrNull()
+        if (currentHeading == null) {
+            return rejectRealtimeVoiceEvent("手机指南针暂无有效读数", "adjust_heading_target：不发送")
+        }
+        val headingLockWasActive = isHeadingLockActiveForState(state)
+        val deltaDegrees = correctedRealtimeHeadingDelta(event)
+        clearActiveTurnCommand()
+        if (headingLockWasActive) {
+            clearRealtimeVoiceActionTimeout()
+        }
+        val basePercent = if (headingLockWasActive) {
+            coerceCommandPercentForSource(
+                activeHeadingLockCommand?.headingLockBaseThrottlePercent ?: currentAverageThrottlePercent(),
+                CommandSource.Voice,
+            )
+        } else {
+            coerceCommandPercentForSource(event.basePowerPercent, CommandSource.Voice)
+        }
+        val targetStartHeading = if (headingLockWasActive) {
+            appHeadingControlTargetDegrees ?: currentHeading
+        } else {
+            currentHeading
+        }
+        val targetHeading = normalizeCompassDegrees(targetStartHeading + deltaDegrees)
+        val runtimeCommand = prepareRuntimeCommand(
+            command = ControlCommand(
+                armed = true,
+                source = CommandSource.Voice,
+                mode = ControlCommandMode.HeadingLock,
+                headingLockEnabled = true,
+                headingLockRequestId = 1,
+                headingLockBaseThrottlePercent = basePercent,
+            ),
+            allocateHeadingLockRequestId = true,
+        )
+        startAppHeadingLock(runtimeCommand, targetHeading)
+        val commandLine = formatCommandLine(runtimeCommand)
+        val resultText = if (headingLockWasActive) {
+            "已保持航向锁定，目标调整到 ${targetHeading.roundToInt()} 度"
+        } else {
+            "已调整航向目标 ${targetHeading.roundToInt()} 度"
+        }
+        mutableUiState.update {
+            it.copy(
+                leftThrottlePercent = basePercent,
+                rightThrottlePercent = basePercent,
+                commandSource = CommandSource.Voice,
+                headingLockEnabled = true,
+                selectedGear = ThrottleGear.Neutral,
+                throttleTrimPercent = 0,
+                voiceResultMessage = "实时语音：已调整航向目标",
+                realtimeVoiceReply = resultText,
+                voiceCommandPreview = commandLine,
+                statusMessage = if (headingLockWasActive) {
+                    "实时语音锁航目标 ${targetHeading.roundToInt()}°，航向锁定保持"
+                } else {
+                    "实时语音锁航目标 ${targetHeading.roundToInt()}°，持续 ${event.durationMs}ms"
+                },
+            )
+        }
+        sendCurrentCommand()
+        if (!headingLockWasActive) {
+            scheduleRealtimeVoiceNeutral(event.durationMs, "实时语音锁航动作已到期，回空挡")
+        }
+        return resultText
+    }
+
+    private fun correctedRealtimeHeadingDelta(event: RealtimeVoiceControlEvent.AdjustHeadingTarget): Int {
+        val reason = event.reason
+        val requested = event.deltaDegrees.coerceIn(-90, 90)
+        return when {
+            reason.contains("左") && requested > 0 -> -requested
+            reason.contains("右") && requested < 0 -> -requested
+            else -> requested
+        }.coerceIn(-90, 90)
+    }
+
+    private fun executeRealtimeSetHeadingTarget(event: RealtimeVoiceControlEvent.SetHeadingTarget): String {
+        val state = mutableUiState.value
+        if (state.connectionState != ConnectionState.Connected) {
+            return rejectRealtimeVoiceEvent("未连接 ESP32", "set_heading_target：不发送")
+        }
+        if (!state.armed) {
+            return rejectRealtimeVoiceEvent("语音不能解锁，请先手动解锁", "set_heading_target：不发送")
+        }
+        if (currentPhoneHeadingDegreesOrNull() == null) {
+            return rejectRealtimeVoiceEvent("手机指南针暂无有效读数", "set_heading_target：不发送")
+        }
+
+        clearRealtimeVoiceActionTimeout()
+        clearActiveTurnCommand()
+        clearAutoNavigationExecution("自动导航已取消")
+        val basePercent = coerceCommandPercentForSource(event.basePowerPercent, CommandSource.Voice)
+        val targetHeading = normalizeCompassDegrees(event.targetHeadingDegrees.toFloat())
+        val runtimeCommand = prepareRuntimeCommand(
+            command = ControlCommand(
+                armed = true,
+                source = CommandSource.Voice,
+                mode = ControlCommandMode.HeadingLock,
+                headingLockEnabled = true,
+                headingLockRequestId = 1,
+                headingLockBaseThrottlePercent = basePercent,
+            ),
+            allocateHeadingLockRequestId = true,
+        )
+        startAppHeadingLock(runtimeCommand, targetHeading)
+        val commandLine = formatCommandLine(runtimeCommand)
+        val resultText = "已进入航向锁定，目标 ${targetHeading.roundToInt()} 度"
+        mutableUiState.update {
+            it.copy(
+                leftThrottlePercent = basePercent,
+                rightThrottlePercent = basePercent,
+                commandSource = CommandSource.Voice,
+                headingLockEnabled = true,
+                selectedGear = ThrottleGear.Neutral,
+                throttleTrimPercent = 0,
+                voiceResultMessage = "实时语音：已设置目标航向",
+                realtimeVoiceReply = resultText,
+                voiceCommandPreview = commandLine,
+                statusMessage = "实时语音目标航向 ${targetHeading.roundToInt()}°，航向锁定保持",
+            )
+        }
+        sendCurrentCommand()
+        return resultText
+    }
+
+    private fun executeRealtimeCancelHeadingLock(event: RealtimeVoiceControlEvent.CancelHeadingLock): String {
+        clearRealtimeVoiceActionTimeout()
+        clearActiveHeadingLockCommand()
+        val resultText = "已取消航向锁定"
+        mutableUiState.update {
+            it.copy(
+                headingLockEnabled = false,
+                voiceResultMessage = "实时语音：已取消航向锁定",
+                realtimeVoiceReply = resultText,
+                voiceCommandPreview = "cancel_heading_lock：不解锁推进",
+                statusMessage = "实时语音取消航向锁定：${event.reason}",
+            )
+        }
+        sendCurrentCommand()
+        return resultText
+    }
+
+    private fun rejectRealtimeVoiceEvent(reason: String, commandLine: String): String {
+        val resultText = "拒绝执行：$reason"
+        mutableUiState.update {
+            it.copy(
+                voiceResultMessage = "实时语音事件拒绝：$reason",
+                realtimeVoiceReply = resultText,
+                voiceCommandPreview = commandLine,
+                statusMessage = "实时语音事件拒绝：$reason",
+            )
+        }
+        return resultText
+    }
+
+    private fun scheduleRealtimeVoiceNeutral(durationMs: Int, message: String) {
+        val token = ++realtimeVoiceActionToken
+        realtimeVoiceActionTimeoutJob?.cancel()
+        realtimeVoiceActionTimeoutJob = viewModelScope.launch {
+            delay(durationMs.toLong())
+            if (token != realtimeVoiceActionToken) {
+                return@launch
+            }
+            if (mutableUiState.value.commandSource != CommandSource.Voice) {
+                return@launch
+            }
+            clearAutonomousCommands()
+            mutableUiState.update {
+                it.copy(
+                    leftThrottlePercent = 0,
+                    rightThrottlePercent = 0,
+                    commandSource = CommandSource.Voice,
+                    headingLockEnabled = false,
+                    selectedGear = ThrottleGear.Neutral,
+                    throttleTrimPercent = 0,
+                    statusMessage = message,
+                )
+            }
+            sendCurrentCommand()
+        }
+    }
+
+    private fun clearRealtimeVoiceActionTimeout() {
+        realtimeVoiceActionToken++
+        realtimeVoiceActionTimeoutJob?.cancel()
+        realtimeVoiceActionTimeoutJob = null
     }
 
     private fun previewVoiceEvaluation(evaluation: VoiceCommandEvaluation): VoicePreview {
@@ -2201,6 +3051,10 @@ class ControlViewModel(application: Application) : AndroidViewModel(application)
             mutableUiState.update { it.copy(statusMessage = "$failurePrefix：未连接 ESP32") }
             return
         }
+        if (esp32OtaExclusive) {
+            mutableUiState.update { it.copy(statusMessage = "$failurePrefix：ESP32 OTA 进行中") }
+            return
+        }
 
         if (forceLockedNeutral) {
             clearAutonomousCommands()
@@ -2300,7 +3154,11 @@ class ControlViewModel(application: Application) : AndroidViewModel(application)
         return if (normalized < 0f) normalized + 360f else normalized
     }
 
-    private fun uploadEsp32FirmwareBytes(firmwareBytes: ByteArray, sourceLabel: String) {
+    private fun uploadEsp32FirmwareBytes(
+        firmwareBytes: ByteArray,
+        sourceLabel: String,
+        targetVersion: String?,
+    ) {
         viewModelScope.launch {
             val nextTransport = transport
             if (nextTransport == null || mutableUiState.value.connectionState != ConnectionState.Connected) {
@@ -2315,6 +3173,8 @@ class ControlViewModel(application: Application) : AndroidViewModel(application)
 
             commandHeartbeatJob?.cancel()
             clearAutonomousCommands()
+            esp32OtaExclusive = true
+            pendingEsp32FirmwareVersion = targetVersion
             mutableUiState.update {
                 it.copy(
                     armed = false,
@@ -2334,6 +3194,7 @@ class ControlViewModel(application: Application) : AndroidViewModel(application)
             mutableUpdateState.update {
                 it.copy(
                     esp32Uploading = true,
+                    targetEsp32FirmwareVersion = targetVersion ?: it.targetEsp32FirmwareVersion,
                     message = "正在通过蓝牙发送 $sourceLabel 到 ESP32",
                     progressText = "0/${firmwareBytes.size} bytes",
                 )
@@ -2349,20 +3210,25 @@ class ControlViewModel(application: Application) : AndroidViewModel(application)
                 mutableUpdateState.update {
                     it.copy(
                         esp32Uploading = false,
-                        message = "ESP32 固件已发送完成，设备会校验并重启；如果蓝牙断开，请重新连接",
+                        message = if (targetVersion == null) {
+                            "ESP32 固件校验通过，设备正在重启；本地固件需要重连后人工确认版本"
+                        } else {
+                            "ESP32 固件校验通过，设备正在重启；重连后将验证 FW=$targetVersion"
+                        },
                         progressText = "",
                     )
                 }
             }.onFailure { error ->
+                esp32OtaExclusive = false
+                pendingEsp32FirmwareVersion = null
                 mutableUpdateState.update {
                     it.copy(
                         esp32Uploading = false,
                         message = "ESP32 固件更新失败：${error.message ?: "未知错误"}",
                     )
                 }
+                startCommandHeartbeat()
             }
-
-            startCommandHeartbeat()
         }
     }
 
@@ -2419,7 +3285,7 @@ class ControlViewModel(application: Application) : AndroidViewModel(application)
             failAutoNavigation("自动导航停止：路线无效")
             return ControlCommand.Idle
         }
-        val currentPoint = currentGpsPointOrNull()
+        val currentPoint = currentAutoNavigationPointOrNull(settings.autoNavigationGpsJumpResetMeters.toDouble())
         if (currentPoint == null || gpsSatelliteCount() < AUTO_NAVIGATION_MIN_SATELLITES) {
             failAutoNavigation("自动导航停止：GPS 定位不足")
             return ControlCommand.Idle
@@ -2454,7 +3320,13 @@ class ControlViewModel(application: Application) : AndroidViewModel(application)
             return ControlCommand.Idle
         }
 
-        val targetBearing = bearingBetween(currentPoint, targetPoint)
+        val targetBearing = autoNavigationTargetBearing(
+            currentPoint = currentPoint,
+            route = route,
+            targetIndex = targetIndex,
+            targetPoint = targetPoint,
+            distanceMeters = distanceMeters,
+        )
         val errorDegrees = shortestCompassError(targetBearing.toFloat(), currentHeading)
         val absError = abs(errorDegrees)
         val gearIndex = autoState.gearIndex.coerceIn(0, AUTO_NAVIGATION_GEAR_PERCENTS.lastIndex)
@@ -2576,12 +3448,14 @@ class ControlViewModel(application: Application) : AndroidViewModel(application)
             errorDegrees = errorDegrees,
             toleranceDegrees = activeCommand.headingLockToleranceDegrees,
             fullCorrectionDegrees = activeCommand.headingLockFullCorrectionDegrees,
+            baseMagnitudePercent = headingBaseMagnitudePercent(baseLeftPercent, baseRightPercent),
         )
         val rawLeftRight = headingCorrectedThrottle(
             leftBasePercent = baseLeftPercent,
             rightBasePercent = baseRightPercent,
             correction = correction,
             neutralReversePercent = activeCommand.headingLockNeutralReversePercent,
+            outputLimitPercent = headingOutputLimitPercent(activeCommand.source, settings),
         )
         val leftPercent = coerceCommandPercentForSource(rawLeftRight.first, activeCommand.source)
         val rightPercent = coerceCommandPercentForSource(rawLeftRight.second, activeCommand.source)
@@ -2611,20 +3485,45 @@ class ControlViewModel(application: Application) : AndroidViewModel(application)
         errorDegrees: Float,
         toleranceDegrees: Int,
         fullCorrectionDegrees: Int,
+        baseMagnitudePercent: Int,
     ): Int {
         val absError = abs(errorDegrees)
         val tolerance = toleranceDegrees.toFloat()
         if (absError <= tolerance) {
             return 0
         }
-        val full = fullCorrectionDegrees.coerceAtLeast(toleranceDegrees + 1).toFloat()
+        val cruiseRatio = headingCruiseRatio(baseMagnitudePercent)
+        val configuredFull = fullCorrectionDegrees.coerceAtLeast(toleranceDegrees + 1).toFloat()
+        val lowSpeedFull = maxOf(configuredFull, HEADING_LOCK_LOW_SPEED_FULL_CORRECTION_DEGREES)
+        val full = lerp(lowSpeedFull, configuredFull, cruiseRatio)
+            .coerceAtLeast(tolerance + 1f)
+        val maxCorrection = lerp(
+            HEADING_LOCK_LOW_SPEED_MAX_CORRECTION_PERCENT.toFloat(),
+            HEADING_LOCK_MAX_CORRECTION_PERCENT.toFloat(),
+            cruiseRatio,
+        ).roundToInt()
         val activeError = (absError.coerceAtMost(full) - tolerance).coerceAtLeast(0f)
         val activeRange = (full - tolerance).coerceAtLeast(1f)
         val ratio = activeError / activeRange
         val correction = HEADING_LOCK_MIN_CORRECTION_PERCENT +
-            ((HEADING_LOCK_MAX_CORRECTION_PERCENT - HEADING_LOCK_MIN_CORRECTION_PERCENT) * ratio).roundToInt()
-        return correction.coerceIn(HEADING_LOCK_MIN_CORRECTION_PERCENT, HEADING_LOCK_MAX_CORRECTION_PERCENT)
+            ((maxCorrection - HEADING_LOCK_MIN_CORRECTION_PERCENT) * ratio).roundToInt()
+        return correction.coerceIn(HEADING_LOCK_MIN_CORRECTION_PERCENT, maxCorrection)
             .let { if (errorDegrees < 0f) -it else it }
+    }
+
+    private fun headingBaseMagnitudePercent(leftBasePercent: Int, rightBasePercent: Int): Int {
+        return maxOf(abs(leftBasePercent), abs(rightBasePercent)).coerceIn(0, 100)
+    }
+
+    private fun headingCruiseRatio(baseMagnitudePercent: Int): Float {
+        val activeRange = (HEADING_LOCK_CRUISE_GAIN_FULL_PERCENT - HEADING_LOCK_CRUISE_GAIN_START_PERCENT)
+            .coerceAtLeast(1)
+        return ((baseMagnitudePercent - HEADING_LOCK_CRUISE_GAIN_START_PERCENT).toFloat() / activeRange)
+            .coerceIn(0f, 1f)
+    }
+
+    private fun lerp(start: Float, end: Float, ratio: Float): Float {
+        return start + (end - start) * ratio.coerceIn(0f, 1f)
     }
 
     private fun headingCorrectedThrottle(
@@ -2632,30 +3531,63 @@ class ControlViewModel(application: Application) : AndroidViewModel(application)
         rightBasePercent: Int,
         correction: Int,
         neutralReversePercent: Int,
+        outputLimitPercent: Int,
     ): Pair<Int, Int> {
-        return headingCorrectedSideThrottle(
-            basePercent = leftBasePercent,
-            correctionDelta = correction,
-            neutralReversePercent = neutralReversePercent,
-        ) to headingCorrectedSideThrottle(
-            basePercent = rightBasePercent,
-            correctionDelta = -correction,
-            neutralReversePercent = neutralReversePercent,
-        )
+        val leftLimits = headingSideOutputLimits(leftBasePercent, neutralReversePercent, outputLimitPercent)
+        val rightLimits = headingSideOutputLimits(rightBasePercent, neutralReversePercent, outputLimitPercent)
+        var left = leftBasePercent + correction
+        var right = rightBasePercent - correction
+
+        if (left > leftLimits.second) {
+            val overflow = left - leftLimits.second
+            left -= overflow
+            right -= overflow
+        }
+        if (right > rightLimits.second) {
+            val overflow = right - rightLimits.second
+            left -= overflow
+            right -= overflow
+        }
+        if (left < leftLimits.first) {
+            val underflow = leftLimits.first - left
+            left += underflow
+            right += underflow
+        }
+        if (right < rightLimits.first) {
+            val underflow = rightLimits.first - right
+            left += underflow
+            right += underflow
+        }
+
+        return left.coerceIn(leftLimits.first, leftLimits.second) to
+            right.coerceIn(rightLimits.first, rightLimits.second)
     }
 
-    private fun headingCorrectedSideThrottle(
+    private fun headingSideOutputLimits(
         basePercent: Int,
-        correctionDelta: Int,
         neutralReversePercent: Int,
-    ): Int {
-        val rawPercent = basePercent + correctionDelta
-        val constrained = when {
-            basePercent > 0 -> rawPercent.coerceAtLeast(0)
-            basePercent < 0 -> rawPercent.coerceAtMost(0)
-            else -> rawPercent.coerceAtLeast(-neutralReversePercent)
+        outputLimitPercent: Int,
+    ): Pair<Int, Int> {
+        val limit = outputLimitPercent.coerceIn(0, 100)
+        val minPercent = when {
+            basePercent > 0 -> 0
+            basePercent < 0 -> -limit
+            else -> -neutralReversePercent.coerceIn(0, limit)
         }
-        return constrained.coerceIn(-100, 100)
+        val maxPercent = when {
+            basePercent > 0 -> limit
+            basePercent < 0 -> 0
+            else -> limit
+        }
+        return minPercent to maxPercent
+    }
+
+    private fun headingOutputLimitPercent(source: CommandSource, settings: SettingsUiState): Int {
+        return if (source == CommandSource.Voice) {
+            settings.voicePowerLimitPercent
+        } else {
+            100
+        }
     }
 
     private fun shortestCompassError(targetDegrees: Float, currentDegrees: Float): Float {
@@ -3078,6 +4010,7 @@ class ControlViewModel(application: Application) : AndroidViewModel(application)
     }
 
     private fun clearAutonomousCommands() {
+        realtimeVoiceActionToken++
         activeTurnCommand = null
         activeHeadingLockCommand = null
         clearAutoNavigationExecution("自动导航已取消")
@@ -3105,6 +4038,8 @@ class ControlViewModel(application: Application) : AndroidViewModel(application)
     }
 
     private fun clearAutoNavigationExecution(message: String) {
+        autoNavigationFilteredPoint = null
+        autoNavigationLastRawPoint = null
         mutableUiState.update {
             if (!it.autoNavigation.executing && it.autoNavigation.leftOutputPercent == 0 && it.autoNavigation.rightOutputPercent == 0) {
                 it
@@ -3164,6 +4099,28 @@ class ControlViewModel(application: Application) : AndroidViewModel(application)
         return NavigationRoutePoint(latitude, longitude)
     }
 
+    private fun currentAutoNavigationPointOrNull(jumpResetMeters: Double): NavigationRoutePoint? {
+        val rawPoint = currentGpsPointOrNull() ?: return null
+        val lastRawPoint = autoNavigationLastRawPoint
+        val previousPoint = autoNavigationFilteredPoint
+        val rawJumped = lastRawPoint != null && distanceMeters(lastRawPoint, rawPoint) > jumpResetMeters
+        val nextPoint = if (
+            previousPoint == null ||
+            rawJumped
+        ) {
+            rawPoint
+        } else {
+            interpolatePoint(
+                from = previousPoint,
+                to = rawPoint,
+                fraction = AUTO_NAVIGATION_GPS_FILTER_ALPHA,
+            )
+        }
+        autoNavigationFilteredPoint = nextPoint
+        autoNavigationLastRawPoint = rawPoint
+        return nextPoint
+    }
+
     private fun gpsSatelliteCount(): Int {
         return mutableUiState.value.telemetry.statusFields["GPS_SAT"]?.toIntOrNull() ?: 0
     }
@@ -3175,6 +4132,37 @@ class ControlViewModel(application: Application) : AndroidViewModel(application)
         val y = sin(deltaLon) * cos(lat2)
         val x = cos(lat1) * sin(lat2) - sin(lat1) * cos(lat2) * cos(deltaLon)
         return (Math.toDegrees(atan2(y, x)) + 360.0) % 360.0
+    }
+
+    private fun autoNavigationTargetBearing(
+        currentPoint: NavigationRoutePoint,
+        route: NavigationRoute,
+        targetIndex: Int,
+        targetPoint: NavigationRoutePoint,
+        distanceMeters: Double,
+    ): Double {
+        if (distanceMeters > AUTO_NAVIGATION_BEARING_STABILITY_RADIUS_METERS) {
+            return bearingBetween(currentPoint, targetPoint)
+        }
+        if (targetIndex < route.points.lastIndex) {
+            return bearingBetween(currentPoint, route.points[targetIndex + 1])
+        }
+        if (targetIndex > 0) {
+            return bearingBetween(route.points[targetIndex - 1], targetPoint)
+        }
+        return bearingBetween(currentPoint, targetPoint)
+    }
+
+    private fun interpolatePoint(
+        from: NavigationRoutePoint,
+        to: NavigationRoutePoint,
+        fraction: Double,
+    ): NavigationRoutePoint {
+        val clampedFraction = fraction.coerceIn(0.0, 1.0)
+        return NavigationRoutePoint(
+            latitude = from.latitude + (to.latitude - from.latitude) * clampedFraction,
+            longitude = from.longitude + (to.longitude - from.longitude) * clampedFraction,
+        )
     }
 
     private fun distanceMeters(from: NavigationRoutePoint, to: NavigationRoutePoint): Double {
@@ -3323,6 +4311,9 @@ class ControlViewModel(application: Application) : AndroidViewModel(application)
     }
 
     private suspend fun sendCommand(command: ControlCommand): Boolean {
+        if (esp32OtaExclusive) {
+            return true
+        }
         val activeTransport = transport ?: return false
         return runCatching {
             activeTransport.send(command.withRuntimeHeadingSource())
@@ -3345,6 +4336,10 @@ class ControlViewModel(application: Application) : AndroidViewModel(application)
 
     private fun handleTransportError(error: Throwable) {
         val updateStateBeforeDisconnect = mutableUpdateState.value
+        val otaMayBeRebooting =
+            updateStateBeforeDisconnect.message.contains("校验通过") ||
+                updateStateBeforeDisconnect.message.contains("正在重启") ||
+                updateStateBeforeDisconnect.message.contains("等待设备校验并重启")
         transport = null
         telemetryJob?.cancel()
         commandHeartbeatJob?.cancel()
@@ -3371,10 +4366,20 @@ class ControlViewModel(application: Application) : AndroidViewModel(application)
             updateStateBeforeDisconnect.message.contains("固件已发送完成") ||
             updateStateBeforeDisconnect.message.contains("正在重启")
         ) {
+            if (!otaMayBeRebooting) {
+                esp32OtaExclusive = false
+                pendingEsp32FirmwareVersion = null
+            }
             mutableUpdateState.update {
                 it.copy(
                     esp32Uploading = false,
-                    message = "蓝牙已断开，ESP32 可能已重启；请重新连接后确认固件状态",
+                    message = if (otaMayBeRebooting) {
+                        pendingEsp32FirmwareVersion?.let { target ->
+                            "蓝牙已断开，ESP32 可能已重启；请重新连接后验证 FW=$target"
+                        } ?: "蓝牙已断开，ESP32 可能已重启；请重新连接后确认固件状态"
+                    } else {
+                        "蓝牙 OTA 中断：${error.message ?: "未知错误"}"
+                    },
                     progressText = "",
                 )
             }
@@ -3450,8 +4455,83 @@ class ControlViewModel(application: Application) : AndroidViewModel(application)
             nextTransport.telemetry.collect { telemetry ->
                 handleControllerErrorLine(telemetry.lastReceivedStatus)
                 handleOtaStatusLine(telemetry.lastReceivedStatus)
-                mutableUiState.update { it.copy(telemetry = telemetry) }
+                handleControllerInfoFields(telemetry.statusFields)
+                // IMU CSV 调试日志暂时关闭；新 IMU 到货后再打开。
+                val phoneHeading = mutableUiState.value.phoneHeadingDegrees
+                val logSnapshot = if (
+                    IMU_TELEMETRY_LOGGING_ENABLED &&
+                    telemetry.lastReceivedStatus != lastLoggedImuStatusLine
+                ) {
+                    withContext(Dispatchers.IO) {
+                        imuTelemetryLogStore.append(telemetry, phoneHeading)
+                    }?.also {
+                        lastLoggedImuStatusLine = telemetry.lastReceivedStatus
+                    }
+                } else {
+                    null
+                }
+                mutableUiState.update {
+                    it.copy(
+                        telemetry = telemetry,
+                        imuTelemetryLogPath = logSnapshot?.filePath ?: it.imuTelemetryLogPath,
+                        imuTelemetryLogSampleCount = logSnapshot?.sampleCount ?: it.imuTelemetryLogSampleCount,
+                    )
+                }
             }
+        }
+    }
+
+    private fun handleControllerInfoFields(fields: Map<String, String>) {
+        val firmwareVersion = fields["FW"]?.takeIf { it.isNotBlank() } ?: return
+        mutableUpdateState.update {
+            it.copy(currentEsp32FirmwareVersion = firmwareVersion)
+        }
+
+        val targetVersion = pendingEsp32FirmwareVersion
+        if (!esp32OtaExclusive) {
+            return
+        }
+
+        if (targetVersion == null) {
+            esp32OtaExclusive = false
+            mutableUpdateState.update {
+                it.copy(message = "ESP32 已重连，当前固件 $firmwareVersion")
+            }
+            startCommandHeartbeat()
+            sendIdle()
+            requestTrackLogSync()
+            return
+        }
+
+        if (sameVersion(firmwareVersion, targetVersion)) {
+            pendingEsp32FirmwareVersion = null
+            esp32OtaExclusive = false
+            mutableUpdateState.update {
+                it.copy(
+                    esp32Uploading = false,
+                    message = "ESP32 固件已验证：$firmwareVersion",
+                    progressText = "",
+                )
+            }
+            mutableUiState.update {
+                it.copy(statusMessage = "ESP32 固件已更新到 $firmwareVersion，系统保持锁定")
+            }
+            startCommandHeartbeat()
+            sendIdle()
+            requestTrackLogSync()
+            speakVoiceReply("主控固件已更新")
+        } else {
+            pendingEsp32FirmwareVersion = null
+            esp32OtaExclusive = false
+            mutableUpdateState.update {
+                it.copy(
+                    esp32Uploading = false,
+                    message = "ESP32 固件版本验证失败：当前 $firmwareVersion，目标 $targetVersion",
+                    progressText = "",
+                )
+            }
+            startCommandHeartbeat()
+            sendIdle()
         }
     }
 
@@ -3474,12 +4554,16 @@ class ControlViewModel(application: Application) : AndroidViewModel(application)
                 mutableUpdateState.update {
                     it.copy(
                         esp32Uploading = false,
-                        message = "ESP32 固件校验通过，设备正在重启；蓝牙断开后请重新连接",
+                        message = pendingEsp32FirmwareVersion?.let { target ->
+                            "ESP32 固件校验通过，设备正在重启；重连后验证 FW=$target"
+                        } ?: "ESP32 固件校验通过，设备正在重启；请重连后确认版本",
                         progressText = "",
                     )
                 }
             }
             line.startsWith("OTA;ERR=") -> {
+                esp32OtaExclusive = false
+                pendingEsp32FirmwareVersion = null
                 mutableUpdateState.update {
                     it.copy(
                         esp32Uploading = false,
@@ -3620,6 +4704,10 @@ class ControlViewModel(application: Application) : AndroidViewModel(application)
     }
 
     private fun sendTrackLogRead(nextTransport: ControlTransport, fromSequence: Int) {
+        if (esp32OtaExclusive) {
+            refreshGpsTrackState("ESP32 OTA 进行中，暂不同步轨迹")
+            return
+        }
         trackLogSyncJob?.cancel()
         trackLogSyncJob = viewModelScope.launch {
             delay(120)
@@ -3731,7 +4819,35 @@ class ControlViewModel(application: Application) : AndroidViewModel(application)
             headingLockNeutralReversePercent = coerceHeadingLockNeutralReversePercent(
                 preferences.getInt(KEY_HEADING_LOCK_NEUTRAL_REVERSE_PERCENT, 70),
             ),
+            autoNavigationGpsJumpResetMeters = coerceAutoNavigationGpsJumpResetMeters(
+                preferences.getInt(
+                    KEY_AUTO_NAVIGATION_GPS_JUMP_RESET_METERS,
+                    AUTO_NAVIGATION_GPS_JUMP_RESET_DEFAULT_METERS,
+                ),
+            ),
             usePhoneHeading = true,
+            realtimeVoiceEndpoint = preferences.getString(KEY_REALTIME_VOICE_ENDPOINT, null)
+                ?.ifBlank { REALTIME_VOICE_ENDPOINT_DEFAULT }
+                ?: REALTIME_VOICE_ENDPOINT_DEFAULT,
+            realtimeVoiceAppId = preferences.getString(KEY_REALTIME_VOICE_APP_ID, null)
+                ?.ifBlank { BuildConfig.DOUBAO_APP_ID }
+                ?: BuildConfig.DOUBAO_APP_ID,
+            realtimeVoiceApiKey = preferences.getString(KEY_REALTIME_VOICE_API_KEY, null)
+                ?.ifBlank { BuildConfig.ARK_API_KEY }
+                ?: BuildConfig.ARK_API_KEY,
+            realtimeVoiceModel = preferences.getString(KEY_REALTIME_VOICE_MODEL, null)
+                ?.ifBlank { REALTIME_VOICE_MODEL_DEFAULT }
+                ?: REALTIME_VOICE_MODEL_DEFAULT,
+            realtimeVoiceVoice = preferences.getString(KEY_REALTIME_VOICE_VOICE, null)
+                ?.let { normalizeRealtimeVoiceVoice(it) }
+                ?.ifBlank { REALTIME_VOICE_VOICE_DEFAULT }
+                ?: REALTIME_VOICE_VOICE_DEFAULT,
+            realtimeTtsMode = preferences.getString(KEY_REALTIME_TTS_MODE, null)
+                ?.let { runCatching { RealtimeTtsMode.valueOf(it) }.getOrNull() }
+                ?: RealtimeTtsMode.Local,
+            cloudTtsConfigured = preferences.getString(KEY_REALTIME_VOICE_API_KEY, null)
+                ?.ifBlank { BuildConfig.ARK_API_KEY }
+                ?.isNotBlank() == true || BuildConfig.DOUBAO_API_KEY.isNotBlank(),
             githubToken = preferences.getString(KEY_GITHUB_TOKEN, null).orEmpty(),
         )
     }
@@ -3745,6 +4861,23 @@ class ControlViewModel(application: Application) : AndroidViewModel(application)
         }
     }
 
+    private fun normalizeRealtimeVoiceVoice(value: String): String {
+        val trimmed = value.trim()
+        return when (trimmed) {
+            "",
+            "zh_male_yunzhou_jupiter_bigtts",
+            -> REALTIME_VOICE_VOICE_DEFAULT
+            else -> trimmed
+        }
+    }
+
+    private fun coerceAutoNavigationGpsJumpResetMeters(meters: Int): Int {
+        return meters.coerceIn(
+            AUTO_NAVIGATION_GPS_JUMP_RESET_MIN_METERS,
+            AUTO_NAVIGATION_GPS_JUMP_RESET_MAX_METERS,
+        )
+    }
+
     override fun onCleared() {
         stopBluetoothDiscovery()
         if (discoveryReceiverRegistered) {
@@ -3754,6 +4887,7 @@ class ControlViewModel(application: Application) : AndroidViewModel(application)
             discoveryReceiverRegistered = false
         }
         stopPhoneHeadingSensor(clearReading = true)
+        realtimeVoiceActionTimeoutJob?.cancel()
         voiceReplyEngine?.stop()
         voiceReplyEngine?.shutdown()
         voiceReplyEngine = null
@@ -3764,6 +4898,8 @@ class ControlViewModel(application: Application) : AndroidViewModel(application)
     companion object {
         private const val TAG = "SmartSupControl"
         private const val SMART_SUP_DEVICE_PREFIX = "SmartSUP-"
+        private const val ESP32_BOARD_ID = "lolin32_lite"
+        private const val IMU_TELEMETRY_LOGGING_ENABLED = false
         private const val PREFERENCES_NAME = "smart_sup_settings"
         private const val KEY_DEVICE_NAME = "device_name"
         private const val KEY_DEVICE_ADDRESS = "device_address"
@@ -3775,19 +4911,37 @@ class ControlViewModel(application: Application) : AndroidViewModel(application)
         private const val KEY_HEADING_LOCK_TOLERANCE_DEGREES = "heading_lock_tolerance_degrees"
         private const val KEY_HEADING_LOCK_FULL_CORRECTION_DEGREES = "heading_lock_full_correction_degrees"
         private const val KEY_HEADING_LOCK_NEUTRAL_REVERSE_PERCENT = "heading_lock_neutral_reverse_percent"
+        private const val KEY_AUTO_NAVIGATION_GPS_JUMP_RESET_METERS = "auto_navigation_gps_jump_reset_meters"
         private const val KEY_LEFT_ESC_REVERSED = "left_esc_reversed"
         private const val KEY_RIGHT_ESC_REVERSED = "right_esc_reversed"
         private const val KEY_USE_PHONE_HEADING = "use_phone_heading"
+        private const val KEY_REALTIME_VOICE_ENDPOINT = "realtime_voice_endpoint"
+        private const val KEY_REALTIME_VOICE_APP_ID = "realtime_voice_app_id"
+        private const val KEY_REALTIME_VOICE_API_KEY = "realtime_voice_api_key"
+        private const val KEY_REALTIME_VOICE_MODEL = "realtime_voice_model"
+        private const val KEY_REALTIME_VOICE_VOICE = "realtime_voice_voice"
+        private const val KEY_REALTIME_TTS_MODE = "realtime_tts_mode"
+        private const val KEY_REALTIME_WAKE_WORD_REQUIRED = "realtime_wake_word_required"
         private const val KEY_GITHUB_TOKEN = "github_token"
         private const val KEY_GEAR_PREFIX = "gear_percent_"
         private const val COMMAND_HEARTBEAT_MS = 100L
         private const val PHONE_HEADING_STALE_MS = 1_500L
         private const val APP_TURN_TIMEOUT_MS = 8_000L
         private const val APP_TURN_DONE_DEGREES = 3.0f
+        private const val PIVOT_TURN_NEUTRAL_DELAY_MS = 1_000L
         private const val HEADING_LOCK_MIN_CORRECTION_PERCENT = 3
+        private const val HEADING_LOCK_LOW_SPEED_MAX_CORRECTION_PERCENT = 25
         private const val HEADING_LOCK_MAX_CORRECTION_PERCENT = 70
+        private const val HEADING_LOCK_CRUISE_GAIN_START_PERCENT = 10
+        private const val HEADING_LOCK_CRUISE_GAIN_FULL_PERCENT = 50
+        private const val HEADING_LOCK_LOW_SPEED_FULL_CORRECTION_DEGREES = 45f
         private const val AUTO_NAVIGATION_MIN_SATELLITES = 4
         private const val AUTO_NAVIGATION_ARRIVAL_RADIUS_METERS = 8.0
+        private const val AUTO_NAVIGATION_BEARING_STABILITY_RADIUS_METERS = 18.0
+        private const val AUTO_NAVIGATION_GPS_FILTER_ALPHA = 0.35
+        private const val AUTO_NAVIGATION_GPS_JUMP_RESET_MIN_METERS = 3
+        private const val AUTO_NAVIGATION_GPS_JUMP_RESET_MAX_METERS = 30
+        private const val AUTO_NAVIGATION_GPS_JUMP_RESET_DEFAULT_METERS = 5
         private const val AUTO_NAVIGATION_MAX_CORRECTION_PERCENT = 25
         private const val AUTO_NAVIGATION_FULL_CORRECTION_DEGREES = 45f
         private const val AUTO_NAVIGATION_STOP_TURN_DEGREES = 120f
@@ -3801,6 +4955,9 @@ class ControlViewModel(application: Application) : AndroidViewModel(application)
         private const val VOICE_REPLY_POST_SUPPRESSION_MS = 1_000L
         private const val VOICE_REPLY_MAX_SUPPRESSION_MS = 15_000L
         private const val VOICE_COMMAND_DUPLICATE_SUPPRESSION_MS = 2_500L
+        private const val REALTIME_VOICE_MODEL_DEFAULT = "doubao-seed-2-0-lite-260428"
+        private const val REALTIME_VOICE_ENDPOINT_DEFAULT = "wss://openspeech.bytedance.com/api/v3/realtime/dialogue"
+        private const val REALTIME_VOICE_VOICE_DEFAULT = "zh_female_vv_uranus_bigtts"
         private val AUTO_NAVIGATION_GEAR_PERCENTS = listOf(15, 22, 30)
         private val VOICE_ACK_REPLIES = listOf(
             "好的",
@@ -3879,9 +5036,52 @@ class ControlViewModel(application: Application) : AndroidViewModel(application)
         }
     }
 
+    private fun parseFirmwareManifest(jsonText: String): FirmwareReleaseManifest {
+        val json = JSONObject(jsonText)
+        val firmware = json.getJSONObject("firmware")
+        return FirmwareReleaseManifest(
+            releaseVersion = json.optString("version").ifBlank {
+                firmware.optString("version")
+            },
+            firmwareAssetName = firmware.getString("asset"),
+            firmwareVersion = firmware.getString("version"),
+            board = firmware.getString("board"),
+            sizeBytes = firmware.optLong("size", 0L),
+            sha256Hex = firmware.getString("sha256"),
+            minAppVersion = firmware.optString("minAppVersion").ifBlank { null },
+        )
+    }
+
     private fun md5Hex(bytes: ByteArray): String {
         val digest = MessageDigest.getInstance("MD5").digest(bytes)
         return digest.joinToString(separator = "") { "%02x".format(it.toInt() and 0xff) }
+    }
+
+    private fun sha256Hex(bytes: ByteArray): String {
+        val digest = MessageDigest.getInstance("SHA-256").digest(bytes)
+        return digest.joinToString(separator = "") { "%02x".format(it.toInt() and 0xff) }
+    }
+
+    private fun sameVersion(left: String, right: String): Boolean {
+        return left.trim().removePrefix("v").removePrefix("V") ==
+            right.trim().removePrefix("v").removePrefix("V")
+    }
+
+    private fun isVersionGreaterThan(candidate: String, current: String): Boolean {
+        val candidateParts = parseVersion(candidate)
+        val currentParts = parseVersion(current)
+        if (candidateParts.isEmpty() || currentParts.isEmpty()) {
+            return candidate != current
+        }
+        val maxSize = maxOf(candidateParts.size, currentParts.size)
+        for (index in 0 until maxSize) {
+            val candidatePart = candidateParts.getOrElse(index) { 0 }
+            val currentPart = currentParts.getOrElse(index) { 0 }
+            if (candidatePart != currentPart) {
+                return candidatePart > currentPart
+            }
+        }
+        return false
     }
 
     private fun isReleaseNewerThanInstalled(tagName: String): Boolean {

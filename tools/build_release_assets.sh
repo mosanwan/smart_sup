@@ -27,26 +27,46 @@ fi
 popd >/dev/null
 
 pushd "$repo_root/firmware/esp32" >/dev/null
-pio run
+PLATFORMIO_BUILD_FLAGS="-D SMART_SUP_VERSION=\\\"$version\\\"" pio run
 popd >/dev/null
 
 apk_out="$dist_dir/smart-sup-controller-${version}.apk"
 firmware_out="$dist_dir/smart-sup-esp32-firmware-${version}.bin"
+manifest_out="$dist_dir/smart-sup-release-${version}.json"
 
 cp "$apk_path" "$apk_out"
 cp "$repo_root/firmware/esp32/.pio/build/lolin32_lite/firmware.bin" "$firmware_out"
+
+firmware_size="$(wc -c < "$firmware_out" | tr -d '[:space:]')"
+firmware_sha256="$(sha256sum "$firmware_out" | awk '{print $1}')"
+
+cat > "$manifest_out" <<EOF
+{
+  "version": "$version",
+  "firmware": {
+    "asset": "$(basename "$firmware_out")",
+    "version": "$version",
+    "board": "lolin32_lite",
+    "size": $firmware_size,
+    "sha256": "$firmware_sha256",
+    "minAppVersion": "0.2.7"
+  }
+}
+EOF
 
 cat > "$dist_dir/smart-sup-release-${version}.txt" <<EOF
 Smart SUP release assets
 version: $version
 apk: $(basename "$apk_out")
 firmware: $(basename "$firmware_out")
+manifest: $(basename "$manifest_out")
 
 Upload example:
-gh release create "$version" "$apk_out" "$firmware_out" --repo mosanwan/smart_sup --title "$version" --notes "Smart SUP $version"
+gh release create "$version" "$apk_out" "$firmware_out" "$manifest_out" --repo mosanwan/smart_sup --title "$version" --notes "Smart SUP $version"
 EOF
 
 echo "Created:"
 echo "  $apk_out"
 echo "  $firmware_out"
+echo "  $manifest_out"
 echo "  $dist_dir/smart-sup-release-${version}.txt"

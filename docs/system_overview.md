@@ -18,7 +18,7 @@ flowchart LR
     Controller --> ESC_R
     Controller --> Sensors["电压 / 电流 / 温度 / 进水检测 / GPS"]
     Remote["ESP32-C3 SuperMini 遥控器 / ESP-NOW"] --> Controller
-    Voice["Android 本地 ASR / 语音命令解析"] --> Android["Android App / 语音与轨迹维护"]
+    Voice["云端实时语音 Agent / 结构化控制事件"] --> Android["Android App / 语音与轨迹维护"]
     Android -. "后续辅助链路" .-> Controller
     Controller --> TrackLog["GPS 轨迹缓存"]
     TrackLog --> Android
@@ -37,8 +37,9 @@ flowchart LR
 
 - ESC 按双向 RC PWM 信号处理：约 1000us 最大后退、1500us 中位/空闲、2000us 最大前进。实际以电调说明书和低功率实测为准。
 - 第一版实时遥控链路改为 ESP32-C3 SuperMini 遥控器通过 ESP-NOW 直连主控，命令格式、绑定方式和失联保护见 [ESP-NOW 遥控 MVP](espnow_control_mvp.md)。
-- Android 本地语音控制只作为低速辅助输入，方案和限幅规则见 [Android 本地语音控制方案](voice_control_plan.md)；语音链路不作为第一版主遥控心跳。
+- Android 云端实时语音 Agent 只作为低速辅助输入，方案和限幅规则见 [Android 云端实时语音 Agent 方案](voice_control_plan.md)；语音链路不作为第一版主遥控心跳。第一版暂不使用本地 Qwen ASR，采用用户显式启动的按住说话或实时对话云端音频流。
 - 航向锁定和角度转向仍优先使用 Android 手机指南针航向，由 App 本地计算目标航向、误差和左右 ESC 功率；ESP32 不再使用 IMU 磁力计做航向闭环，只执行最终左右功率并保留解锁、失联、限幅和 PWM 安全保护。手机必须固定在板体上且相对船体方向不变。航向策略需要按 ESP-NOW 主遥控链路重新接入。
+- ICM20948 融合航向作为中期影子航向源推进，先在 ESP32 上融合陀螺仪、加速度计和磁力计并上报给 Android 对比，不参与默认控制闭环；方案见 [ICM20948 融合航向中期方案](imu_fusion_heading_plan.md)。
 - GPS 第一版只用于实时定位、1Hz 轨迹缓存、Android 同步和历史回放，不参与推进安全闭环；方案见 [GPS 实时定位、轨迹记录和回放方案](gps_track_plan.md)。
 - 自动导航第一版只在 Android App 中保存路线和计算左右推进输出，ESP32 不保存路线、不独立规划路径；App 必须持续发送受限控制心跳，ESP32 继续负责失联、限幅和故障保护。方案见 [自动导航路线和执行方案](auto_navigation_plan.md)。
 - 每个 ESP32 的三位硬件编号在出厂第一次 USB 刷入时写入 NVS/flash，流程见 [ESP32 出厂编号刷入流程](esp32_factory_provisioning.md)。

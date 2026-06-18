@@ -13,8 +13,26 @@ val localProperties = Properties().apply {
     }
 }
 
+val envProperties = Properties().apply {
+    val envFile = rootProject.file("../.env")
+    if (envFile.isFile) {
+        envFile.inputStream().use(::load)
+    }
+}
+
 fun String.asBuildConfigString(): String =
     "\"" + replace("\\", "\\\\").replace("\"", "\\\"") + "\""
+
+fun localConfigValue(name: String): String =
+    providers.gradleProperty(name)
+        .orElse(providers.environmentVariable(name))
+        .orElse("")
+        .get()
+        .ifBlank { localProperties.getProperty(name, "") }
+        .ifBlank { envProperties.getProperty(name, "") }
+        .trim()
+        .removeSurrounding("\"")
+        .removeSurrounding("'")
 
 android {
     namespace = "com.smartsup.controller"
@@ -38,13 +56,12 @@ android {
         versionCode = 9
         versionName = "0.2.7"
         buildConfigField("String", "GITHUB_REPOSITORY", "\"mosanwan/smart_sup\"")
-        val maptilerApiKey = providers.gradleProperty("MAPTILER_API_KEY")
-            .orElse(providers.environmentVariable("MAPTILER_API_KEY"))
-            .orElse("")
-            .get()
-            .ifBlank { localProperties.getProperty("MAPTILER_API_KEY", "") }
+        val maptilerApiKey = localConfigValue("MAPTILER_API_KEY")
         buildConfigField("String", "MAPTILER_API_KEY", maptilerApiKey.asBuildConfigString())
         buildConfigField("boolean", "MAPTILER_API_KEY_CONFIGURED", maptilerApiKey.isNotBlank().toString())
+        buildConfigField("String", "DOUBAO_APP_ID", "\"\"")
+        buildConfigField("String", "DOUBAO_API_KEY", "\"\"")
+        buildConfigField("String", "ARK_API_KEY", "\"\"")
 
         ndk {
             abiFilters += listOf("arm64-v8a")
@@ -63,6 +80,12 @@ android {
     }
 
     buildTypes {
+        debug {
+            buildConfigField("String", "DOUBAO_APP_ID", localConfigValue("DOUBAO_APP_ID").asBuildConfigString())
+            buildConfigField("String", "DOUBAO_API_KEY", localConfigValue("DOUBAO_API_KEY").asBuildConfigString())
+            buildConfigField("String", "ARK_API_KEY", localConfigValue("ARK_API_KEY").asBuildConfigString())
+        }
+
         release {
             if (hasReleaseSigning) {
                 signingConfig = signingConfigs.getByName("release")
@@ -102,6 +125,7 @@ dependencies {
     implementation(libs.androidx.lifecycle.runtime.ktx)
     implementation(libs.androidx.lifecycle.viewmodel.compose)
     implementation(libs.maplibre.android)
+    implementation(libs.okhttp)
     implementation(files("libs/sherpa-onnx-1.13.2.aar"))
 
     debugImplementation(libs.androidx.compose.ui.tooling)

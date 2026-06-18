@@ -60,6 +60,7 @@ tools/provision_esp32_unit.py --flash --port /dev/ttyUSB0
 - [详细接线图](docs/wiring_diagram.md)
 - [GPS 轨迹记录和回放方案](docs/gps_track_plan.md)
 - [自动导航路线和执行方案](docs/auto_navigation_plan.md)
+- [ICM20948 融合航向中期方案](docs/imu_fusion_heading_plan.md)
 
 ## 重要安全边界
 

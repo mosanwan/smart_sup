@@ -8,6 +8,7 @@ import android.graphics.Matrix
 import android.graphics.Paint
 import android.graphics.Path
 import androidx.compose.foundation.background
+import androidx.compose.foundation.horizontalScroll
 import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Box
 import androidx.compose.foundation.layout.Column
@@ -50,6 +51,7 @@ import androidx.compose.runtime.LaunchedEffect
 import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.remember
+import androidx.compose.foundation.rememberScrollState
 import androidx.compose.runtime.saveable.rememberSaveable
 import androidx.compose.runtime.setValue
 import androidx.compose.ui.Alignment
@@ -61,6 +63,7 @@ import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.viewinterop.AndroidView
 import com.smartsup.controller.BuildConfig
+import com.smartsup.controller.model.ConnectionState
 import com.smartsup.controller.model.ControlUiState
 import com.smartsup.controller.model.GpsTrackPoint
 import com.smartsup.controller.model.GpsTrackSegment
@@ -87,19 +90,24 @@ import java.time.ZoneId
 import java.time.format.DateTimeFormatter
 import java.util.Locale
 import kotlin.math.atan2
+import kotlin.math.ceil
 import kotlin.math.cos
 import kotlin.math.floor
+import kotlin.math.max
 import kotlin.math.roundToInt
 import kotlin.math.sin
 
-private const val PLAYBACK_POSITION_STEP = 50f / 350f
+private const val PLAYBACK_TICK_MS = 50L
+private const val PLAYBACK_BEARING_LOOKAROUND_POINTS = 4f
 private const val PLAYBACK_CAMERA_EASE_MS = 80
-private const val TRACK_ARROW_SPACING_POINTS = 12
-private const val TRACK_ARROW_MIN_DISTANCE_METERS = 25.0
-private const val TRACK_ARROW_ICON_SIZE_PX = 46
+private const val TRACK_SMOOTHING_WINDOW = 5
+private const val TRACK_ARROW_FAR_ZOOM_MAX = 10.0
+private const val TRACK_ARROW_MID_ZOOM_MAX = 13.0
+private const val TRACK_ARROW_NEAR_ZOOM_MAX = 15.0
 private const val PLAYBACK_ARROW_ICON_SIZE_PX = 58
 private val TRACK_ARROW_COLOR = Color.rgb(0, 180, 255)
 private val PLAYBACK_ARROW_COLOR = Color.rgb(220, 40, 40)
+private val PLAYBACK_SPEED_OPTIONS = listOf(1, 5, 15, 30, 60, 120)
 
 @Composable
 fun NavigationScreen(
@@ -127,20 +135,30 @@ fun NavigationScreen(
     val autoNavigation = state.autoNavigation
     var trackDialogVisible by rememberSaveable { mutableStateOf(false) }
     var routeDialogVisible by rememberSaveable { mutableStateOf(false) }
+    var pendingExecuteRoute by remember { mutableStateOf<NavigationRoute?>(null) }
     var playbackPlaying by rememberSaveable { mutableStateOf(false) }
     var playbackControlsVisible by rememberSaveable { mutableStateOf(false) }
     var playbackPosition by rememberSaveable { mutableStateOf(0f) }
+    var playbackSpeedMultiplier by rememberSaveable { mutableStateOf(30) }
     val liveLocation = state.telemetry.liveLatLng()
     val gpsSpeedText = state.telemetry.gpsSpeedText()
-    val trackPoints = remember(gpsTrack.recentPoints) {
+    val rawTrackPoints = remember(gpsTrack.recentPoints) {
         gpsTrack.recentPoints.map { LatLng(it.latitude, it.longitude) }
     }
-    val playbackPoint = gpsTrack.recentPoints.getOrNull(playbackPosition.toInt().coerceAtLeast(0))
+    val trackPoints = remember(rawTrackPoints) {
+        smoothTrackPoints(rawTrackPoints)
+    }
     val playbackLocation = remember(gpsTrack.recentPoints, playbackPosition) {
-        interpolateTrackLocation(gpsTrack.recentPoints, playbackPosition)
+        smoothedTrackLocation(gpsTrack.recentPoints, playbackPosition)
     }
     val playbackBearing = remember(gpsTrack.recentPoints, playbackPosition) {
-        bearingAtTrackPosition(gpsTrack.recentPoints, playbackPosition)
+        smoothedBearingAtTrackPosition(gpsTrack.recentPoints, playbackPosition)
+    }
+    val playbackTimeText = remember(gpsTrack.recentPoints, playbackPosition) {
+        formatPlaybackTimeText(gpsTrack.recentPoints, playbackPosition)
+    }
+    val playbackTravelSpeedText = remember(gpsTrack.recentPoints, playbackPosition) {
+        formatPlaybackTravelSpeedText(gpsTrack.recentPoints, playbackPosition)
     }
     val showingPlayback = playbackControlsVisible && gpsTrack.recentPoints.isNotEmpty()
     val selectedRoutePoints = autoNavigation.routePointsForMap()
@@ -184,7 +202,7 @@ fun NavigationScreen(
         playbackPosition = gpsTrack.playbackIndex.toFloat()
     }
 
-    LaunchedEffect(playbackPlaying, gpsTrack.selectedTrackId, gpsTrack.recentPoints.size) {
+    LaunchedEffect(playbackPlaying, playbackSpeedMultiplier, gpsTrack.selectedTrackId, gpsTrack.recentPoints.size) {
         if (!playbackPlaying || gpsTrack.recentPoints.size <= 1) {
             return@LaunchedEffect
         }
@@ -194,8 +212,9 @@ fun NavigationScreen(
             return@LaunchedEffect
         }
         while (playbackPlaying && playbackPosition < lastPosition) {
-            delay(50)
-            val nextPosition = (playbackPosition + PLAYBACK_POSITION_STEP).coerceAtMost(lastPosition)
+            delay(PLAYBACK_TICK_MS)
+            val step = playbackSpeedMultiplier * PLAYBACK_TICK_MS / 1000f
+            val nextPosition = (playbackPosition + step).coerceAtMost(lastPosition)
             playbackPosition = nextPosition
             onPlaybackIndexChange(nextPosition.toInt())
             if (nextPosition >= lastPosition) {
@@ -274,6 +293,9 @@ fun NavigationScreen(
                 playing = playbackPlaying,
                 pointCount = gpsTrack.recentPoints.size,
                 playbackPosition = playbackPosition,
+                playbackTimeText = playbackTimeText,
+                playbackTravelSpeedText = playbackTravelSpeedText,
+                playbackSpeedMultiplier = playbackSpeedMultiplier,
                 onTogglePlaying = {
                     if (playbackPlaying) {
                         playbackPlaying = false
@@ -290,6 +312,7 @@ fun NavigationScreen(
                     playbackPosition = it
                     onPlaybackIndexChange(it.toInt())
                 },
+                onPlaybackSpeedChange = { playbackSpeedMultiplier = it },
                 onClose = {
                     playbackPlaying = false
                     playbackControlsVisible = false
@@ -331,12 +354,24 @@ fun NavigationScreen(
                 onExecute = {
                     playbackControlsVisible = false
                     playbackPlaying = false
-                    onExecuteRoute(selectedRoute.id)
+                    pendingExecuteRoute = selectedRoute
                 },
                 onEdit = { onEditRoute(selectedRoute.id) },
                 modifier = Modifier
                     .align(Alignment.BottomCenter)
                     .padding(12.dp),
+            )
+        }
+
+        pendingExecuteRoute?.let { route ->
+            StartAutoNavigationDialog(
+                route = route,
+                state = state,
+                onDismiss = { pendingExecuteRoute = null },
+                onConfirm = {
+                    pendingExecuteRoute = null
+                    onExecuteRoute(route.id)
+                },
             )
         }
 
@@ -422,8 +457,12 @@ private fun MinimalTrackPlaybackControls(
     playing: Boolean,
     pointCount: Int,
     playbackPosition: Float,
+    playbackTimeText: String,
+    playbackTravelSpeedText: String,
+    playbackSpeedMultiplier: Int,
     onTogglePlaying: () -> Unit,
     onPlaybackPositionChange: (Float) -> Unit,
+    onPlaybackSpeedChange: (Int) -> Unit,
     onClose: () -> Unit,
     modifier: Modifier = Modifier,
 ) {
@@ -433,32 +472,93 @@ private fun MinimalTrackPlaybackControls(
         tonalElevation = 3.dp,
         modifier = modifier.fillMaxWidth(),
     ) {
-        Row(
+        Column(
             modifier = Modifier.padding(horizontal = 10.dp, vertical = 8.dp),
-            horizontalArrangement = Arrangement.spacedBy(10.dp),
-            verticalAlignment = Alignment.CenterVertically,
+            verticalArrangement = Arrangement.spacedBy(6.dp),
         ) {
-            FilledTonalIconButton(onClick = onTogglePlaying) {
-                Icon(
-                    imageVector = if (playing) Icons.Outlined.Pause else Icons.Outlined.PlayArrow,
-                    contentDescription = if (playing) "暂停轨迹回放" else "播放轨迹回放",
+            Row(
+                horizontalArrangement = Arrangement.spacedBy(10.dp),
+                verticalAlignment = Alignment.CenterVertically,
+            ) {
+                FilledTonalIconButton(onClick = onTogglePlaying) {
+                    Icon(
+                        imageVector = if (playing) Icons.Outlined.Pause else Icons.Outlined.PlayArrow,
+                        contentDescription = if (playing) "暂停轨迹回放" else "播放轨迹回放",
+                    )
+                }
+                val maxIndex = (pointCount - 1).coerceAtLeast(0)
+                val sliderEnd = if (maxIndex > 0) maxIndex.toFloat() else 1f
+                Slider(
+                    value = playbackPosition.coerceIn(0f, maxIndex.toFloat()),
+                    onValueChange = { onPlaybackPositionChange(it) },
+                    valueRange = 0f..sliderEnd,
+                    enabled = pointCount > 1,
+                    steps = 0,
+                    modifier = Modifier.weight(1f),
                 )
+                IconButton(onClick = onClose) {
+                    Icon(Icons.Outlined.Close, contentDescription = "退出轨迹回放")
+                }
             }
-            val maxIndex = (pointCount - 1).coerceAtLeast(0)
-            val sliderEnd = if (maxIndex > 0) maxIndex.toFloat() else 1f
-            Slider(
-                value = playbackPosition.coerceIn(0f, maxIndex.toFloat()),
-                onValueChange = { onPlaybackPositionChange(it) },
-                valueRange = 0f..sliderEnd,
-                enabled = pointCount > 1,
-                steps = 0,
-                modifier = Modifier.weight(1f),
-            )
-            IconButton(onClick = onClose) {
-                Icon(Icons.Outlined.Close, contentDescription = "退出轨迹回放")
+            Row(
+                modifier = Modifier.fillMaxWidth(),
+                horizontalArrangement = Arrangement.SpaceBetween,
+                verticalAlignment = Alignment.CenterVertically,
+            ) {
+                PlaybackInfoText(label = "时间", value = playbackTimeText)
+                PlaybackInfoText(label = "航速", value = playbackTravelSpeedText)
+            }
+            Row(
+                modifier = Modifier
+                    .fillMaxWidth()
+                    .horizontalScroll(rememberScrollState()),
+                horizontalArrangement = Arrangement.spacedBy(4.dp),
+                verticalAlignment = Alignment.CenterVertically,
+            ) {
+                Text(
+                    "回放",
+                    style = MaterialTheme.typography.labelMedium,
+                    color = MaterialTheme.colorScheme.onSurfaceVariant,
+                )
+                PLAYBACK_SPEED_OPTIONS.forEach { speed ->
+                    TextButton(
+                        onClick = { onPlaybackSpeedChange(speed) },
+                        contentPadding = PaddingValues(horizontal = 8.dp, vertical = 4.dp),
+                    ) {
+                        Text(
+                            "${speed}x",
+                            fontWeight = if (speed == playbackSpeedMultiplier) {
+                                FontWeight.Bold
+                            } else {
+                                FontWeight.Normal
+                            },
+                            color = if (speed == playbackSpeedMultiplier) {
+                                MaterialTheme.colorScheme.primary
+                            } else {
+                                MaterialTheme.colorScheme.onSurfaceVariant
+                            },
+                        )
+                    }
+                }
             }
         }
     }
+}
+
+@Composable
+private fun PlaybackInfoText(
+    label: String,
+    value: String,
+    modifier: Modifier = Modifier,
+) {
+    Text(
+        text = "$label $value",
+        style = MaterialTheme.typography.labelLarge,
+        fontWeight = FontWeight.SemiBold,
+        maxLines = 1,
+        overflow = TextOverflow.Ellipsis,
+        modifier = modifier,
+    )
 }
 
 @Composable
@@ -543,7 +643,7 @@ private fun AutoNavigationControls(
                 modifier = Modifier.fillMaxWidth(),
                 horizontalArrangement = Arrangement.SpaceBetween,
             ) {
-                CompactMetric("速度", state.telemetry.gpsSpeedText() ?: "--")
+                CompactMetric("速度", state.telemetry.gpsSpeedText() ?: "-- km/h")
                 CompactMetric("目标", "${autoState.targetPointIndex + 1}")
                 CompactMetric("距离", autoState.distanceToTargetMeters?.let { "${it.roundToInt()}m" } ?: "--")
                 CompactMetric("误差", autoState.headingErrorDegrees?.let { "${it.roundToInt()}°" } ?: "--")
@@ -571,6 +671,52 @@ private fun AutoNavigationControls(
             }
         }
     }
+}
+
+@Composable
+private fun StartAutoNavigationDialog(
+    route: NavigationRoute,
+    state: ControlUiState,
+    onDismiss: () -> Unit,
+    onConfirm: () -> Unit,
+) {
+    val gpsReady = state.telemetry.statusFields["GPS_FIX"] == "1"
+    val satelliteCount = state.telemetry.statusFields["GPS_SAT"]?.toIntOrNull() ?: 0
+    val ready = state.connectionState == ConnectionState.Connected &&
+        state.armed &&
+        gpsReady &&
+        satelliteCount >= 4 &&
+        state.phoneHeadingAvailable &&
+        route.points.size >= 2
+    AlertDialog(
+        onDismissRequest = onDismiss,
+        title = { Text("启动自动驾驶") },
+        text = {
+            Column(verticalArrangement = Arrangement.spacedBy(8.dp)) {
+                Text("${route.name} · ${route.points.size} 点 · ${route.distanceText()}")
+                Text("启动后 App 会按路线持续计算左右推进，并每 100ms 发送控制心跳。")
+                Text("请确认：主控已连接并手动解锁，手机固定在板体上，GPS 已定位，人员随时可接管。")
+                Text(
+                    "当前：连接=${connectionText(state.connectionState)}；解锁=${if (state.armed) "是" else "否"}；GPS=${if (gpsReady) "已定位" else "未定位"}；卫星=$satelliteCount；指南针=${if (state.phoneHeadingAvailable) "可用" else "不可用"}",
+                    color = MaterialTheme.colorScheme.onSurfaceVariant,
+                    style = MaterialTheme.typography.bodySmall,
+                )
+            }
+        },
+        confirmButton = {
+            TextButton(
+                onClick = onConfirm,
+                enabled = ready,
+            ) {
+                Text("确认启动")
+            }
+        },
+        dismissButton = {
+            TextButton(onClick = onDismiss) {
+                Text("取消")
+            }
+        },
+    )
 }
 
 @Composable
@@ -982,6 +1128,35 @@ private fun MapLibreTrackMap(
         }
     }
 
+    DisposableEffect(mapView, liveLocation, trackPoints, playbackLocation, routePoints, routeTarget, pathColor, routeColor, styleUrl) {
+        var mapRef: MapLibreMap? = null
+        val listener = MapLibreMap.OnCameraIdleListener {
+            mapRef?.let { map ->
+                renderTrackMap(
+                    map = map,
+                    styleUrl = styleUrl,
+                    liveLocation = liveLocation,
+                    trackPoints = trackPoints,
+                    playbackLocation = playbackLocation,
+                    playbackBearing = playbackBearing,
+                    routePoints = routePoints,
+                    routeTarget = routeTarget,
+                    pathColor = pathColor,
+                    routeColor = routeColor,
+                    annotations = annotations,
+                    context = context,
+                )
+            }
+        }
+        mapView.getMapAsync { map ->
+            mapRef = map
+            map.addOnCameraIdleListener(listener)
+        }
+        onDispose {
+            mapRef?.removeOnCameraIdleListener(listener)
+        }
+    }
+
     LaunchedEffect(cameraTargetKey, cameraTarget, styleUrl) {
         if (cameraTargetKey == null || cameraTarget == null) {
             return@LaunchedEffect
@@ -1067,6 +1242,7 @@ private fun drawTrackAnnotations(
     annotations: TrackMapAnnotations,
     context: Context,
 ) {
+    val arrowConfig = trackArrowRenderConfig(map.cameraPosition.zoom)
     val trackSignature = trackPoints.signature()
     if (trackPoints.size >= 2) {
         val polyline = annotations.trackPolyline
@@ -1082,20 +1258,24 @@ private fun drawTrackAnnotations(
             polyline.color = pathColor
             polyline.width = 7f
         }
-        if (annotations.trackSignature != trackSignature) {
+        val arrowSignature = "$trackSignature:${arrowConfig.signature}"
+        if (annotations.directionArrowSignature != arrowSignature) {
             updateTrackDirectionArrows(
                 map = map,
                 trackPoints = trackPoints,
+                config = arrowConfig,
                 annotations = annotations,
                 context = context,
             )
-            annotations.trackSignature = trackSignature
+            annotations.directionArrowSignature = arrowSignature
         }
+        annotations.trackSignature = trackSignature
     } else {
         annotations.trackPolyline?.let(map::removePolyline)
         annotations.trackPolyline = null
         clearTrackDirectionArrows(map, annotations)
         annotations.trackSignature = null
+        annotations.directionArrowSignature = null
     }
 
     if (liveLocation != null) {
@@ -1199,6 +1379,7 @@ private class TrackMapAnnotations {
     var routeTargetMarker: Marker? = null
     var playbackBearingBucket: Int? = null
     var trackSignature: String? = null
+    var directionArrowSignature: String? = null
     var routeSignature: String? = null
     val directionArrowMarkers: MutableList<Marker> = mutableListOf()
     val routeMarkers: MutableList<Marker> = mutableListOf()
@@ -1220,15 +1401,19 @@ private fun clearRouteMarkers(map: MapLibreMap, annotations: TrackMapAnnotations
 private fun updateTrackDirectionArrows(
     map: MapLibreMap,
     trackPoints: List<LatLng>,
+    config: TrackArrowRenderConfig,
     annotations: TrackMapAnnotations,
     context: Context,
 ) {
     clearTrackDirectionArrows(map, annotations)
-    sampledDirectionArrows(trackPoints).forEach { arrow ->
+    if (config.maxCount <= 0) {
+        return
+    }
+    sampledDirectionArrows(trackPoints, config).forEach { arrow ->
         val icon = annotations.iconForBearing(
             context = context,
             bearingBucket = arrow.bearing.bearingBucket(),
-            sizePx = TRACK_ARROW_ICON_SIZE_PX,
+            sizePx = config.iconSizePx,
             color = TRACK_ARROW_COLOR,
         )
         annotations.directionArrowMarkers += map.addMarker(
@@ -1243,6 +1428,16 @@ private fun updateTrackDirectionArrows(
 private fun clearTrackDirectionArrows(map: MapLibreMap, annotations: TrackMapAnnotations) {
     annotations.directionArrowMarkers.forEach(map::removeMarker)
     annotations.directionArrowMarkers.clear()
+}
+
+private data class TrackArrowRenderConfig(
+    val zoomBucket: Int,
+    val iconSizePx: Int,
+    val minSpacingMeters: Double,
+    val maxCount: Int,
+) {
+    val signature: String
+        get() = "$zoomBucket:$iconSizePx:$minSpacingMeters:$maxCount"
 }
 
 private data class DirectionArrow(
@@ -1288,7 +1483,52 @@ private fun com.smartsup.controller.model.Telemetry.gpsSpeedText(): String? {
     if (statusFields["GPS_FIX"] != "1") {
         return null
     }
-    val speedKmh = statusFields["GPS_SPD_KMH"]?.toDoubleOrNull() ?: return "-- km/h"
+    val speedKmh = statusFields["GPS_SPD_KMH"]?.toDoubleOrNull()
+        ?: statusFields["SPD_KMH"]?.toDoubleOrNull()
+        ?: return "-- km/h"
+    return String.format(Locale.US, "%.1f km/h", speedKmh.coerceAtLeast(0.0))
+}
+
+private fun connectionText(connectionState: ConnectionState): String {
+    return when (connectionState) {
+        ConnectionState.Disconnected -> "未连接"
+        ConnectionState.Connecting -> "连接中"
+        ConnectionState.Connected -> "已连接"
+    }
+}
+
+private fun formatPlaybackTimeText(points: List<GpsTrackPoint>, position: Float): String {
+    if (points.isEmpty()) {
+        return "--"
+    }
+    val startIndex = floor(position).toInt().coerceIn(0, points.lastIndex)
+    val endIndex = (startIndex + 1).coerceAtMost(points.lastIndex)
+    val fraction = (position - startIndex.toFloat()).coerceIn(0f, 1f)
+    val startTime = points[startIndex].utcSeconds
+    val endTime = points[endIndex].utcSeconds
+    val interpolatedTime = startTime + ((endTime - startTime) * fraction).roundToInt()
+    return DateTimeFormatter.ofPattern("HH:mm:ss")
+        .withZone(ZoneId.systemDefault())
+        .format(Instant.ofEpochSecond(interpolatedTime))
+}
+
+private fun formatPlaybackTravelSpeedText(points: List<GpsTrackPoint>, position: Float): String {
+    if (points.size < 2) {
+        return "-- km/h"
+    }
+    val fromIndex = floor(position - PLAYBACK_BEARING_LOOKAROUND_POINTS)
+        .toInt()
+        .coerceAtLeast(0)
+    val toIndex = ceil(position + PLAYBACK_BEARING_LOOKAROUND_POINTS)
+        .toInt()
+        .coerceAtMost(points.lastIndex)
+    if (toIndex <= fromIndex) {
+        return "-- km/h"
+    }
+    val elapsedSeconds = (points[toIndex].utcSeconds - points[fromIndex].utcSeconds).coerceAtLeast(1)
+    val from = smoothedTrackLocation(points, fromIndex.toFloat()) ?: return "-- km/h"
+    val to = smoothedTrackLocation(points, toIndex.toFloat()) ?: return "-- km/h"
+    val speedKmh = distanceMeters(from, to) / elapsedSeconds * 3.6
     return String.format(Locale.US, "%.1f km/h", speedKmh.coerceAtLeast(0.0))
 }
 
@@ -1309,34 +1549,169 @@ private fun interpolateTrackLocation(points: List<GpsTrackPoint>, position: Floa
     return LatLng(lat, lon)
 }
 
-private fun bearingAtTrackPosition(points: List<GpsTrackPoint>, position: Float): Double? {
+private fun smoothedTrackLocation(points: List<GpsTrackPoint>, position: Float): LatLng? {
+    if (points.isEmpty()) {
+        return null
+    }
+    if (points.size < TRACK_SMOOTHING_WINDOW) {
+        return interpolateTrackLocation(points, position)
+    }
+    val halfWindow = TRACK_SMOOTHING_WINDOW / 2f
+    val start = floor(position - halfWindow).toInt().coerceAtLeast(0)
+    val end = ceil(position + halfWindow).toInt().coerceAtMost(points.lastIndex)
+    var lat = 0.0
+    var lon = 0.0
+    var weightTotal = 0.0
+    for (index in start..end) {
+        val distance = kotlin.math.abs(index - position)
+        val weight = (halfWindow + 1f - distance).coerceAtLeast(0.25f).toDouble()
+        lat += points[index].latitude * weight
+        lon += points[index].longitude * weight
+        weightTotal += weight
+    }
+    return LatLng(lat / weightTotal, lon / weightTotal)
+}
+
+private fun smoothedBearingAtTrackPosition(points: List<GpsTrackPoint>, position: Float): Double? {
     if (points.size < 2) {
         return null
     }
-    val startIndex = floor(position).toInt().coerceIn(0, points.lastIndex - 1)
-    val endIndex = (startIndex + 1).coerceAtMost(points.lastIndex)
-    return bearingBetween(
-        LatLng(points[startIndex].latitude, points[startIndex].longitude),
-        LatLng(points[endIndex].latitude, points[endIndex].longitude),
-    )
+    val fromPosition = (position - PLAYBACK_BEARING_LOOKAROUND_POINTS).coerceAtLeast(0f)
+    val toPosition = (position + PLAYBACK_BEARING_LOOKAROUND_POINTS).coerceAtMost(points.lastIndex.toFloat())
+    if (toPosition <= fromPosition) {
+        return null
+    }
+    val from = smoothedTrackLocation(points, fromPosition) ?: return null
+    val to = smoothedTrackLocation(points, toPosition) ?: return null
+    if (distanceMeters(from, to) < 1.0) {
+        return null
+    }
+    return bearingBetween(from, to)
 }
 
-private fun sampledDirectionArrows(trackPoints: List<LatLng>): List<DirectionArrow> {
+private fun smoothTrackPoints(points: List<LatLng>): List<LatLng> {
+    if (points.size < TRACK_SMOOTHING_WINDOW) {
+        return points
+    }
+    val smoothed = points.mapIndexed { index, point ->
+        if (index == 0 || index == points.lastIndex) {
+            point
+        } else {
+            val start = (index - TRACK_SMOOTHING_WINDOW / 2).coerceAtLeast(0)
+            val end = (index + TRACK_SMOOTHING_WINDOW / 2).coerceAtMost(points.lastIndex)
+            var lat = 0.0
+            var lon = 0.0
+            var weightTotal = 0.0
+            for (neighborIndex in start..end) {
+                val distance = kotlin.math.abs(neighborIndex - index)
+                val weight = when (distance) {
+                    0 -> 3.0
+                    1 -> 2.0
+                    else -> 1.0
+                }
+                lat += points[neighborIndex].latitude * weight
+                lon += points[neighborIndex].longitude * weight
+                weightTotal += weight
+            }
+            LatLng(lat / weightTotal, lon / weightTotal)
+        }
+    }
+    return chaikinSmooth(smoothed)
+}
+
+private fun chaikinSmooth(points: List<LatLng>): List<LatLng> {
+    if (points.size < 3) {
+        return points
+    }
+    val result = ArrayList<LatLng>(points.size * 2)
+    result += points.first()
+    for (index in 0 until points.lastIndex) {
+        val current = points[index]
+        val next = points[index + 1]
+        result += LatLng(
+            current.latitude * 0.75 + next.latitude * 0.25,
+            current.longitude * 0.75 + next.longitude * 0.25,
+        )
+        result += LatLng(
+            current.latitude * 0.25 + next.latitude * 0.75,
+            current.longitude * 0.25 + next.longitude * 0.75,
+        )
+    }
+    result += points.last()
+    return result
+}
+
+private fun trackArrowRenderConfig(zoom: Double): TrackArrowRenderConfig {
+    val zoomBucket = floor(zoom).toInt()
+    return when {
+        zoom < TRACK_ARROW_FAR_ZOOM_MAX -> TrackArrowRenderConfig(
+            zoomBucket = zoomBucket,
+            iconSizePx = 18,
+            minSpacingMeters = 900.0,
+            maxCount = 4,
+        )
+        zoom < TRACK_ARROW_MID_ZOOM_MAX -> TrackArrowRenderConfig(
+            zoomBucket = zoomBucket,
+            iconSizePx = 22,
+            minSpacingMeters = 420.0,
+            maxCount = 7,
+        )
+        zoom < TRACK_ARROW_NEAR_ZOOM_MAX -> TrackArrowRenderConfig(
+            zoomBucket = zoomBucket,
+            iconSizePx = 28,
+            minSpacingMeters = 150.0,
+            maxCount = 14,
+        )
+        else -> TrackArrowRenderConfig(
+            zoomBucket = zoomBucket,
+            iconSizePx = 34,
+            minSpacingMeters = 55.0,
+            maxCount = 28,
+        )
+    }
+}
+
+private fun sampledDirectionArrows(
+    trackPoints: List<LatLng>,
+    config: TrackArrowRenderConfig,
+): List<DirectionArrow> {
     if (trackPoints.size < 2) {
         return emptyList()
     }
+    var totalDistanceMeters = 0.0
+    for (index in 1 until trackPoints.size) {
+        totalDistanceMeters += distanceMeters(trackPoints[index - 1], trackPoints[index])
+    }
+    if (totalDistanceMeters <= 0.0) {
+        return emptyList()
+    }
+
     val arrows = mutableListOf<DirectionArrow>()
-    var lastArrowPoint: LatLng? = null
-    for (index in TRACK_ARROW_SPACING_POINTS until trackPoints.lastIndex step TRACK_ARROW_SPACING_POINTS) {
+    val spacingMeters = max(config.minSpacingMeters, totalDistanceMeters / (config.maxCount + 1))
+    var nextArrowAtMeters = spacingMeters
+    var walkedMeters = 0.0
+    for (index in 1 until trackPoints.size) {
         val previous = trackPoints[index - 1]
         val current = trackPoints[index]
-        if (lastArrowPoint != null && distanceMeters(lastArrowPoint, current) < TRACK_ARROW_MIN_DISTANCE_METERS) {
+        val segmentMeters = distanceMeters(previous, current)
+        if (segmentMeters <= 0.0) {
             continue
         }
-        bearingBetween(previous, current)?.let { bearing ->
-            arrows += DirectionArrow(position = current, bearing = bearing)
-            lastArrowPoint = current
+        if (walkedMeters + segmentMeters >= nextArrowAtMeters) {
+            val fraction = ((nextArrowAtMeters - walkedMeters) / segmentMeters).coerceIn(0.0, 1.0)
+            val position = LatLng(
+                previous.latitude + (current.latitude - previous.latitude) * fraction,
+                previous.longitude + (current.longitude - previous.longitude) * fraction,
+            )
+            bearingBetween(previous, current)?.let { bearing ->
+                arrows += DirectionArrow(position = position, bearing = bearing)
+            }
+            if (arrows.size >= config.maxCount) {
+                break
+            }
+            nextArrowAtMeters += spacingMeters
         }
+        walkedMeters += segmentMeters
     }
     if (arrows.isEmpty()) {
         val midpointIndex = trackPoints.size / 2

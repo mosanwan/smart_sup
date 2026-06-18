@@ -160,7 +160,7 @@ fun ControlScreen(
             horizontalArrangement = Arrangement.spacedBy(10.dp),
         ) {
             VerticalThrottle(
-                label = "左 ESC",
+                label = "左推进器",
                 value = leftDisplayThrottle,
                 inputMaxThrottlePercent = maxThrottlePercent,
                 visualMaxThrottlePercent = visualThrottlePercent,
@@ -190,7 +190,7 @@ fun ControlScreen(
             )
 
             VerticalThrottle(
-                label = "右 ESC",
+                label = "右推进器",
                 value = rightDisplayThrottle,
                 inputMaxThrottlePercent = maxThrottlePercent,
                 visualMaxThrottlePercent = visualThrottlePercent,
