@@ -97,6 +97,7 @@ class ControlViewModel(application: Application) : AndroidViewModel(application)
     private val phoneHeadingOrientation = FloatArray(3)
     private var phoneHeadingSensorRegistered = false
     private var phoneHeadingLastUpdateMs = 0L
+    private var ybImuHeadingLastUpdateMs = 0L
     private var lastLoggedImuStatusLine: String? = null
     private var latestRelease: ReleaseInfo? = null
     private var latestFirmwareManifest: FirmwareReleaseManifest? = null
@@ -728,6 +729,21 @@ class ControlViewModel(application: Application) : AndroidViewModel(application)
         sendCurrentCommand()
     }
 
+    fun setHeadingLockNeutralReverseBoostPercent(percent: Int) {
+        val constrained = coerceHeadingLockNeutralReverseBoostPercent(percent)
+        preferences.edit().putInt(KEY_HEADING_LOCK_NEUTRAL_REVERSE_BOOST_PERCENT, constrained).apply()
+        clearAutonomousCommands()
+        mutableSettingsState.update { it.copy(headingLockNeutralReverseBoostPercent = constrained) }
+        mutableUiState.update {
+            it.copy(
+                commandSource = CommandSource.App,
+                headingLockEnabled = false,
+                statusMessage = "空档反推增幅已设置为 ${constrained}%，已取消当前航向锁定",
+            )
+        }
+        sendCurrentCommand()
+    }
+
     fun setAutoNavigationGpsJumpResetMeters(meters: Int) {
         val constrained = coerceAutoNavigationGpsJumpResetMeters(meters)
         preferences.edit().putInt(KEY_AUTO_NAVIGATION_GPS_JUMP_RESET_METERS, constrained).apply()
@@ -740,13 +756,23 @@ class ControlViewModel(application: Application) : AndroidViewModel(application)
     }
 
     fun setUsePhoneHeading(enabled: Boolean) {
-        preferences.edit().putBoolean(KEY_USE_PHONE_HEADING, true).apply()
-        mutableSettingsState.update { it.copy(usePhoneHeading = true) }
+        preferences.edit().putBoolean(KEY_USE_PHONE_HEADING, enabled).apply()
+        clearAutonomousCommands()
+        mutableSettingsState.update { it.copy(usePhoneHeading = enabled) }
         updatePhoneHeadingSensorRegistration()
         mutableUiState.update {
             it.copy(
+                leftThrottlePercent = 0,
+                rightThrottlePercent = 0,
                 commandSource = CommandSource.App,
-                statusMessage = "手机指南针是唯一航向来源，请把手机固定在板体上",
+                headingLockEnabled = false,
+                selectedGear = ThrottleGear.Neutral,
+                throttleTrimPercent = 0,
+                statusMessage = if (enabled) {
+                    "航向锁定来源已切换为手机指南针，已取消当前锁航"
+                } else {
+                    "航向锁定来源已切换为 ESP32 IMU 测试模式，已取消当前锁航"
+                },
             )
         }
         sendCurrentCommand()
@@ -804,7 +830,6 @@ class ControlViewModel(application: Application) : AndroidViewModel(application)
 
     fun enableHeadingLock() {
         val state = mutableUiState.value
-        val settings = mutableSettingsState.value
         if (state.connectionState != ConnectionState.Connected) {
             mutableUiState.update { it.copy(statusMessage = "航向锁定拒绝：未连接 ESP32") }
             return
@@ -813,9 +838,9 @@ class ControlViewModel(application: Application) : AndroidViewModel(application)
             mutableUiState.update { it.copy(statusMessage = "航向锁定拒绝：请先手动解锁") }
             return
         }
-        val currentHeading = currentPhoneHeadingDegreesOrNull()
+        val currentHeading = currentHeadingForLockOrNull()
         if (currentHeading == null) {
-            mutableUiState.update { it.copy(statusMessage = "航向锁定拒绝：手机指南针暂无有效读数") }
+            mutableUiState.update { it.copy(statusMessage = "航向锁定拒绝：${headingSourceUnavailableText()}") }
             return
         }
 
@@ -863,8 +888,8 @@ class ControlViewModel(application: Application) : AndroidViewModel(application)
             mutableUiState.update { it.copy(statusMessage = "目标航向拒绝：请先手动解锁") }
             return
         }
-        if (currentPhoneHeadingDegreesOrNull() == null) {
-            mutableUiState.update { it.copy(statusMessage = "目标航向拒绝：手机指南针暂无有效读数") }
+        if (currentHeadingForLockOrNull() == null) {
+            mutableUiState.update { it.copy(statusMessage = "目标航向拒绝：${headingSourceUnavailableText()}") }
             return
         }
 
@@ -2076,9 +2101,9 @@ class ControlViewModel(application: Application) : AndroidViewModel(application)
         if (!state.armed) {
             return rejectRealtimeVoiceEvent("语音不能解锁，请先手动解锁", "pivot_turn：不发送")
         }
-        val currentHeading = currentPhoneHeadingDegreesOrNull()
+        val currentHeading = currentHeadingForLockOrNull()
         if (currentHeading == null) {
-            return rejectRealtimeVoiceEvent("手机指南针暂无有效读数", "pivot_turn：不发送")
+            return rejectRealtimeVoiceEvent(headingSourceUnavailableText(), "pivot_turn：不发送")
         }
 
         clearRealtimeVoiceActionTimeout()
@@ -2132,9 +2157,9 @@ class ControlViewModel(application: Application) : AndroidViewModel(application)
                 }
                 return@launch
             }
-            if (currentPhoneHeadingDegreesOrNull() == null) {
+            if (currentHeadingForLockOrNull() == null) {
                 mutableUiState.update {
-                    it.copy(statusMessage = "实时语音${directionText}原地掉头取消：手机指南针暂无有效读数")
+                    it.copy(statusMessage = "实时语音${directionText}原地掉头取消：${headingSourceUnavailableText()}")
                 }
                 return@launch
             }
@@ -2271,9 +2296,9 @@ class ControlViewModel(application: Application) : AndroidViewModel(application)
         if (!state.armed) {
             return rejectRealtimeVoiceEvent("语音不能解锁，请先手动解锁", "adjust_heading_target：不发送")
         }
-        val currentHeading = currentPhoneHeadingDegreesOrNull()
+        val currentHeading = currentHeadingForLockOrNull()
         if (currentHeading == null) {
-            return rejectRealtimeVoiceEvent("手机指南针暂无有效读数", "adjust_heading_target：不发送")
+            return rejectRealtimeVoiceEvent(headingSourceUnavailableText(), "adjust_heading_target：不发送")
         }
         val headingLockWasActive = isHeadingLockActiveForState(state)
         val deltaDegrees = correctedRealtimeHeadingDelta(event)
@@ -2356,8 +2381,8 @@ class ControlViewModel(application: Application) : AndroidViewModel(application)
         if (!state.armed) {
             return rejectRealtimeVoiceEvent("语音不能解锁，请先手动解锁", "set_heading_target：不发送")
         }
-        if (currentPhoneHeadingDegreesOrNull() == null) {
-            return rejectRealtimeVoiceEvent("手机指南针暂无有效读数", "set_heading_target：不发送")
+        if (currentHeadingForLockOrNull() == null) {
+            return rejectRealtimeVoiceEvent(headingSourceUnavailableText(), "set_heading_target：不发送")
         }
 
         clearRealtimeVoiceActionTimeout()
@@ -2733,14 +2758,15 @@ class ControlViewModel(application: Application) : AndroidViewModel(application)
         }
 
         if (turnWithinHeadingLock) {
-            val currentHeading = currentPhoneHeadingDegreesOrNull()
+            val currentHeading = currentHeadingForLockOrNull()
             if (currentHeading == null) {
+                val unavailableText = headingSourceUnavailableText()
                 mutableUiState.update {
                     it.copy(
-                        voiceResultMessage = "手机指南针暂无有效读数",
+                        voiceResultMessage = unavailableText,
                         voiceCandidatePreview = candidateLine,
                         voiceCommandPreview = commandLine,
-                        statusMessage = "语音转向拒绝：手机指南针暂无有效读数",
+                        statusMessage = "语音转向拒绝：$unavailableText",
                     )
                 }
                 return
@@ -2796,14 +2822,15 @@ class ControlViewModel(application: Application) : AndroidViewModel(application)
         }
 
         if (command.mode == ControlCommandMode.TurnAngle) {
-            val currentHeading = currentPhoneHeadingDegreesOrNull()
+            val currentHeading = currentHeadingForLockOrNull()
             if (currentHeading == null) {
+                val unavailableText = headingSourceUnavailableText()
                 mutableUiState.update {
                     it.copy(
-                        voiceResultMessage = "手机指南针暂无有效读数",
+                        voiceResultMessage = unavailableText,
                         voiceCandidatePreview = candidateLine,
                         voiceCommandPreview = commandLine,
-                        statusMessage = "语音转向拒绝：手机指南针暂无有效读数",
+                        statusMessage = "语音转向拒绝：$unavailableText",
                     )
                 }
                 return
@@ -2832,14 +2859,15 @@ class ControlViewModel(application: Application) : AndroidViewModel(application)
         if (command.mode == ControlCommandMode.HeadingLock) {
             clearActiveTurnCommand()
             if (command.headingLockEnabled) {
-                val currentHeading = currentPhoneHeadingDegreesOrNull()
+                val currentHeading = currentHeadingForLockOrNull()
                 if (currentHeading == null) {
+                    val unavailableText = headingSourceUnavailableText()
                     mutableUiState.update {
                         it.copy(
-                            voiceResultMessage = "手机指南针暂无有效读数",
+                            voiceResultMessage = unavailableText,
                             voiceCandidatePreview = candidateLine,
                             voiceCommandPreview = commandLine,
-                            statusMessage = "语音锁航拒绝：手机指南针暂无有效读数",
+                            statusMessage = "语音锁航拒绝：$unavailableText",
                         )
                     }
                     return
@@ -3097,6 +3125,30 @@ class ControlViewModel(application: Application) : AndroidViewModel(application)
         val ageMs = System.currentTimeMillis() - phoneHeadingLastUpdateMs
         return state.phoneHeadingDegrees
             ?.takeIf { state.phoneHeadingAvailable && ageMs <= PHONE_HEADING_STALE_MS }
+    }
+
+    private fun currentYbImuHeadingDegreesOrNull(): Float? {
+        val state = mutableUiState.value
+        val ageMs = System.currentTimeMillis() - ybImuHeadingLastUpdateMs
+        return state.telemetry.ybYawDegrees
+            ?.takeIf { state.telemetry.ybImuAvailable == true && ageMs <= YB_IMU_HEADING_STALE_MS }
+            ?.let { normalizeCompassDegrees(it) }
+    }
+
+    private fun currentHeadingForLockOrNull(): Float? {
+        return if (mutableSettingsState.value.usePhoneHeading) {
+            currentPhoneHeadingDegreesOrNull()
+        } else {
+            currentYbImuHeadingDegreesOrNull()
+        }
+    }
+
+    private fun headingSourceUnavailableText(): String {
+        return if (mutableSettingsState.value.usePhoneHeading) {
+            "手机指南针暂无有效读数"
+        } else {
+            "ESP32 IMU 航向暂无有效读数"
+        }
     }
 
     private fun updatePhoneHeadingSensorRegistration() {
@@ -3385,9 +3437,9 @@ class ControlViewModel(application: Application) : AndroidViewModel(application)
         if (activeCommand == null) {
             return ControlCommand.Idle
         }
-        val currentHeading = currentPhoneHeadingDegreesOrNull()
+        val currentHeading = currentHeadingForLockOrNull()
         if (currentHeading == null) {
-            failAppHeadingControl("手机指南针超时，已锁定并回空挡")
+            failAppHeadingControl("${headingSourceUnavailableText()}，已锁定并回空挡")
             return ControlCommand.Idle
         }
         val targetHeading = appHeadingControlTargetDegrees ?: currentHeading.also {
@@ -3455,6 +3507,7 @@ class ControlViewModel(application: Application) : AndroidViewModel(application)
             rightBasePercent = baseRightPercent,
             correction = correction,
             neutralReversePercent = activeCommand.headingLockNeutralReversePercent,
+            neutralReverseBoostPercent = settings.headingLockNeutralReverseBoostPercent,
             outputLimitPercent = headingOutputLimitPercent(activeCommand.source, settings),
         )
         val leftPercent = coerceCommandPercentForSource(rawLeftRight.first, activeCommand.source)
@@ -3531,6 +3584,7 @@ class ControlViewModel(application: Application) : AndroidViewModel(application)
         rightBasePercent: Int,
         correction: Int,
         neutralReversePercent: Int,
+        neutralReverseBoostPercent: Int,
         outputLimitPercent: Int,
     ): Pair<Int, Int> {
         val leftLimits = headingSideOutputLimits(leftBasePercent, neutralReversePercent, outputLimitPercent)
@@ -3557,6 +3611,15 @@ class ControlViewModel(application: Application) : AndroidViewModel(application)
             val underflow = rightLimits.first - right
             left += underflow
             right += underflow
+        }
+        if (leftBasePercent == 0 && rightBasePercent == 0 && neutralReverseBoostPercent > 0) {
+            val boostRatio = 1f + neutralReverseBoostPercent.coerceIn(0, 100) / 100f
+            if (left < 0) {
+                left = (left * boostRatio).roundToInt()
+            }
+            if (right < 0) {
+                right = (right * boostRatio).roundToInt()
+            }
         }
 
         return left.coerceIn(leftLimits.first, leftLimits.second) to
@@ -3823,7 +3886,7 @@ class ControlViewModel(application: Application) : AndroidViewModel(application)
     }
 
     private fun targetHeadingAfterTurn(command: ControlCommand): Int? {
-        val currentHeading = currentPhoneHeadingDegreesOrNull() ?: return null
+        val currentHeading = currentHeadingForLockOrNull() ?: return null
         val offset = headingLockOffsetDegrees(command)
         return normalizeHeadingDegrees(currentHeading + offset)
     }
@@ -4456,6 +4519,9 @@ class ControlViewModel(application: Application) : AndroidViewModel(application)
                 handleControllerErrorLine(telemetry.lastReceivedStatus)
                 handleOtaStatusLine(telemetry.lastReceivedStatus)
                 handleControllerInfoFields(telemetry.statusFields)
+                if (telemetry.ybImuAvailable == true && telemetry.ybYawDegrees != null) {
+                    ybImuHeadingLastUpdateMs = System.currentTimeMillis()
+                }
                 // IMU CSV 调试日志暂时关闭；新 IMU 到货后再打开。
                 val phoneHeading = mutableUiState.value.phoneHeadingDegrees
                 val logSnapshot = if (
@@ -4819,13 +4885,16 @@ class ControlViewModel(application: Application) : AndroidViewModel(application)
             headingLockNeutralReversePercent = coerceHeadingLockNeutralReversePercent(
                 preferences.getInt(KEY_HEADING_LOCK_NEUTRAL_REVERSE_PERCENT, 70),
             ),
+            headingLockNeutralReverseBoostPercent = coerceHeadingLockNeutralReverseBoostPercent(
+                preferences.getInt(KEY_HEADING_LOCK_NEUTRAL_REVERSE_BOOST_PERCENT, 0),
+            ),
             autoNavigationGpsJumpResetMeters = coerceAutoNavigationGpsJumpResetMeters(
                 preferences.getInt(
                     KEY_AUTO_NAVIGATION_GPS_JUMP_RESET_METERS,
                     AUTO_NAVIGATION_GPS_JUMP_RESET_DEFAULT_METERS,
                 ),
             ),
-            usePhoneHeading = true,
+            usePhoneHeading = preferences.getBoolean(KEY_USE_PHONE_HEADING, true),
             realtimeVoiceEndpoint = preferences.getString(KEY_REALTIME_VOICE_ENDPOINT, null)
                 ?.ifBlank { REALTIME_VOICE_ENDPOINT_DEFAULT }
                 ?: REALTIME_VOICE_ENDPOINT_DEFAULT,
@@ -4911,6 +4980,7 @@ class ControlViewModel(application: Application) : AndroidViewModel(application)
         private const val KEY_HEADING_LOCK_TOLERANCE_DEGREES = "heading_lock_tolerance_degrees"
         private const val KEY_HEADING_LOCK_FULL_CORRECTION_DEGREES = "heading_lock_full_correction_degrees"
         private const val KEY_HEADING_LOCK_NEUTRAL_REVERSE_PERCENT = "heading_lock_neutral_reverse_percent"
+        private const val KEY_HEADING_LOCK_NEUTRAL_REVERSE_BOOST_PERCENT = "heading_lock_neutral_reverse_boost_percent"
         private const val KEY_AUTO_NAVIGATION_GPS_JUMP_RESET_METERS = "auto_navigation_gps_jump_reset_meters"
         private const val KEY_LEFT_ESC_REVERSED = "left_esc_reversed"
         private const val KEY_RIGHT_ESC_REVERSED = "right_esc_reversed"
@@ -4926,6 +4996,7 @@ class ControlViewModel(application: Application) : AndroidViewModel(application)
         private const val KEY_GEAR_PREFIX = "gear_percent_"
         private const val COMMAND_HEARTBEAT_MS = 100L
         private const val PHONE_HEADING_STALE_MS = 1_500L
+        private const val YB_IMU_HEADING_STALE_MS = 500L
         private const val APP_TURN_TIMEOUT_MS = 8_000L
         private const val APP_TURN_DONE_DEGREES = 3.0f
         private const val PIVOT_TURN_NEUTRAL_DELAY_MS = 1_000L
@@ -4988,6 +5059,10 @@ class ControlViewModel(application: Application) : AndroidViewModel(application)
     }
 
     private fun coerceHeadingLockNeutralReversePercent(percent: Int): Int {
+        return percent.coerceIn(0, 100)
+    }
+
+    private fun coerceHeadingLockNeutralReverseBoostPercent(percent: Int): Int {
         return percent.coerceIn(0, 100)
     }
 

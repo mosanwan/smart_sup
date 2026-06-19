@@ -30,7 +30,7 @@ class ImuTelemetryLogStore(context: Context) {
             return null
         }
         val fields = telemetry.statusFields
-        if (!fields.containsKey("IHDG") && !fields.containsKey("IMU")) {
+        if (!fields.containsKey("IHDG") && !fields.containsKey("IMU") && !fields.containsKey("YBIMU")) {
             return null
         }
 
@@ -98,6 +98,18 @@ class ImuTelemetryLogStore(context: Context) {
             "MRY",
             "IMU",
             "MAG",
+            "YBIMU",
+            "YBAX",
+            "YBAY",
+            "YBAZ",
+            "YBGZ",
+            "YBQW",
+            "YBQX",
+            "YBQY",
+            "YBQZ",
+            "YBR",
+            "YBP",
+            "YBY",
             "GPS",
             "PPS",
             "GPS_FIX",

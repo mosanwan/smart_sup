@@ -5,6 +5,7 @@
 #include <Preferences.h>
 #include <Update.h>
 #include <Wire.h>
+#include <string.h>
 #if __has_include("factory_unit_id.h")
 #include "factory_unit_id.h"
 #endif
@@ -57,6 +58,7 @@ constexpr uint32_t CONTROL_TICK_MS = 20;
 constexpr uint32_t ARM_HOLD_MS = 1500;
 constexpr uint32_t BT_COMMAND_TIMEOUT_MS = 1000;
 constexpr uint32_t BT_STATUS_INTERVAL_MS = 1000;
+constexpr uint32_t BT_YB_IMU_STATUS_INTERVAL_MS = 100;
 constexpr uint32_t OTA_TIMEOUT_MS = 15000;
 constexpr uint32_t TURN_CONTROL_TIMEOUT_MS = 8000;
 constexpr uint8_t MIN_VOICE_POWER_LIMIT_PERCENT = 5;
@@ -168,6 +170,16 @@ constexpr uint8_t AK09916_ST1 = 0x10;
 constexpr uint8_t AK09916_CNTL2 = 0x31;
 constexpr uint8_t AK09916_CNTL3 = 0x32;
 constexpr uint8_t AK09916_MODE_CONTINUOUS_50HZ = 0x06;
+constexpr uint32_t IMU_I2C_CLOCK_HZ = 100000;
+constexpr uint8_t YB_IMU_ADDR = 0x23;
+constexpr uint8_t YB_IMU_RAW_ACCEL = 0x04;
+constexpr uint8_t YB_IMU_RAW_GYRO = 0x0A;
+constexpr uint8_t YB_IMU_RAW_MAG = 0x10;
+constexpr uint8_t YB_IMU_QUAT = 0x16;
+constexpr uint8_t YB_IMU_EULER = 0x26;
+constexpr float YB_IMU_ACCEL_SCALE_G = 16.0f / 32767.0f;
+constexpr float YB_IMU_GYRO_SCALE_RAD_S = (2000.0f / 32767.0f) * (3.1415926f / 180.0f);
+constexpr float YB_IMU_MAG_SCALE_UT = 800.0f / 32767.0f;
 
 enum class CommandSource : uint8_t {
   App,
@@ -226,6 +238,7 @@ bool unitIdProvisioned = false;
 const char* unitIdSource = "FALLBACK";
 bool imuAvailable = false;
 bool magnetometerAvailable = false;
+bool ybImuAvailable = false;
 bool headingFilterInitialized = false;
 bool imuHeadingFilterInitialized = false;
 bool magCalibrationValid = false;
@@ -233,6 +246,7 @@ bool magCalibrationActive = false;
 bool phoneHeadingEnabled = false;
 uint8_t imuAddress = ICM20948_ADDR_LOW;
 uint8_t imuFailureCount = 0;
+uint8_t ybImuFailureCount = 0;
 float headingDegrees = 0.0f;
 float imuHeadingDegrees = 0.0f;
 float phoneHeadingDegrees = 0.0f;
@@ -274,6 +288,23 @@ uint32_t imuFusionInitializedMs = 0;
 uint32_t imuLastMagCorrectionMs = 0;
 uint32_t imuLastTurningMs = 0;
 const char* imuFusionQuality = "STALE";
+uint32_t lastYbImuReadMs = 0;
+float ybAccelXG = 0.0f;
+float ybAccelYG = 0.0f;
+float ybAccelZG = 0.0f;
+float ybGyroXRadS = 0.0f;
+float ybGyroYRadS = 0.0f;
+float ybGyroZRadS = 0.0f;
+float ybMagXUt = 0.0f;
+float ybMagYUt = 0.0f;
+float ybMagZUt = 0.0f;
+float ybQuatW = 1.0f;
+float ybQuatX = 0.0f;
+float ybQuatY = 0.0f;
+float ybQuatZ = 0.0f;
+float ybRollDegrees = 0.0f;
+float ybPitchDegrees = 0.0f;
+float ybYawDegrees = 0.0f;
 float lastTurnErrorDegrees = 0.0f;
 bool turnControlActive = false;
 bool turnControlCompleted = false;
@@ -634,6 +665,91 @@ bool readImuMotionSample() {
   imuGyroYDps = static_cast<float>(rawGyroY) / ICM20948_GYRO_250DPS_LSB_PER_DPS;
   imuGyroZDps = ((static_cast<float>(rawGyroZ) / ICM20948_GYRO_250DPS_LSB_PER_DPS) * IMU_YAW_SIGN) - gyroZBiasDps;
   return true;
+}
+
+bool ybImuRead(uint8_t reg, uint8_t* buffer, size_t length) {
+  Wire.beginTransmission(YB_IMU_ADDR);
+  Wire.write(reg);
+  if (Wire.endTransmission(false) != 0) {
+    return false;
+  }
+
+  const size_t readBytes = Wire.requestFrom(static_cast<int>(YB_IMU_ADDR), static_cast<int>(length));
+  if (readBytes != length) {
+    while (Wire.available() > 0) {
+      Wire.read();
+    }
+    return false;
+  }
+
+  for (size_t i = 0; i < length; ++i) {
+    buffer[i] = Wire.read();
+  }
+  return true;
+}
+
+int16_t ybInt16Le(const uint8_t* data) {
+  return static_cast<int16_t>((static_cast<uint16_t>(data[1]) << 8) | data[0]);
+}
+
+float ybFloatLe(const uint8_t* data) {
+  float value = 0.0f;
+  uint8_t bytes[4] = {data[0], data[1], data[2], data[3]};
+  memcpy(&value, bytes, sizeof(value));
+  return value;
+}
+
+bool readYbImuSample() {
+  uint8_t motion[18] = {};
+  uint8_t quat[16] = {};
+  uint8_t euler[12] = {};
+
+  if (
+    !ybImuRead(YB_IMU_RAW_ACCEL, motion, sizeof(motion)) ||
+    !ybImuRead(YB_IMU_QUAT, quat, sizeof(quat)) ||
+    !ybImuRead(YB_IMU_EULER, euler, sizeof(euler))
+  ) {
+    return false;
+  }
+
+  ybAccelXG = static_cast<float>(ybInt16Le(&motion[0])) * YB_IMU_ACCEL_SCALE_G;
+  ybAccelYG = static_cast<float>(ybInt16Le(&motion[2])) * YB_IMU_ACCEL_SCALE_G;
+  ybAccelZG = static_cast<float>(ybInt16Le(&motion[4])) * YB_IMU_ACCEL_SCALE_G;
+  ybGyroXRadS = static_cast<float>(ybInt16Le(&motion[6])) * YB_IMU_GYRO_SCALE_RAD_S;
+  ybGyroYRadS = static_cast<float>(ybInt16Le(&motion[8])) * YB_IMU_GYRO_SCALE_RAD_S;
+  ybGyroZRadS = static_cast<float>(ybInt16Le(&motion[10])) * YB_IMU_GYRO_SCALE_RAD_S;
+  ybMagXUt = static_cast<float>(ybInt16Le(&motion[12])) * YB_IMU_MAG_SCALE_UT;
+  ybMagYUt = static_cast<float>(ybInt16Le(&motion[14])) * YB_IMU_MAG_SCALE_UT;
+  ybMagZUt = static_cast<float>(ybInt16Le(&motion[16])) * YB_IMU_MAG_SCALE_UT;
+
+  ybQuatW = ybFloatLe(&quat[0]);
+  ybQuatX = ybFloatLe(&quat[4]);
+  ybQuatY = ybFloatLe(&quat[8]);
+  ybQuatZ = ybFloatLe(&quat[12]);
+  ybRollDegrees = ybFloatLe(&euler[0]) * RADIANS_TO_DEGREES;
+  ybPitchDegrees = ybFloatLe(&euler[4]) * RADIANS_TO_DEGREES;
+  ybYawDegrees = ybFloatLe(&euler[8]) * RADIANS_TO_DEGREES;
+
+  const float accelNorm = sqrtf(ybAccelXG * ybAccelXG + ybAccelYG * ybAccelYG + ybAccelZG * ybAccelZG);
+  const float quatNorm = sqrtf(ybQuatW * ybQuatW + ybQuatX * ybQuatX + ybQuatY * ybQuatY + ybQuatZ * ybQuatZ);
+  return
+    isfinite(accelNorm) &&
+    accelNorm >= IMU_ACCEL_NORM_MIN_G &&
+    accelNorm <= IMU_ACCEL_NORM_MAX_G &&
+    isfinite(quatNorm) &&
+    quatNorm >= 0.70f &&
+    quatNorm <= 1.30f &&
+    isfinite(ybRollDegrees) &&
+    isfinite(ybPitchDegrees) &&
+    isfinite(ybYawDegrees);
+}
+
+bool detectYbImu() {
+  Wire.beginTransmission(YB_IMU_ADDR);
+  if (Wire.endTransmission() != 0) {
+    return false;
+  }
+  return readYbImuSample();
 }
 
 bool magWrite(uint8_t reg, uint8_t value) {
@@ -1175,7 +1291,20 @@ bool calibrateGyroBias() {
 
 void setupImu() {
   Wire.begin(IMU_SDA_PIN, IMU_SCL_PIN);
-  Wire.setClock(400000);
+  Wire.setClock(IMU_I2C_CLOCK_HZ);
+
+  if (detectYbImu()) {
+    ybImuAvailable = true;
+    ybImuFailureCount = 0;
+    lastYbImuReadMs = millis();
+    imuAvailable = false;
+    magnetometerAvailable = false;
+    imuFusionQuality = "YB_TELEMETRY_ONLY";
+    Serial.print("Yahboom IMU ready addr=0x");
+    Serial.print(YB_IMU_ADDR, HEX);
+    Serial.println(" mode=TELEMETRY_ONLY");
+    return;
+  }
 
   if (!detectImuAddress(ICM20948_ADDR_LOW) && !detectImuAddress(ICM20948_ADDR_HIGH)) {
     imuAvailable = false;
@@ -1941,6 +2070,19 @@ void updateImu(uint32_t now) {
       forceNeutralAndDisarm();
       Serial.println("Phone heading timeout; autonomous control disabled");
       SerialBT.println("STATUS;ARMED=0;FAULT=PHONE_HEADING_TIMEOUT");
+    }
+  }
+  if (ybImuAvailable && now - lastYbImuReadMs >= MAG_HEADING_INTERVAL_MS) {
+    lastYbImuReadMs = now;
+    if (readYbImuSample()) {
+      ybImuFailureCount = 0;
+    } else {
+      ybImuFailureCount += 1;
+      if (ybImuFailureCount >= IMU_FAILURE_LIMIT) {
+        ybImuAvailable = false;
+        Serial.println("Yahboom IMU read failed; telemetry disabled");
+        SerialBT.println("STATUS;FAULT=YB_IMU_READ_FAILED");
+      }
     }
   }
   if (!imuAvailable) {
@@ -3406,7 +3548,8 @@ void publishBluetoothStatus(uint32_t now) {
   if (otaInProgress) {
     return;
   }
-  if (now - lastBtStatusMs < BT_STATUS_INTERVAL_MS) {
+  const uint32_t statusIntervalMs = ybImuAvailable ? BT_YB_IMU_STATUS_INTERVAL_MS : BT_STATUS_INTERVAL_MS;
+  if (now - lastBtStatusMs < statusIntervalMs) {
     return;
   }
   lastBtStatusMs = now;
@@ -3447,6 +3590,32 @@ void publishBluetoothStatus(uint32_t now) {
   SerialBT.print(imuPitchDegrees, 1);
   SerialBT.print(";IQUAL=");
   SerialBT.print(imuFusionQuality);
+  SerialBT.print(";YBIMU=");
+  SerialBT.print(ybImuAvailable ? 1 : 0);
+  if (ybImuAvailable) {
+    SerialBT.print(";YBAX=");
+    SerialBT.print(ybAccelXG, 3);
+    SerialBT.print(";YBAY=");
+    SerialBT.print(ybAccelYG, 3);
+    SerialBT.print(";YBAZ=");
+    SerialBT.print(ybAccelZG, 3);
+    SerialBT.print(";YBGZ=");
+    SerialBT.print(ybGyroZRadS, 3);
+    SerialBT.print(";YBQW=");
+    SerialBT.print(ybQuatW, 4);
+    SerialBT.print(";YBQX=");
+    SerialBT.print(ybQuatX, 4);
+    SerialBT.print(";YBQY=");
+    SerialBT.print(ybQuatY, 4);
+    SerialBT.print(";YBQZ=");
+    SerialBT.print(ybQuatZ, 4);
+    SerialBT.print(";YBR=");
+    SerialBT.print(ybRollDegrees, 1);
+    SerialBT.print(";YBP=");
+    SerialBT.print(ybPitchDegrees, 1);
+    SerialBT.print(";YBY=");
+    SerialBT.print(ybYawDegrees, 1);
+  }
   SerialBT.print(";IGZB=");
   SerialBT.print(gyroZBiasDps, 3);
   SerialBT.print(";HSRC=");

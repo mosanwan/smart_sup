@@ -21,6 +21,7 @@ data class SettingsUiState(
     val headingLockToleranceDegrees: Int = 4,
     val headingLockFullCorrectionDegrees: Int = 6,
     val headingLockNeutralReversePercent: Int = 70,
+    val headingLockNeutralReverseBoostPercent: Int = 0,
     val autoNavigationGpsJumpResetMeters: Int = 5,
     val usePhoneHeading: Boolean = true,
     val realtimeVoiceEndpoint: String = "wss://openspeech.bytedance.com/api/v3/realtime/dialogue",

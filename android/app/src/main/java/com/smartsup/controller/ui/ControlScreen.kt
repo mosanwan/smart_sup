@@ -609,6 +609,23 @@ private fun CenterControlPanel(
                 modifier = Modifier.padding(12.dp),
                 verticalArrangement = Arrangement.spacedBy(7.dp),
             ) {
+                CompactInfoRow("ESP32 IMU", state.ybImuModuleText())
+                CompactInfoRow("IMU 航向", state.ybHeadingText())
+                CompactInfoRow("横滚 / 俯仰", state.ybRollPitchText())
+                CompactInfoRow("Z 角速度", state.ybGyroZText())
+                CompactInfoRow("加速度", state.ybAccelText())
+                CompactInfoRow("四元数", state.ybQuaternionText())
+            }
+        }
+
+        Card(
+            colors = CardDefaults.cardColors(containerColor = MaterialTheme.colorScheme.surface),
+            modifier = Modifier.fillMaxWidth(),
+        ) {
+            Column(
+                modifier = Modifier.padding(12.dp),
+                verticalArrangement = Arrangement.spacedBy(7.dp),
+            ) {
                 CompactInfoRow("GPS 模块", state.gpsModuleText())
                 CompactInfoRow("GPS 定位", state.gpsFixText())
                 CompactInfoRow("卫星数量", state.gpsSatelliteText())
@@ -1367,6 +1384,10 @@ private fun Float?.formatDegrees(): String {
     return this?.let { "%.1f°".format(it) } ?: "--"
 }
 
+private fun Float?.formatRadPerSecond(): String {
+    return this?.let { "%.3f rad/s".format(it) } ?: "--"
+}
+
 private const val TARGET_HEADING_ARC_DEGREES = 90f
 
 private fun ControlUiState.headingText(): String {
@@ -1395,6 +1416,44 @@ private fun ControlUiState.phoneHeadingStatusText(): String {
         phoneHeadingSensorName.isNotBlank() -> "等待读数"
         else -> "不可用"
     }
+}
+
+private fun ControlUiState.ybImuModuleText(): String {
+    val quality = telemetry.statusFields["IQUAL"]?.takeIf { it.isNotBlank() }
+    return when (telemetry.ybImuAvailable) {
+        true -> listOfNotNull("在线", quality).joinToString(" ")
+        false -> "离线"
+        null -> "--"
+    }
+}
+
+private fun ControlUiState.ybHeadingText(): String {
+    return telemetry.ybYawDegrees.formatDegrees()
+}
+
+private fun ControlUiState.ybRollPitchText(): String {
+    val roll = telemetry.ybRollDegrees ?: return "--"
+    val pitch = telemetry.ybPitchDegrees ?: return "--"
+    return "%.1f° / %.1f°".format(roll, pitch)
+}
+
+private fun ControlUiState.ybGyroZText(): String {
+    return telemetry.ybGyroZRadS.formatRadPerSecond()
+}
+
+private fun ControlUiState.ybAccelText(): String {
+    val x = telemetry.ybAccelXG ?: return "--"
+    val y = telemetry.ybAccelYG ?: return "--"
+    val z = telemetry.ybAccelZG ?: return "--"
+    return "x %.2fg  y %.2fg  z %.2fg".format(x, y, z)
+}
+
+private fun ControlUiState.ybQuaternionText(): String {
+    val w = telemetry.ybQuatW ?: return "--"
+    val x = telemetry.ybQuatX ?: return "--"
+    val y = telemetry.ybQuatY ?: return "--"
+    val z = telemetry.ybQuatZ ?: return "--"
+    return "w %.3f  x %.3f  y %.3f  z %.3f".format(w, x, y, z)
 }
 
 private fun ControlUiState.statusValue(key: String): String {

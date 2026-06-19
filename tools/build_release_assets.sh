@@ -39,6 +39,7 @@ cp "$repo_root/firmware/esp32/.pio/build/lolin32_lite/firmware.bin" "$firmware_o
 
 firmware_size="$(wc -c < "$firmware_out" | tr -d '[:space:]')"
 firmware_sha256="$(sha256sum "$firmware_out" | awk '{print $1}')"
+min_app_version="${version#v}"
 
 cat > "$manifest_out" <<EOF
 {
@@ -49,7 +50,7 @@ cat > "$manifest_out" <<EOF
     "board": "lolin32_lite",
     "size": $firmware_size,
     "sha256": "$firmware_sha256",
-    "minAppVersion": "0.2.7"
+    "minAppVersion": "$min_app_version"
   }
 }
 EOF

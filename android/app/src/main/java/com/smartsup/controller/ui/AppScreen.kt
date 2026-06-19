@@ -199,6 +199,7 @@ fun AppScreen(viewModel: ControlViewModel) {
                 onHeadingLockToleranceChange = viewModel::setHeadingLockToleranceDegrees,
                 onHeadingLockFullCorrectionChange = viewModel::setHeadingLockFullCorrectionDegrees,
                 onHeadingLockNeutralReverseChange = viewModel::setHeadingLockNeutralReversePercent,
+                onHeadingLockNeutralReverseBoostChange = viewModel::setHeadingLockNeutralReverseBoostPercent,
                 onAutoNavigationGpsJumpResetChange = viewModel::setAutoNavigationGpsJumpResetMeters,
                 onUsePhoneHeadingChange = viewModel::setUsePhoneHeading,
                 onRealtimeVoiceEndpointChange = viewModel::setRealtimeVoiceEndpoint,

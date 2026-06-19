@@ -109,6 +109,7 @@ fun SettingsScreen(
     onHeadingLockToleranceChange: (Int) -> Unit,
     onHeadingLockFullCorrectionChange: (Int) -> Unit,
     onHeadingLockNeutralReverseChange: (Int) -> Unit,
+    onHeadingLockNeutralReverseBoostChange: (Int) -> Unit,
     onAutoNavigationGpsJumpResetChange: (Int) -> Unit,
     onUsePhoneHeadingChange: (Boolean) -> Unit,
     onRealtimeVoiceEndpointChange: (String) -> Unit,
@@ -179,7 +180,9 @@ fun SettingsScreen(
             onHeadingLockToleranceChange = onHeadingLockToleranceChange,
             onHeadingLockFullCorrectionChange = onHeadingLockFullCorrectionChange,
             onHeadingLockNeutralReverseChange = onHeadingLockNeutralReverseChange,
+            onHeadingLockNeutralReverseBoostChange = onHeadingLockNeutralReverseBoostChange,
             onAutoNavigationGpsJumpResetChange = onAutoNavigationGpsJumpResetChange,
+            onUsePhoneHeadingChange = onUsePhoneHeadingChange,
         )
 
         RealtimeVoiceSettingsCard(
@@ -198,8 +201,7 @@ fun SettingsScreen(
             onRefreshMagCalibrationStatus = onRefreshMagCalibrationStatus,
         )
 
-        // IMU 调试面板暂时关闭；新 IMU 到货后再恢复观测 UI。
-        // Esp32ImuObservationCard(controlState = controlState)
+        Esp32ImuObservationCard(controlState = controlState)
 
         GearPercentSettingsCard(
             settingsState = settingsState,
@@ -558,7 +560,9 @@ private fun SafetySettingsCard(
     onHeadingLockToleranceChange: (Int) -> Unit,
     onHeadingLockFullCorrectionChange: (Int) -> Unit,
     onHeadingLockNeutralReverseChange: (Int) -> Unit,
+    onHeadingLockNeutralReverseBoostChange: (Int) -> Unit,
     onAutoNavigationGpsJumpResetChange: (Int) -> Unit,
+    onUsePhoneHeadingChange: (Boolean) -> Unit,
 ) {
     Card(
         colors = CardDefaults.cardColors(containerColor = MaterialTheme.colorScheme.surface),
@@ -592,6 +596,16 @@ private fun SafetySettingsCard(
                 label = "右 ESC 方向反转",
                 checked = settingsState.rightEscReversed,
                 onCheckedChange = onRightEscReversedChange,
+            )
+            SwitchRow(
+                label = "航向锁定使用 ESP32 IMU",
+                checked = !settingsState.usePhoneHeading,
+                onCheckedChange = { useEsp32Imu -> onUsePhoneHeadingChange(!useEsp32Imu) },
+            )
+            Text(
+                "测试开关仅影响航向锁定和角度转向；自动导航仍使用手机指南针。切换时会取消当前锁航并回空挡。",
+                style = MaterialTheme.typography.bodySmall,
+                color = MaterialTheme.colorScheme.onSurfaceVariant,
             )
             Text("正反向油门限幅：+/-${settingsState.maxThrottlePercent}%")
             Slider(
@@ -634,6 +648,18 @@ private fun SafetySettingsCard(
                 valueRange = 0f..100f,
                 steps = 99,
                 onValueChange = onHeadingLockNeutralReverseChange,
+            )
+            PercentSliderRow(
+                label = "空档反推增幅",
+                value = settingsState.headingLockNeutralReverseBoostPercent,
+                valueRange = 0f..100f,
+                steps = 99,
+                onValueChange = onHeadingLockNeutralReverseBoostChange,
+            )
+            Text(
+                "仅空档原地掉头时生效：反推一侧会按增幅提高，仍受最大反推和输出限幅约束。",
+                style = MaterialTheme.typography.bodySmall,
+                color = MaterialTheme.colorScheme.onSurfaceVariant,
             )
             MeterSliderRow(
                 label = "自动导航 GPS 跳变重置",
@@ -743,15 +769,24 @@ private fun PhoneHeadingSettingsCard(
             verticalArrangement = Arrangement.spacedBy(12.dp),
         ) {
             SettingsSectionHeader(
-                title = "手机指南针航向",
+                title = "航向锁定来源",
                 icon = Icons.Outlined.Tune,
                 color = Color(0xFF00695C),
             )
             SettingsRow("连接", connectionText(controlState.connectionState))
-            SettingsRow("航向来源", "手机指南针")
+            SettingsRow(
+                "当前来源",
+                if (settingsState.usePhoneHeading) "手机指南针" else "ESP32 IMU 测试模式",
+            )
             SettingsRow(
                 "手机航向",
                 controlState.phoneHeadingDegrees?.let { "${it.roundToInt()}°" } ?: "--",
+            )
+            SettingsRow(
+                "IMU 航向",
+                controlState.telemetry.ybYawDegrees
+                    ?.let { normalizeCompassDegrees(it).roundToInt() }
+                    ?.let { "$it°" } ?: "--",
             )
             SettingsRow(
                 "手机传感器",
@@ -784,6 +819,7 @@ private fun Esp32ImuObservationCard(
     } else {
         null
     }
+    val ybHeading = controlState.telemetry.ybYawDegrees?.let { normalizeCompassDegrees(it) }
     val imuAvailable = if (isConnected) controlState.telemetry.imuAvailable else null
     val phoneHeading = controlState.phoneHeadingDegrees
 
@@ -808,14 +844,44 @@ private fun Esp32ImuObservationCard(
             SettingsRow("磁力计", imuAvailableText(fields["MAG"], null))
             SettingsRow("航向来源", headingSourceText(fields["HSRC"]))
             SettingsRow("融合质量", fields["IQUAL"] ?: "--")
+            SettingsRow("九轴 IMU", if (controlState.telemetry.ybImuAvailable == true) "在线" else fields["YBIMU"] ?: "--")
             SettingsRow("手机航向", phoneHeading?.let { "${it.roundToInt()}°" } ?: "--")
+            SettingsRow("IMU 航向 YBY", ybHeading?.let { "${it.roundToInt()}°" } ?: "--")
             SettingsRow(
                 "ESP32 航向",
                 espHeading?.let { "${it.roundToInt()}°" } ?: fields.imuValue("IHDG", "°"),
             )
+            SettingsRow("手机 - IMU", headingDeltaText(phoneHeading, ybHeading))
             SettingsRow("裸磁航向", fields.imuValue("IMHDG", "°"))
             SettingsRow("Mahony yaw", fields.imuValue("IAHRS", "°"))
             SettingsRow("手机 - ESP32", headingDeltaText(phoneHeading, espHeading))
+            HorizontalDivider()
+            SettingsRow(
+                "YB 姿态",
+                listOfNotNull(
+                    controlState.telemetry.ybRollDegrees?.let { "r=${it.roundToInt()}°" },
+                    controlState.telemetry.ybPitchDegrees?.let { "p=${it.roundToInt()}°" },
+                    ybHeading?.let { "y=${it.roundToInt()}°" },
+                ).joinToString(" ").ifBlank { "--" },
+            )
+            SettingsRow(
+                "YB 加速度",
+                listOfNotNull(
+                    controlState.telemetry.ybAccelXG?.let { "x=${"%.2f".format(it)}g" },
+                    controlState.telemetry.ybAccelYG?.let { "y=${"%.2f".format(it)}g" },
+                    controlState.telemetry.ybAccelZG?.let { "z=${"%.2f".format(it)}g" },
+                ).joinToString(" ").ifBlank { "--" },
+            )
+            SettingsRow("YB Z 陀螺", controlState.telemetry.ybGyroZRadS?.let { "%.3f rad/s".format(it) } ?: "--")
+            SettingsRow(
+                "YB 四元数",
+                listOfNotNull(
+                    controlState.telemetry.ybQuatW?.let { "w=${"%.3f".format(it)}" },
+                    controlState.telemetry.ybQuatX?.let { "x=${"%.3f".format(it)}" },
+                    controlState.telemetry.ybQuatY?.let { "y=${"%.3f".format(it)}" },
+                    controlState.telemetry.ybQuatZ?.let { "z=${"%.3f".format(it)}" },
+                ).joinToString(" ").ifBlank { "--" },
+            )
             HorizontalDivider()
             SettingsRow("Mahony 姿态", fields.imuTriplet("IROLL", "IPITCH", "IHDG", "°"))
             SettingsRow("加速度", fields.imuTriplet("IAX", "IAY", "IAZ", "g"))
@@ -828,7 +894,7 @@ private fun Esp32ImuObservationCard(
             SettingsRow("校准样本", fields["MCNT"] ?: "--")
             SettingsRow("校准范围", magRangeText(fields["MRX"], fields["MRY"]))
             Text(
-                "仅用于对比和记录，不参与自动驾驶控制闭环。",
+                "默认仅用于对比和记录；开启测试开关后，航向锁定可使用 IMU 航向，自动导航仍使用手机指南针。",
                 style = MaterialTheme.typography.bodySmall,
                 color = MaterialTheme.colorScheme.onSurfaceVariant,
             )
@@ -1029,9 +1095,9 @@ private fun magCalibrationStateText(state: String): String {
 private fun imuObservationStateText(isConnected: Boolean, fields: Map<String, String>): String {
     return when {
         !isConnected -> "未连接 ESP32"
+        fields["YBIMU"] == "1" || fields.containsKey("IAX") -> "观测中"
         fields["IMU"] == "0" -> "IMU 不可用"
-        !fields.containsKey("IAX") -> "等待 ESP32 新字段"
-        else -> "观测中"
+        else -> "等待 ESP32 新字段"
     }
 }
 
@@ -1071,6 +1137,10 @@ private fun headingDeltaText(phoneHeading: Float?, espHeading: Float?): String {
     }
     val delta = shortestHeadingDelta(phoneHeading, espHeading)
     return "${delta.roundToInt()}°"
+}
+
+private fun normalizeCompassDegrees(degrees: Float): Float {
+    return ((degrees % 360f) + 360f) % 360f
 }
 
 private fun shortestHeadingDelta(target: Float, current: Float): Float {

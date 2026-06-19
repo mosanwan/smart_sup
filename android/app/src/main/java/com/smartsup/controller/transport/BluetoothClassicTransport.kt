@@ -355,12 +355,24 @@ class BluetoothClassicTransport(
         return copy(
             controllerMessage = fields["FAULT"]?.let { "ESP32 故障：$it" } ?: "ESP32 在线",
             imuAvailable = fields["IMU"]?.let { it == "1" } ?: imuAvailable,
+            ybImuAvailable = fields["YBIMU"]?.let { it == "1" } ?: ybImuAvailable,
             headingDegrees = fields["HDG"]?.toFloatOrNull() ?: headingDegrees,
             targetHeadingDegrees = when {
                 fields.containsKey("TARGET") -> fields["TARGET"]?.toFloatOrNull()
                 isFullStatus && fields["TURN"] != "ACTIVE" && fields["HLOCK"] != "ACTIVE" -> null
                 else -> targetHeadingDegrees
             },
+            ybAccelXG = fields["YBAX"]?.toFloatOrNull() ?: ybAccelXG,
+            ybAccelYG = fields["YBAY"]?.toFloatOrNull() ?: ybAccelYG,
+            ybAccelZG = fields["YBAZ"]?.toFloatOrNull() ?: ybAccelZG,
+            ybGyroZRadS = fields["YBGZ"]?.toFloatOrNull() ?: ybGyroZRadS,
+            ybQuatW = fields["YBQW"]?.toFloatOrNull() ?: ybQuatW,
+            ybQuatX = fields["YBQX"]?.toFloatOrNull() ?: ybQuatX,
+            ybQuatY = fields["YBQY"]?.toFloatOrNull() ?: ybQuatY,
+            ybQuatZ = fields["YBQZ"]?.toFloatOrNull() ?: ybQuatZ,
+            ybRollDegrees = fields["YBR"]?.toFloatOrNull() ?: ybRollDegrees,
+            ybPitchDegrees = fields["YBP"]?.toFloatOrNull() ?: ybPitchDegrees,
+            ybYawDegrees = fields["YBY"]?.toFloatOrNull() ?: ybYawDegrees,
             leftOutputPercent = fields["L"]?.toIntOrNull() ?: leftOutputPercent,
             rightOutputPercent = fields["R"]?.toIntOrNull() ?: rightOutputPercent,
             statusFields = nextStatusFields,
