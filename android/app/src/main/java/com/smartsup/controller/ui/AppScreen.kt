@@ -328,13 +328,15 @@ private fun buildArkAgentStatePrompt(
     val unlocked = if (state.armed) "已解锁" else "未解锁"
     val leftOutputPercent = state.appHeadingLeftOutputPercent ?: state.leftThrottlePercent
     val rightOutputPercent = state.appHeadingRightOutputPercent ?: state.rightThrottlePercent
+    val leftCommandPercent = state.appHeadingLeftCommandPercent ?: leftOutputPercent
+    val rightCommandPercent = state.appHeadingRightCommandPercent ?: rightOutputPercent
     val timeText = SimpleDateFormat("yyyy-MM-dd HH:mm:ss", Locale.CHINA).format(Date())
     return listOf(
         "当前状态：",
         "- 时间：$timeText",
         "- 主控：$connected；解锁：$unlocked；声控上限：${settings.voicePowerLimitPercent}%",
         "- 推进器目标：左推进器${state.leftThrottlePercent}%，右推进器${state.rightThrottlePercent}%；来源：${state.commandSource.name}",
-        "- 推进器当前输出：左推进器${leftOutputPercent}%，右推进器${rightOutputPercent}%",
+        "- 推进器当前输出：用户视角左${leftOutputPercent}%、右${rightOutputPercent}%；实际下发 L=${leftCommandPercent}、R=${rightCommandPercent}",
         "- 手机航向：$phoneHeading；航向锁定：${if (state.headingLockEnabled) "开启" else "关闭"}",
         "- GPS：模块$gpsModule；定位$gpsFix；卫星${fields["GPS_SAT"] ?: "--"}；天线${fields["GPS_ANT"] ?: "--"}",
         "- 电池：${state.telemetry.batteryVoltage?.let { "%.1fV".format(Locale.US, it) } ?: "--"}；故障：${fields["FAULT"] ?: "无"}",

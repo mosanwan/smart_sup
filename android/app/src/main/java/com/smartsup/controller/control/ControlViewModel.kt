@@ -3463,6 +3463,8 @@ class ControlViewModel(application: Application) : AndroidViewModel(application)
                     appHeadingLockCorrectionPercent = 0,
                     appHeadingLeftOutputPercent = 0,
                     appHeadingRightOutputPercent = 0,
+                    appHeadingLeftCommandPercent = 0,
+                    appHeadingRightCommandPercent = 0,
                     statusMessage = "角度转向完成，误差 ${errorDegrees.roundToInt()}°",
                 )
             }
@@ -3485,6 +3487,8 @@ class ControlViewModel(application: Application) : AndroidViewModel(application)
                     appHeadingLockCorrectionPercent = 0,
                     appHeadingLeftOutputPercent = 0,
                     appHeadingRightOutputPercent = 0,
+                    appHeadingLeftCommandPercent = 0,
+                    appHeadingRightCommandPercent = 0,
                     statusMessage = "角度转向超时，已回空挡",
                 )
             }
@@ -3513,6 +3517,8 @@ class ControlViewModel(application: Application) : AndroidViewModel(application)
         )
         val leftPercent = coerceCommandPercentForSource(rawLeftRight.first, activeCommand.source)
         val rightPercent = coerceCommandPercentForSource(rawLeftRight.second, activeCommand.source)
+        val leftCommandPercent = applyEscDirection(leftPercent, settings.leftEscReversed)
+        val rightCommandPercent = applyEscDirection(rightPercent, settings.rightEscReversed)
         mutableUiState.update {
             it.copy(
                 leftThrottlePercent = if (isOneShotTurn) it.leftThrottlePercent else baseLeftPercent,
@@ -3524,11 +3530,13 @@ class ControlViewModel(application: Application) : AndroidViewModel(application)
                 appHeadingLockCorrectionPercent = correction,
                 appHeadingLeftOutputPercent = leftPercent,
                 appHeadingRightOutputPercent = rightPercent,
+                appHeadingLeftCommandPercent = leftCommandPercent,
+                appHeadingRightCommandPercent = rightCommandPercent,
             )
         }
         return ControlCommand(
-            leftThrottlePercent = applyEscDirection(leftPercent, settings.leftEscReversed),
-            rightThrottlePercent = applyEscDirection(rightPercent, settings.rightEscReversed),
+            leftThrottlePercent = leftCommandPercent,
+            rightThrottlePercent = rightCommandPercent,
             armed = true,
             source = activeCommand.source,
             voicePowerLimitPercent = settings.voicePowerLimitPercent,
@@ -3693,6 +3701,8 @@ class ControlViewModel(application: Application) : AndroidViewModel(application)
                 appHeadingLockCorrectionPercent = 0,
                 appHeadingLeftOutputPercent = null,
                 appHeadingRightOutputPercent = null,
+                appHeadingLeftCommandPercent = null,
+                appHeadingRightCommandPercent = null,
             )
         }
     }
@@ -3709,6 +3719,8 @@ class ControlViewModel(application: Application) : AndroidViewModel(application)
                 appHeadingLockCorrectionPercent = 0,
                 appHeadingLeftOutputPercent = null,
                 appHeadingRightOutputPercent = null,
+                appHeadingLeftCommandPercent = null,
+                appHeadingRightCommandPercent = null,
             )
         }
     }
@@ -4268,6 +4280,8 @@ class ControlViewModel(application: Application) : AndroidViewModel(application)
                 appHeadingLockCorrectionPercent = 0,
                 appHeadingLeftOutputPercent = null,
                 appHeadingRightOutputPercent = null,
+                appHeadingLeftCommandPercent = null,
+                appHeadingRightCommandPercent = null,
             )
         }
     }

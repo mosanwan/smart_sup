@@ -20,6 +20,8 @@ data class ControlUiState(
     val appHeadingLockCorrectionPercent: Int = 0,
     val appHeadingLeftOutputPercent: Int? = null,
     val appHeadingRightOutputPercent: Int? = null,
+    val appHeadingLeftCommandPercent: Int? = null,
+    val appHeadingRightCommandPercent: Int? = null,
     val imuTelemetryLogPath: String = "",
     val imuTelemetryLogSampleCount: Int = 0,
     val voiceInputText: String = "",

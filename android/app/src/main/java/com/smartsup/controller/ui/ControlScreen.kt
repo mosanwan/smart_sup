@@ -162,6 +162,7 @@ fun ControlScreen(
             VerticalThrottle(
                 label = "左推进器",
                 value = leftDisplayThrottle,
+                sentValue = state.appHeadingLeftCommandPercent.takeIf { showingHeadingLockOutput },
                 inputMaxThrottlePercent = maxThrottlePercent,
                 visualMaxThrottlePercent = visualThrottlePercent,
                 enabled = state.canSendThrottle,
@@ -192,6 +193,7 @@ fun ControlScreen(
             VerticalThrottle(
                 label = "右推进器",
                 value = rightDisplayThrottle,
+                sentValue = state.appHeadingRightCommandPercent.takeIf { showingHeadingLockOutput },
                 inputMaxThrottlePercent = maxThrottlePercent,
                 visualMaxThrottlePercent = visualThrottlePercent,
                 enabled = state.canSendThrottle,
@@ -321,6 +323,7 @@ private fun IconStatusChip(
 private fun VerticalThrottle(
     label: String,
     value: Int,
+    sentValue: Int?,
     inputMaxThrottlePercent: Int,
     visualMaxThrottlePercent: Int,
     enabled: Boolean,
@@ -337,10 +340,23 @@ private fun VerticalThrottle(
                 .fillMaxSize()
                 .padding(horizontal = 8.dp, vertical = 10.dp),
             horizontalAlignment = Alignment.CenterHorizontally,
-            verticalArrangement = Arrangement.spacedBy(7.dp),
+            verticalArrangement = Arrangement.spacedBy(6.dp),
         ) {
             Text(label, style = MaterialTheme.typography.labelLarge, textAlign = TextAlign.Center)
             ThrottleValueBadge(value = value, maxThrottlePercent = visualMaxThrottlePercent, enabled = enabled)
+            if (sentValue != null) {
+                Text(
+                    "下发 ${sentValue.signedPercentText()}",
+                    style = MaterialTheme.typography.labelSmall,
+                    color = if (sentValue == value) {
+                        MaterialTheme.colorScheme.onSurfaceVariant
+                    } else {
+                        MaterialTheme.colorScheme.primary
+                    },
+                    maxLines = 1,
+                    overflow = TextOverflow.Ellipsis,
+                )
+            }
             Box(
                 modifier = Modifier
                     .weight(1f)
@@ -659,6 +675,7 @@ private fun CenterControlPanel(
                 CompactInfoRow("手机航向", state.headingText())
                 CompactInfoRow("App 目标航向", state.targetHeadingText())
                 CompactInfoRow("App 修正", state.appHeadingCorrectionText())
+                CompactInfoRow("App 下发", state.appHeadingCommandText())
                 CompactInfoRow("转向", state.statusTurnText())
                 CompactInfoRow("故障", state.statusValue("FAULT"))
                 CompactInfoRow("编号", state.statusValue("ID"))
@@ -1405,6 +1422,16 @@ private fun ControlUiState.appHeadingErrorText(): String {
 private fun ControlUiState.appHeadingCorrectionText(): String {
     return if (headingLockEnabled || appHeadingLockTargetDegrees != null) {
         appHeadingLockCorrectionPercent.signedPercentText()
+    } else {
+        "--"
+    }
+}
+
+private fun ControlUiState.appHeadingCommandText(): String {
+    val left = appHeadingLeftCommandPercent
+    val right = appHeadingRightCommandPercent
+    return if ((headingLockEnabled || appHeadingLockTargetDegrees != null) && left != null && right != null) {
+        "L ${left.signedPercentText()} / R ${right.signedPercentText()}"
     } else {
         "--"
     }
