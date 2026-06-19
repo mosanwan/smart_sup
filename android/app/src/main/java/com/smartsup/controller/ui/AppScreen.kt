@@ -198,8 +198,10 @@ fun AppScreen(viewModel: ControlViewModel) {
                 onRightEscReversedChange = viewModel::setRightEscReversed,
                 onHeadingLockToleranceChange = viewModel::setHeadingLockToleranceDegrees,
                 onHeadingLockFullCorrectionChange = viewModel::setHeadingLockFullCorrectionDegrees,
-                onHeadingLockNeutralPivotForwardChange = viewModel::setHeadingLockNeutralPivotForwardPercent,
-                onHeadingLockNeutralPivotReverseChange = viewModel::setHeadingLockNeutralPivotReversePercent,
+                onHeadingLockNeutralPivotMinDifferenceChange =
+                    viewModel::setHeadingLockNeutralPivotMinDifferencePercent,
+                onHeadingLockNeutralPivotMaxDifferenceChange =
+                    viewModel::setHeadingLockNeutralPivotMaxDifferencePercent,
                 onAutoNavigationGpsJumpResetChange = viewModel::setAutoNavigationGpsJumpResetMeters,
                 onUsePhoneHeadingChange = viewModel::setUsePhoneHeading,
                 onRealtimeVoiceEndpointChange = viewModel::setRealtimeVoiceEndpoint,

@@ -714,31 +714,33 @@ class ControlViewModel(application: Application) : AndroidViewModel(application)
         sendCurrentCommand()
     }
 
-    fun setHeadingLockNeutralPivotForwardPercent(percent: Int) {
-        val constrained = coerceHeadingLockNeutralPivotForwardPercent(percent)
-        preferences.edit().putInt(KEY_HEADING_LOCK_NEUTRAL_PIVOT_FORWARD_PERCENT, constrained).apply()
+    fun setHeadingLockNeutralPivotMinDifferencePercent(percent: Int) {
+        val currentMax = mutableSettingsState.value.headingLockNeutralPivotMaxDifferencePercent
+        val constrained = coerceHeadingLockNeutralPivotMinDifferencePercent(percent, currentMax)
+        preferences.edit().putInt(KEY_HEADING_LOCK_NEUTRAL_PIVOT_MIN_DIFFERENCE_PERCENT, constrained).apply()
         clearAutonomousCommands()
-        mutableSettingsState.update { it.copy(headingLockNeutralPivotForwardPercent = constrained) }
+        mutableSettingsState.update { it.copy(headingLockNeutralPivotMinDifferencePercent = constrained) }
         mutableUiState.update {
             it.copy(
                 commandSource = CommandSource.App,
                 headingLockEnabled = false,
-                statusMessage = "空档转向正推已设置为 ${constrained}%，已取消当前航向锁定",
+                statusMessage = "空档最小转向差已设置为 ${constrained}%，已取消当前航向锁定",
             )
         }
         sendCurrentCommand()
     }
 
-    fun setHeadingLockNeutralPivotReversePercent(percent: Int) {
-        val constrained = coerceHeadingLockNeutralPivotReversePercent(percent)
-        preferences.edit().putInt(KEY_HEADING_LOCK_NEUTRAL_PIVOT_REVERSE_PERCENT, constrained).apply()
+    fun setHeadingLockNeutralPivotMaxDifferencePercent(percent: Int) {
+        val currentMin = mutableSettingsState.value.headingLockNeutralPivotMinDifferencePercent
+        val constrained = coerceHeadingLockNeutralPivotMaxDifferencePercent(percent, currentMin)
+        preferences.edit().putInt(KEY_HEADING_LOCK_NEUTRAL_PIVOT_MAX_DIFFERENCE_PERCENT, constrained).apply()
         clearAutonomousCommands()
-        mutableSettingsState.update { it.copy(headingLockNeutralPivotReversePercent = constrained) }
+        mutableSettingsState.update { it.copy(headingLockNeutralPivotMaxDifferencePercent = constrained) }
         mutableUiState.update {
             it.copy(
                 commandSource = CommandSource.App,
                 headingLockEnabled = false,
-                statusMessage = "空档转向反推已设置为 ${constrained}%，已取消当前航向锁定",
+                statusMessage = "空档最大转向差已设置为 ${constrained}%，已取消当前航向锁定",
             )
         }
         sendCurrentCommand()
@@ -2573,8 +2575,8 @@ class ControlViewModel(application: Application) : AndroidViewModel(application)
             ),
             headingLockToleranceDegrees = settings.headingLockToleranceDegrees,
             headingLockFullCorrectionDegrees = settings.headingLockFullCorrectionDegrees,
-            headingLockNeutralPivotForwardPercent = settings.headingLockNeutralPivotForwardPercent,
-            headingLockNeutralPivotReversePercent = settings.headingLockNeutralPivotReversePercent,
+            headingLockNeutralPivotMinDifferencePercent = settings.headingLockNeutralPivotMinDifferencePercent,
+            headingLockNeutralPivotMaxDifferencePercent = settings.headingLockNeutralPivotMaxDifferencePercent,
             headingLockTargetOffsetDegrees = null,
             voicePowerLimitPercent = settings.voicePowerLimitPercent,
             leftEscReversed = settings.leftEscReversed,
@@ -3473,7 +3475,7 @@ class ControlViewModel(application: Application) : AndroidViewModel(application)
             }
             return ControlCommand(
                 armed = true,
-                source = activeCommand.source,
+                source = CommandSource.App,
                 voicePowerLimitPercent = settings.voicePowerLimitPercent,
             )
         }
@@ -3497,7 +3499,7 @@ class ControlViewModel(application: Application) : AndroidViewModel(application)
             }
             return ControlCommand(
                 armed = true,
-                source = activeCommand.source,
+                source = CommandSource.App,
                 voicePowerLimitPercent = settings.voicePowerLimitPercent,
             )
         }
@@ -3513,15 +3515,23 @@ class ControlViewModel(application: Application) : AndroidViewModel(application)
         val rawLeftRight = headingCorrectedThrottle(
             leftBasePercent = baseLeftPercent,
             rightBasePercent = baseRightPercent,
+            errorDegrees = errorDegrees,
             correction = correction,
-            neutralPivotForwardPercent = activeCommand.headingLockNeutralPivotForwardPercent,
-            neutralPivotReversePercent = activeCommand.headingLockNeutralPivotReversePercent,
+            toleranceDegrees = activeCommand.headingLockToleranceDegrees,
+            fullCorrectionDegrees = activeCommand.headingLockFullCorrectionDegrees,
+            neutralPivotMinDifferencePercent = activeCommand.headingLockNeutralPivotMinDifferencePercent,
+            neutralPivotMaxDifferencePercent = activeCommand.headingLockNeutralPivotMaxDifferencePercent,
             outputLimitPercent = headingOutputLimitPercent(activeCommand.source, settings),
         )
         val leftPercent = coerceCommandPercentForSource(rawLeftRight.first, activeCommand.source)
         val rightPercent = coerceCommandPercentForSource(rawLeftRight.second, activeCommand.source)
         val leftCommandPercent = applyEscDirection(leftPercent, settings.leftEscReversed)
         val rightCommandPercent = applyEscDirection(rightPercent, settings.rightEscReversed)
+        val displayedCorrection = if (baseLeftPercent == 0 && baseRightPercent == 0) {
+            (leftPercent - rightPercent).coerceIn(-100, 100)
+        } else {
+            correction
+        }
         mutableUiState.update {
             it.copy(
                 leftThrottlePercent = if (isOneShotTurn) it.leftThrottlePercent else baseLeftPercent,
@@ -3530,7 +3540,7 @@ class ControlViewModel(application: Application) : AndroidViewModel(application)
                 headingLockEnabled = !isOneShotTurn,
                 appHeadingLockTargetDegrees = targetHeading,
                 appHeadingLockErrorDegrees = errorDegrees,
-                appHeadingLockCorrectionPercent = correction,
+                appHeadingLockCorrectionPercent = displayedCorrection,
                 appHeadingLeftOutputPercent = leftPercent,
                 appHeadingRightOutputPercent = rightPercent,
                 appHeadingLeftCommandPercent = leftCommandPercent,
@@ -3541,7 +3551,7 @@ class ControlViewModel(application: Application) : AndroidViewModel(application)
             leftThrottlePercent = leftCommandPercent,
             rightThrottlePercent = rightCommandPercent,
             armed = true,
-            source = activeCommand.source,
+            source = CommandSource.App,
             voicePowerLimitPercent = settings.voicePowerLimitPercent,
         )
     }
@@ -3594,17 +3604,26 @@ class ControlViewModel(application: Application) : AndroidViewModel(application)
     private fun headingCorrectedThrottle(
         leftBasePercent: Int,
         rightBasePercent: Int,
+        errorDegrees: Float,
         correction: Int,
-        neutralPivotForwardPercent: Int,
-        neutralPivotReversePercent: Int,
+        toleranceDegrees: Int,
+        fullCorrectionDegrees: Int,
+        neutralPivotMinDifferencePercent: Int,
+        neutralPivotMaxDifferencePercent: Int,
         outputLimitPercent: Int,
     ): Pair<Int, Int> {
         val limit = outputLimitPercent.coerceIn(0, 100)
         if (leftBasePercent == 0 && rightBasePercent == 0) {
+            val signedDifference = neutralPivotDifferencePercent(
+                errorDegrees = errorDegrees,
+                toleranceDegrees = toleranceDegrees,
+                fullCorrectionDegrees = fullCorrectionDegrees,
+                minDifferencePercent = neutralPivotMinDifferencePercent,
+                maxDifferencePercent = neutralPivotMaxDifferencePercent,
+                outputLimitPercent = limit,
+            )
             return neutralPivotThrottle(
-                correction = correction,
-                forwardPercent = neutralPivotForwardPercent,
-                reversePercent = neutralPivotReversePercent,
+                signedDifferencePercent = signedDifference,
                 outputLimitPercent = limit,
             )
         }
@@ -3639,21 +3658,49 @@ class ControlViewModel(application: Application) : AndroidViewModel(application)
     }
 
     private fun neutralPivotThrottle(
-        correction: Int,
-        forwardPercent: Int,
-        reversePercent: Int,
+        signedDifferencePercent: Int,
         outputLimitPercent: Int,
     ): Pair<Int, Int> {
-        if (correction == 0) {
+        if (signedDifferencePercent == 0) {
             return 0 to 0
         }
-        val forward = forwardPercent.coerceIn(0, outputLimitPercent)
-        val reverse = reversePercent.coerceIn(0, outputLimitPercent)
-        return if (correction > 0) {
+        val difference = abs(signedDifferencePercent).coerceIn(0, outputLimitPercent * 2)
+        val forward = ((difference + 1) / 2).coerceIn(0, outputLimitPercent)
+        val reverse = (difference / 2).coerceIn(0, outputLimitPercent)
+        return if (signedDifferencePercent > 0) {
             forward to -reverse
         } else {
             -reverse to forward
         }
+    }
+
+    private fun neutralPivotDifferencePercent(
+        errorDegrees: Float,
+        toleranceDegrees: Int,
+        fullCorrectionDegrees: Int,
+        minDifferencePercent: Int,
+        maxDifferencePercent: Int,
+        outputLimitPercent: Int,
+    ): Int {
+        val absError = abs(errorDegrees)
+        val tolerance = toleranceDegrees.toFloat()
+        if (absError <= tolerance) {
+            return 0
+        }
+        val minDifference = minDifferencePercent.coerceIn(0, outputLimitPercent * 2)
+        val maxDifference = maxDifferencePercent.coerceIn(minDifference, outputLimitPercent * 2)
+        val full = maxOf(
+            fullCorrectionDegrees.toFloat(),
+            HEADING_LOCK_LOW_SPEED_FULL_CORRECTION_DEGREES,
+        )
+            .coerceAtLeast((toleranceDegrees + 1).toFloat())
+            .coerceAtLeast(tolerance + 1f)
+        val activeError = (absError.coerceAtMost(full) - tolerance).coerceAtLeast(0f)
+        val activeRange = (full - tolerance).coerceAtLeast(1f)
+        val ratio = activeError / activeRange
+        val difference = minDifference + ((maxDifference - minDifference) * ratio).roundToInt()
+        return difference.coerceIn(minDifference, maxDifference)
+            .let { if (errorDegrees < 0f) -it else it }
     }
 
     private fun headingSideOutputLimits(
@@ -3777,8 +3824,8 @@ class ControlViewModel(application: Application) : AndroidViewModel(application)
                 ),
                 headingLockToleranceDegrees = settings.headingLockToleranceDegrees,
                 headingLockFullCorrectionDegrees = settings.headingLockFullCorrectionDegrees,
-                headingLockNeutralPivotForwardPercent = settings.headingLockNeutralPivotForwardPercent,
-                headingLockNeutralPivotReversePercent = settings.headingLockNeutralPivotReversePercent,
+                headingLockNeutralPivotMinDifferencePercent = settings.headingLockNeutralPivotMinDifferencePercent,
+                headingLockNeutralPivotMaxDifferencePercent = settings.headingLockNeutralPivotMaxDifferencePercent,
                 voicePowerLimitPercent = settings.voicePowerLimitPercent,
                 leftEscReversed = settings.leftEscReversed,
                 rightEscReversed = settings.rightEscReversed,
@@ -3815,11 +3862,19 @@ class ControlViewModel(application: Application) : AndroidViewModel(application)
 
     private fun formatCommandLine(command: ControlCommand): String {
         if (command.mode == ControlCommandMode.TurnAngle) {
-            return "App 本地角度转向，发送普通 SRC=${command.source.wireValue};ARM=1;L/R 心跳"
+            return if (command.source == CommandSource.Voice) {
+                "App 本地角度转向，语音限幅后发送普通 SRC=APP;ARM=1;L/R 心跳"
+            } else {
+                "App 本地角度转向，发送普通 SRC=APP;ARM=1;L/R 心跳"
+            }
         }
         if (command.mode == ControlCommandMode.HeadingLock) {
             return if (command.headingLockEnabled) {
-                "App 本地航向锁定，发送普通 SRC=${command.source.wireValue};ARM=1;L/R 心跳"
+                if (command.source == CommandSource.Voice) {
+                    "App 本地航向锁定，语音限幅后发送普通 SRC=APP;ARM=1;L/R 心跳"
+                } else {
+                    "App 本地航向锁定，发送普通 SRC=APP;ARM=1;L/R 心跳"
+                }
             } else {
                 "退出 App 本地航向锁定，回到普通 L/R 心跳"
             }
@@ -4888,6 +4943,20 @@ class ControlViewModel(application: Application) : AndroidViewModel(application)
     private fun loadSettingsState(): SettingsUiState {
         val savedAddress = preferences.getString(KEY_DEVICE_ADDRESS, null)
         val savedName = preferences.getString(KEY_DEVICE_NAME, null)
+        val neutralPivotMinDifference = coerceHeadingLockNeutralPivotMinDifferencePercent(
+            preferences.getInt(
+                KEY_HEADING_LOCK_NEUTRAL_PIVOT_MIN_DIFFERENCE_PERCENT,
+                HEADING_LOCK_NEUTRAL_PIVOT_MIN_DIFFERENCE_DEFAULT,
+            ),
+            HEADING_LOCK_NEUTRAL_PIVOT_MAX_DIFFERENCE_DEFAULT,
+        )
+        val neutralPivotMaxDifference = coerceHeadingLockNeutralPivotMaxDifferencePercent(
+            preferences.getInt(
+                KEY_HEADING_LOCK_NEUTRAL_PIVOT_MAX_DIFFERENCE_PERCENT,
+                HEADING_LOCK_NEUTRAL_PIVOT_MAX_DIFFERENCE_DEFAULT,
+            ),
+            neutralPivotMinDifference,
+        )
         return SettingsUiState(
             bluetoothAvailable = BluetoothClassicTransport.isBluetoothAvailable(),
             bluetoothEnabled = BluetoothClassicTransport.isBluetoothEnabled(),
@@ -4918,18 +4987,8 @@ class ControlViewModel(application: Application) : AndroidViewModel(application)
                 degrees = preferences.getInt(KEY_HEADING_LOCK_FULL_CORRECTION_DEGREES, 6),
                 toleranceDegrees = preferences.getInt(KEY_HEADING_LOCK_TOLERANCE_DEGREES, 4).coerceIn(1, 20),
             ),
-            headingLockNeutralPivotForwardPercent = coerceHeadingLockNeutralPivotForwardPercent(
-                preferences.getInt(
-                    KEY_HEADING_LOCK_NEUTRAL_PIVOT_FORWARD_PERCENT,
-                    HEADING_LOCK_NEUTRAL_PIVOT_FORWARD_DEFAULT,
-                ),
-            ),
-            headingLockNeutralPivotReversePercent = coerceHeadingLockNeutralPivotReversePercent(
-                preferences.getInt(
-                    KEY_HEADING_LOCK_NEUTRAL_PIVOT_REVERSE_PERCENT,
-                    HEADING_LOCK_NEUTRAL_PIVOT_REVERSE_DEFAULT,
-                ),
-            ),
+            headingLockNeutralPivotMinDifferencePercent = neutralPivotMinDifference,
+            headingLockNeutralPivotMaxDifferencePercent = neutralPivotMaxDifference,
             autoNavigationGpsJumpResetMeters = coerceAutoNavigationGpsJumpResetMeters(
                 preferences.getInt(
                     KEY_AUTO_NAVIGATION_GPS_JUMP_RESET_METERS,
@@ -5021,10 +5080,10 @@ class ControlViewModel(application: Application) : AndroidViewModel(application)
         private const val KEY_RAMP_LIMIT = "ramp_limit"
         private const val KEY_HEADING_LOCK_TOLERANCE_DEGREES = "heading_lock_tolerance_degrees"
         private const val KEY_HEADING_LOCK_FULL_CORRECTION_DEGREES = "heading_lock_full_correction_degrees"
-        private const val KEY_HEADING_LOCK_NEUTRAL_PIVOT_FORWARD_PERCENT =
-            "heading_lock_neutral_pivot_forward_percent"
-        private const val KEY_HEADING_LOCK_NEUTRAL_PIVOT_REVERSE_PERCENT =
-            "heading_lock_neutral_pivot_reverse_percent"
+        private const val KEY_HEADING_LOCK_NEUTRAL_PIVOT_MIN_DIFFERENCE_PERCENT =
+            "heading_lock_neutral_pivot_min_difference_percent"
+        private const val KEY_HEADING_LOCK_NEUTRAL_PIVOT_MAX_DIFFERENCE_PERCENT =
+            "heading_lock_neutral_pivot_max_difference_percent"
         private const val KEY_AUTO_NAVIGATION_GPS_JUMP_RESET_METERS = "auto_navigation_gps_jump_reset_meters"
         private const val KEY_LEFT_ESC_REVERSED = "left_esc_reversed"
         private const val KEY_RIGHT_ESC_REVERSED = "right_esc_reversed"
@@ -5050,8 +5109,8 @@ class ControlViewModel(application: Application) : AndroidViewModel(application)
         private const val HEADING_LOCK_CRUISE_GAIN_START_PERCENT = 10
         private const val HEADING_LOCK_CRUISE_GAIN_FULL_PERCENT = 50
         private const val HEADING_LOCK_LOW_SPEED_FULL_CORRECTION_DEGREES = 45f
-        private const val HEADING_LOCK_NEUTRAL_PIVOT_FORWARD_DEFAULT = 28
-        private const val HEADING_LOCK_NEUTRAL_PIVOT_REVERSE_DEFAULT = 31
+        private const val HEADING_LOCK_NEUTRAL_PIVOT_MIN_DIFFERENCE_DEFAULT = 10
+        private const val HEADING_LOCK_NEUTRAL_PIVOT_MAX_DIFFERENCE_DEFAULT = 60
         private const val AUTO_NAVIGATION_MIN_SATELLITES = 4
         private const val AUTO_NAVIGATION_ARRIVAL_RADIUS_METERS = 8.0
         private const val AUTO_NAVIGATION_BEARING_STABILITY_RADIUS_METERS = 18.0
@@ -5104,12 +5163,12 @@ class ControlViewModel(application: Application) : AndroidViewModel(application)
         return degrees.coerceIn((toleranceDegrees + 1).coerceAtLeast(5), 180)
     }
 
-    private fun coerceHeadingLockNeutralPivotForwardPercent(percent: Int): Int {
-        return percent.coerceIn(0, 100)
+    private fun coerceHeadingLockNeutralPivotMinDifferencePercent(percent: Int, maxDifferencePercent: Int): Int {
+        return percent.coerceIn(0, maxDifferencePercent.coerceIn(0, 100))
     }
 
-    private fun coerceHeadingLockNeutralPivotReversePercent(percent: Int): Int {
-        return percent.coerceIn(0, 100)
+    private fun coerceHeadingLockNeutralPivotMaxDifferencePercent(percent: Int, minDifferencePercent: Int): Int {
+        return percent.coerceIn(minDifferencePercent.coerceIn(0, 100), 100)
     }
 
     private fun lockForDirectionChange(message: String) {
