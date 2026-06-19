@@ -27,7 +27,7 @@ fi
 popd >/dev/null
 
 pushd "$repo_root/firmware/esp32" >/dev/null
-PLATFORMIO_BUILD_FLAGS="-D SMART_SUP_VERSION=\\\"$version\\\"" pio run
+SMART_SUP_VERSION="$version" pio run -e lolin32_lite
 popd >/dev/null
 
 apk_out="$dist_dir/smart-sup-controller-${version}.apk"

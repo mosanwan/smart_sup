@@ -1,4 +1,11 @@
 {
-  "current_max_id": -1,
-  "units": []
+  "current_max_id": 0,
+  "units": [
+    {
+      "id": "000",
+      "allocated_at": "2026-06-19T16:04:06+00:00",
+      "status": "allocated",
+      "note": "main controller"
+    }
+  ]
 }

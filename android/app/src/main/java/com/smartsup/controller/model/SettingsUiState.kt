@@ -33,7 +33,7 @@ data class SettingsUiState(
     val cloudTtsConfigured: Boolean = BuildConfig.DOUBAO_API_KEY.isNotBlank() || BuildConfig.ARK_API_KEY.isNotBlank(),
     val githubToken: String = "",
     val deviceNamePrefix: String = "SmartSUP-",
-    val message: String = "在 App 内扫描并连接 SmartSUP ESP32 设备",
+    val message: String = "在 App 内扫描并连接 SmartSUP 主控设备",
 )
 
 enum class RealtimeTtsMode {

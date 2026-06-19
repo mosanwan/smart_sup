@@ -613,11 +613,16 @@ private fun VoiceCommandListCard() {
             VoiceCommandItem(
                 name = "停止声控",
                 examples = "停止声控、关闭声控、暂停声控",
-                command = "SRC=VOICE;ARM=0;L=0;R=0，然后忽略后续命令",
+                command = "本地状态：关闭语音控制，不改变推进或锁航",
             ),
             VoiceCommandItem(
-                name = "停止 / 锁定",
-                examples = "停止、停下、急停、锁定、刹车",
+                name = "停止 / 空挡",
+                examples = "停止、停下、停、空档、空挡",
+                command = "SRC=VOICE;ARM=1;L=0;R=0",
+            ),
+            VoiceCommandItem(
+                name = "锁定 / 急停",
+                examples = "急停、锁定、锁主控、刹车、制动",
                 command = "SRC=VOICE;ARM=0;L=0;R=0",
             ),
             VoiceCommandItem(

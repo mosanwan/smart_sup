@@ -12,7 +12,6 @@ import android.hardware.Sensor
 import android.hardware.SensorEvent
 import android.hardware.SensorEventListener
 import android.hardware.SensorManager
-import android.net.Uri
 import android.os.Build
 import android.os.Handler
 import android.os.Looper
@@ -80,6 +79,8 @@ class ControlViewModel(application: Application) : AndroidViewModel(application)
     private var trackLogJob: Job? = null
     private var trackLogSyncJob: Job? = null
     private var commandHeartbeatJob: Job? = null
+    private var bluetoothConnectJob: Job? = null
+    private var otaReconnectJob: Job? = null
     private var realtimeVoiceActionTimeoutJob: Job? = null
     private var realtimeVoiceActionToken = 0
     private var autoReconnectAttempted = false
@@ -102,6 +103,9 @@ class ControlViewModel(application: Application) : AndroidViewModel(application)
     private var latestRelease: ReleaseInfo? = null
     private var latestFirmwareManifest: FirmwareReleaseManifest? = null
     private var esp32OtaExclusive = false
+    private var esp32OtaAccepted = false
+    private var otaReconnectAttempt = 0
+    private var otaReconnectSawDisconnect = false
     private var pendingEsp32FirmwareVersion: String? = null
     private var downloadedApk: File? = null
     private var activeTurnCommand: ControlCommand? = null
@@ -148,7 +152,7 @@ class ControlViewModel(application: Application) : AndroidViewModel(application)
     }
     private val voiceSampleTargets = listOf(
         VoiceSampleTarget("开始声控", "开始声控", "本地状态：恢复执行语音控制命令"),
-        VoiceSampleTarget("停止声控", "停止声控", "SRC=VOICE;ARM=0;L=0;R=0"),
+        VoiceSampleTarget("停止声控", "停止声控", "本地状态：关闭语音控制，不改变推进或锁航"),
         VoiceSampleTarget("停止", "停止", "SRC=VOICE;ARM=1;L=0;R=0"),
         VoiceSampleTarget("快点", "快点", "当前目标按微调步进加速"),
         VoiceSampleTarget("慢点", "慢点", "当前目标按微调步进减速"),
@@ -189,7 +193,7 @@ class ControlViewModel(application: Application) : AndroidViewModel(application)
                         it.copy(
                             discovering = false,
                             message = if (it.discoveredDevices.isEmpty()) {
-                                "未发现 ${it.deviceNamePrefix} 设备，请确认 ESP32 已上电且蓝牙可见"
+                                "未发现 ${it.deviceNamePrefix} 设备，请确认主控已上电且蓝牙可见"
                             } else {
                                 "扫描完成，发现 ${it.discoveredDevices.size} 个 SmartSUP 设备"
                             },
@@ -229,6 +233,7 @@ class ControlViewModel(application: Application) : AndroidViewModel(application)
         initializeVoiceReplyEngine()
         updatePhoneHeadingSensorRegistration()
         refreshBluetoothDevices()
+        checkForUpdates()
     }
 
     fun connect() {
@@ -239,7 +244,7 @@ class ControlViewModel(application: Application) : AndroidViewModel(application)
         val savedDevice = mutableSettingsState.value.savedDevice
         if (savedDevice == null) {
             mutableSettingsState.update {
-                it.copy(message = "还没有保存 ESP32 蓝牙设备，请先从已配对设备中选择")
+                it.copy(message = "还没有保存主控蓝牙设备，请先从已配对设备中选择")
             }
             return
         }
@@ -248,8 +253,11 @@ class ControlViewModel(application: Application) : AndroidViewModel(application)
 
     fun connectBluetooth(deviceInfo: BluetoothDeviceInfo) {
         saveBluetoothDevice(deviceInfo)
-        viewModelScope.launch {
+        bluetoothConnectJob?.cancel()
+        bluetoothConnectJob = viewModelScope.launch {
             stopBluetoothDiscovery()
+            val otaReconnectPending = esp32OtaExclusive && esp32OtaAccepted
+            val pendingVersionAtStart = pendingEsp32FirmwareVersion
             mutableUiState.update {
                 it.copy(
                     connectionState = ConnectionState.Connecting,
@@ -263,6 +271,15 @@ class ControlViewModel(application: Application) : AndroidViewModel(application)
                 )
             }
             mutableSettingsState.update { it.copy(message = "正在连接 ${deviceInfo.name}") }
+            if (otaReconnectPending) {
+                mutableUpdateState.update {
+                    it.copy(
+                        message = pendingVersionAtStart?.let { target ->
+                            "正在自动重连 ${deviceInfo.name}，验证 FW=$target"
+                        } ?: "正在自动重连 ${deviceInfo.name}，确认固件版本",
+                    )
+                }
+            }
 
             val nextTransport = BluetoothClassicTransport(getApplication(), deviceInfo)
             runCatching {
@@ -279,7 +296,7 @@ class ControlViewModel(application: Application) : AndroidViewModel(application)
                         statusMessage = if (pendingVersion == null) {
                             "已连接 ${deviceInfo.name}，仍处于锁定状态"
                         } else {
-                            "已连接 ${deviceInfo.name}，正在验证 ESP32 固件 $pendingVersion"
+                            "已连接 ${deviceInfo.name}，正在验证主控固件 $pendingVersion"
                         },
                     )
                 }
@@ -288,9 +305,26 @@ class ControlViewModel(application: Application) : AndroidViewModel(application)
                         message = if (pendingVersion == null) {
                             "已保存并连接 ${deviceInfo.name}"
                         } else {
-                            "已重连 ${deviceInfo.name}，正在验证 ESP32 固件版本"
+                            "已重连 ${deviceInfo.name}，正在验证主控固件版本"
                         },
                     )
+                }
+                if (otaReconnectPending) {
+                    mutableUpdateState.update {
+                        it.copy(
+                            message = pendingVersion?.let { target ->
+                                "已重连 ${deviceInfo.name}，正在读取主控固件版本以验证 FW=$target"
+                            } ?: "已重连 ${deviceInfo.name}，正在读取主控固件版本",
+                        )
+                    }
+                    mutableUpdateState.value.currentEsp32FirmwareVersion
+                        ?.takeIf { otaReconnectSawDisconnect }
+                        ?.let { firmwareVersion ->
+                        handlePendingOtaFirmwareVerification(
+                            firmwareVersion = firmwareVersion,
+                            allowMismatch = false,
+                        )
+                    }
                 }
                 runCatching { nextTransport.sendRawLine("INFO?") }
                 if (pendingVersion == null) {
@@ -311,11 +345,28 @@ class ControlViewModel(application: Application) : AndroidViewModel(application)
                         commandSource = CommandSource.App,
                         selectedGear = ThrottleGear.Neutral,
                         throttleTrimPercent = 0,
-                        statusMessage = "连接失败：${error.message ?: "未知错误"}",
+                        statusMessage = if (otaReconnectPending) {
+                            "主控 OTA 后重连失败，3 秒后自动重试"
+                        } else {
+                            "连接失败：${error.message ?: "未知错误"}"
+                        },
                     )
                 }
                 mutableSettingsState.update {
-                    it.copy(message = "连接失败：${error.message ?: "未知错误"}")
+                    it.copy(
+                        message = if (otaReconnectPending) {
+                            "主控 OTA 后重连失败：${error.message ?: "未知错误"}；稍后自动重试"
+                        } else {
+                            "连接失败：${error.message ?: "未知错误"}"
+                        },
+                    )
+                }
+                if (otaReconnectPending) {
+                    mutableUpdateState.update {
+                        it.copy(
+                            message = "主控 OTA 后自动重连 ${deviceInfo.name} 失败：${error.message ?: "未知错误"}；3 秒后重试",
+                        )
+                    }
                 }
             }
         }
@@ -327,20 +378,23 @@ class ControlViewModel(application: Application) : AndroidViewModel(application)
 
     fun disconnectBluetooth() {
         viewModelScope.launch {
+            stopOtaReconnectLoop()
             runCatching { transport?.disconnect() }
             transport = null
+            bluetoothConnectJob?.cancel()
             telemetryJob?.cancel()
             trackLogJob?.cancel()
             trackLogSyncJob?.cancel()
             commandHeartbeatJob?.cancel()
             esp32OtaExclusive = false
+            esp32OtaAccepted = false
             pendingEsp32FirmwareVersion = null
             clearAutonomousCommands()
             mutableUiState.value = ControlUiState(
                 realtimeWakeWordRequired = preferences.getBoolean(KEY_REALTIME_WAKE_WORD_REQUIRED, false),
                 statusMessage = "已断开，推进输出保持空闲",
             )
-            mutableSettingsState.update { it.copy(message = "已断开 ESP32 连接") }
+            mutableSettingsState.update { it.copy(message = "已断开主控连接") }
         }
     }
 
@@ -378,7 +432,21 @@ class ControlViewModel(application: Application) : AndroidViewModel(application)
         }
     }
 
+    private fun rejectManualThrottleWhenLocked(action: String): Boolean {
+        val state = mutableUiState.value
+        val message = when {
+            state.connectionState != ConnectionState.Connected -> "$action 拒绝：请先连接主控"
+            !state.armed -> "$action 拒绝：请先手动解锁"
+            else -> return false
+        }
+        mutableUiState.update { it.copy(statusMessage = message) }
+        return true
+    }
+
     fun setLeftThrottle(percent: Int) {
+        if (rejectManualThrottleWhenLocked("左推进")) {
+            return
+        }
         val constrained = coerceSignedThrottle(percent)
         val lockKept = updateActiveHeadingLockSource(CommandSource.App)
         if (!lockKept) {
@@ -395,6 +463,9 @@ class ControlViewModel(application: Application) : AndroidViewModel(application)
     }
 
     fun setRightThrottle(percent: Int) {
+        if (rejectManualThrottleWhenLocked("右推进")) {
+            return
+        }
         val constrained = coerceSignedThrottle(percent)
         val lockKept = updateActiveHeadingLockSource(CommandSource.App)
         if (!lockKept) {
@@ -411,6 +482,9 @@ class ControlViewModel(application: Application) : AndroidViewModel(application)
     }
 
     fun returnLeftThrottleToGear() {
+        if (rejectManualThrottleWhenLocked("左推进回档")) {
+            return
+        }
         val gearThrottle = coerceSignedThrottle(
             selectedGearThrottle(mutableUiState.value.selectedGear, mutableUiState.value.throttleTrimPercent),
         )
@@ -429,6 +503,9 @@ class ControlViewModel(application: Application) : AndroidViewModel(application)
     }
 
     fun returnRightThrottleToGear() {
+        if (rejectManualThrottleWhenLocked("右推进回档")) {
+            return
+        }
         val gearThrottle = coerceSignedThrottle(
             selectedGearThrottle(mutableUiState.value.selectedGear, mutableUiState.value.throttleTrimPercent),
         )
@@ -447,6 +524,9 @@ class ControlViewModel(application: Application) : AndroidViewModel(application)
     }
 
     fun setThrottleGear(gear: ThrottleGear) {
+        if (rejectManualThrottleWhenLocked("档位切换")) {
+            return
+        }
         val gearThrottle = coerceSignedThrottle(gearPercent(gear))
         val updatedHeadingLockBase = updateActiveHeadingLockSource(CommandSource.App)
         if (!updatedHeadingLockBase) {
@@ -569,7 +649,7 @@ class ControlViewModel(application: Application) : AndroidViewModel(application)
                     !bluetoothEnabled -> "请先打开手机蓝牙"
                     !permissionGranted -> "请授予蓝牙扫描和连接权限"
                     it.savedDevice != null -> "已保存 ${it.savedDevice.name}，可直接连接"
-                    else -> "点击扫描，发现名称以 $SMART_SUP_DEVICE_PREFIX 开头的 ESP32"
+                    else -> "点击扫描，发现名称以 $SMART_SUP_DEVICE_PREFIX 开头的主控"
                 },
             )
         }
@@ -773,7 +853,7 @@ class ControlViewModel(application: Application) : AndroidViewModel(application)
                 statusMessage = if (enabled) {
                     "航向锁定来源已切换为手机指南针，已取消当前锁航"
                 } else {
-                    "航向锁定来源已切换为 ESP32 IMU 测试模式，已取消当前锁航"
+                    "航向锁定来源已切换为主控 IMU 测试模式，已取消当前锁航"
                 },
             )
         }
@@ -833,7 +913,7 @@ class ControlViewModel(application: Application) : AndroidViewModel(application)
     fun enableHeadingLock() {
         val state = mutableUiState.value
         if (state.connectionState != ConnectionState.Connected) {
-            mutableUiState.update { it.copy(statusMessage = "航向锁定拒绝：未连接 ESP32") }
+            mutableUiState.update { it.copy(statusMessage = "航向锁定拒绝：未连接主控") }
             return
         }
         if (!state.armed) {
@@ -883,7 +963,7 @@ class ControlViewModel(application: Application) : AndroidViewModel(application)
     fun setHeadingLockTargetHeading(targetHeadingDegrees: Float) {
         val state = mutableUiState.value
         if (state.connectionState != ConnectionState.Connected) {
-            mutableUiState.update { it.copy(statusMessage = "目标航向拒绝：未连接 ESP32") }
+            mutableUiState.update { it.copy(statusMessage = "目标航向拒绝：未连接主控") }
             return
         }
         if (!state.armed) {
@@ -923,11 +1003,11 @@ class ControlViewModel(application: Application) : AndroidViewModel(application)
     fun requestTrackLogSync() {
         val nextTransport = transport
         if (nextTransport == null) {
-            refreshGpsTrackState("未连接 ESP32，无法同步轨迹")
+            refreshGpsTrackState("未连接主控，无法同步轨迹")
             return
         }
         if (esp32OtaExclusive) {
-            refreshGpsTrackState("ESP32 OTA 进行中，暂不同步轨迹")
+            refreshGpsTrackState("主控 OTA 进行中，暂不同步轨迹")
             return
         }
         viewModelScope.launch {
@@ -939,7 +1019,7 @@ class ControlViewModel(application: Application) : AndroidViewModel(application)
                             syncStartSequence = null,
                             syncTargetSequence = null,
                             syncCurrentSequence = null,
-                            syncMessage = "正在查询 ESP32 轨迹缓存",
+                            syncMessage = "正在查询主控轨迹缓存",
                         ),
                     )
                 }
@@ -1726,7 +1806,7 @@ class ControlViewModel(application: Application) : AndroidViewModel(application)
             mutableUpdateState.update {
                 it.copy(
                     checking = true,
-                    message = "正在检查 GitHub Release",
+                    message = "正在检查更新",
                     progressText = "",
                 )
             }
@@ -1755,12 +1835,17 @@ class ControlViewModel(application: Application) : AndroidViewModel(application)
                     ?: release.firmwareAsset
                 val manifestAsset = release.firmwareManifestAsset
                 val updateAvailable = isReleaseNewerThanInstalled(release.tagName)
+                val esp32UpdateAvailable = isEsp32FirmwareUpdateAvailable(
+                    targetVersion = manifest?.firmwareVersion,
+                    currentVersion = mutableUpdateState.value.currentEsp32FirmwareVersion,
+                )
                 mutableUpdateState.update {
                     it.copy(
                         checking = false,
                         latestVersionName = release.tagName,
                         targetEsp32FirmwareVersion = manifest?.firmwareVersion,
                         appUpdateAvailable = updateAvailable && apkAsset != null,
+                        esp32UpdateAvailable = esp32UpdateAvailable && firmwareAsset != null && manifestAsset != null && manifest != null,
                         appAssetName = apkAsset?.name,
                         firmwareAssetName = firmwareAsset?.name,
                         firmwareManifestName = manifestAsset?.name,
@@ -1771,12 +1856,14 @@ class ControlViewModel(application: Application) : AndroidViewModel(application)
                         firmwareAssetApiUrl = firmwareAsset?.apiUrl,
                         firmwareManifestApiUrl = manifestAsset?.apiUrl,
                         message = when {
-                            apkAsset == null && firmwareAsset == null -> "Release ${release.tagName} 没有 APK 或 ESP32 固件资产"
-                            manifestAsset == null -> "Release ${release.tagName} 缺少 ESP32 发布清单，GitHub 固件刷写已禁用"
+                            apkAsset == null && firmwareAsset == null -> "Release ${release.tagName} 没有 APK 或主控固件资产"
+                            manifestAsset == null -> "Release ${release.tagName} 缺少主控发布清单，GitHub 固件刷写已禁用"
                             manifest == null -> "Release ${release.tagName} 发布清单解析失败，GitHub 固件刷写已禁用"
                             firmwareAsset?.name != manifest.firmwareAssetName -> "Release ${release.tagName} 找不到清单指定固件 ${manifest.firmwareAssetName}"
-                            updateAvailable -> "发现新版本 ${release.tagName}"
-                            else -> "当前 App 已是最新版本，Release ${release.tagName} 可用于 ESP32 固件"
+                            updateAvailable && esp32UpdateAvailable -> "发现 App 和主控固件更新"
+                            updateAvailable -> "发现 App 新版本 ${release.tagName}"
+                            esp32UpdateAvailable -> "发现主控固件更新 ${manifest.firmwareVersion}"
+                            else -> "当前已是最新版本"
                         },
                     )
                 }
@@ -1852,11 +1939,11 @@ class ControlViewModel(application: Application) : AndroidViewModel(application)
             val assetName = state.firmwareAssetName
             val manifest = latestFirmwareManifest
             if (url == null || assetName == null) {
-                mutableUpdateState.update { it.copy(message = "没有可用的 ESP32 固件资产") }
+                mutableUpdateState.update { it.copy(message = "没有可用的主控固件资产") }
                 return@launch
             }
             if (manifest == null) {
-                mutableUpdateState.update { it.copy(message = "缺少 ESP32 发布清单，不能从 GitHub 自动刷写固件") }
+                mutableUpdateState.update { it.copy(message = "缺少主控发布清单，不能从 GitHub 自动刷写固件") }
                 return@launch
             }
             if (manifest.board != ESP32_BOARD_ID) {
@@ -1875,7 +1962,7 @@ class ControlViewModel(application: Application) : AndroidViewModel(application)
             mutableUpdateState.update {
                 it.copy(
                     downloading = true,
-                    message = "正在下载 ESP32 固件：$assetName",
+                    message = "正在下载主控固件：$assetName",
                     progressText = "",
                 )
             }
@@ -1902,7 +1989,7 @@ class ControlViewModel(application: Application) : AndroidViewModel(application)
                     mutableUpdateState.update {
                         it.copy(
                             downloading = false,
-                            message = "ESP32 固件校验失败：大小或 SHA-256 与发布清单不一致",
+                            message = "主控固件校验失败：大小或 SHA-256 与发布清单不一致",
                             progressText = "",
                         )
                     }
@@ -1920,30 +2007,91 @@ class ControlViewModel(application: Application) : AndroidViewModel(application)
                 mutableUpdateState.update {
                     it.copy(
                         downloading = false,
-                        message = "下载 ESP32 固件失败：${error.message ?: "未知错误"}",
+                        message = "下载主控固件失败：${error.message ?: "未知错误"}",
                     )
                 }
             }
         }
     }
 
-    fun uploadLocalEsp32Firmware(uri: Uri) {
+    fun uploadKnownLocalEsp32Firmware() {
         viewModelScope.launch {
-            runCatching {
-                withContext(Dispatchers.IO) {
-                    getApplication<Application>().contentResolver
-                        .openInputStream(uri)
-                        ?.use { it.readBytes() }
-                        ?: error("无法读取选择的固件文件")
-                }
-            }.onSuccess { firmwareBytes ->
-                uploadEsp32FirmwareBytes(firmwareBytes, "本地固件", targetVersion = null)
-            }.onFailure { error ->
-                mutableUpdateState.update {
-                    it.copy(message = "读取本地固件失败：${error.message ?: "未知错误"}")
+            val context = getApplication<Application>()
+            val searchDirs = listOfNotNull(
+                context.getExternalFilesDir(null),
+                File("/sdcard/Download"),
+                File("/storage/emulated/0/Download"),
+            )
+            var lastReadError: Throwable? = null
+            val selected = withContext(Dispatchers.IO) {
+                val firmwareFiles = searchDirs
+                    .flatMap { dir ->
+                        runCatching {
+                            dir.listFiles()
+                                .orEmpty()
+                                .filter { it.isFile && isKnownLocalFirmwareFile(it.name) }
+                        }.onFailure { lastReadError = it }.getOrDefault(emptyList())
+                    }
+                    .distinctBy { it.absolutePath }
+                val latest = firmwareFiles.maxWithOrNull(
+                    compareBy<File> { firmwareVersionSortScore(it.name) }
+                        .thenBy { it.lastModified() },
+                )
+                latest?.let { file ->
+                    runCatching { file to file.readBytes() }
+                        .onFailure { lastReadError = it }
+                        .getOrNull()
                 }
             }
+
+            if (selected == null) {
+                val appPath = searchDirs.firstOrNull()?.absolutePath ?: "App 外部文件目录"
+                val reason = lastReadError?.message?.let { "，最后错误：$it" }.orEmpty()
+                mutableUpdateState.update {
+                    it.copy(message = "固定路径固件读取失败$reason；请放 smart-sup-esp32-firmware-*.bin 到 $appPath")
+                }
+                return@launch
+            }
+
+            val (file, firmwareBytes) = selected
+            val targetVersion = versionFromFirmwareFileName(file.name)
+            val currentVersion = mutableUpdateState.value.currentEsp32FirmwareVersion
+            if (targetVersion != null && currentVersion != null && sameVersion(targetVersion, currentVersion)) {
+                mutableUpdateState.update {
+                    it.copy(message = "固定路径固件 ${file.name} 与当前主控版本相同，已跳过 OTA")
+                }
+                return@launch
+            }
+            uploadEsp32FirmwareBytes(
+                firmwareBytes = firmwareBytes,
+                sourceLabel = "固定路径固件 ${file.name}",
+                targetVersion = targetVersion,
+            )
         }
+    }
+
+    private fun versionFromFirmwareFileName(fileName: String): String? {
+        val name = fileName.substringAfterLast('/')
+        val match = Regex("""(?:\d+-)?smart-sup-esp32-firmware-(.+)\.bin""", RegexOption.IGNORE_CASE)
+            .matchEntire(name)
+            ?: Regex("""firmware-(.+)\.bin""", RegexOption.IGNORE_CASE).matchEntire(name)
+        return match?.groupValues?.getOrNull(1)?.takeIf { it.isNotBlank() }
+    }
+
+    private fun isKnownLocalFirmwareFile(fileName: String): Boolean {
+        return versionFromFirmwareFileName(fileName) != null
+    }
+
+    private fun firmwareVersionSortScore(fileName: String): Long {
+        val parts = versionFromFirmwareFileName(fileName)
+            ?.split('.', '-', '_')
+            .orEmpty()
+            .map { it.toLongOrNull() ?: 0L }
+        val major = parts.getOrElse(0) { 0L }.coerceIn(0, 999)
+        val minor = parts.getOrElse(1) { 0L }.coerceIn(0, 999)
+        val patch = parts.getOrElse(2) { 0L }.coerceIn(0, 999)
+        val build = parts.getOrElse(3) { 0L }.coerceIn(0, 999)
+        return major * 1_000_000_000L + minor * 1_000_000L + patch * 1_000L + build
     }
 
     private data class VoicePreview(
@@ -2063,13 +2211,17 @@ class ControlViewModel(application: Application) : AndroidViewModel(application)
         )
         val commandLine = formatCommandLine(prepareRuntimeCommand(command))
         if (state.connectionState != ConnectionState.Connected) {
-            return rejectRealtimeVoiceEvent("未连接 ESP32", commandLine)
+            return rejectRealtimeVoiceEvent("未连接主控", commandLine)
         }
         if (!state.armed) {
             return rejectRealtimeVoiceEvent("语音不能解锁，请先手动解锁", commandLine)
         }
         clearRealtimeVoiceActionTimeout()
-        val headingLockKept = updateActiveHeadingLockSource(throttleSource)
+        val headingLockKept = updateActiveHeadingLockBaseFromThrottle(
+            leftPercent = gearThrottle,
+            rightPercent = gearThrottle,
+            source = throttleSource,
+        )
         if (!headingLockKept) {
             clearAutonomousCommands()
         }
@@ -2099,7 +2251,7 @@ class ControlViewModel(application: Application) : AndroidViewModel(application)
     private fun executeRealtimePivotTurn(event: RealtimeVoiceControlEvent.PivotTurn): String {
         val state = mutableUiState.value
         if (state.connectionState != ConnectionState.Connected) {
-            return rejectRealtimeVoiceEvent("未连接 ESP32", "pivot_turn：不发送")
+            return rejectRealtimeVoiceEvent("未连接主控", "pivot_turn：不发送")
         }
         if (!state.armed) {
             return rejectRealtimeVoiceEvent("语音不能解锁，请先手动解锁", "pivot_turn：不发送")
@@ -2213,7 +2365,6 @@ class ControlViewModel(application: Application) : AndroidViewModel(application)
 
     private fun executeRealtimeNeutral(reason: String): String {
         clearRealtimeVoiceActionTimeout()
-        clearAutonomousCommands()
         val state = mutableUiState.value
         val throttleSource = CommandSource.App
         val commandLine = formatCommandLine(
@@ -2227,7 +2378,15 @@ class ControlViewModel(application: Application) : AndroidViewModel(application)
             ),
         )
         if (state.connectionState != ConnectionState.Connected) {
-            return rejectRealtimeVoiceEvent("未连接 ESP32", commandLine)
+            return rejectRealtimeVoiceEvent("未连接主控", commandLine)
+        }
+        val headingLockKept = updateActiveHeadingLockBaseFromThrottle(
+            leftPercent = 0,
+            rightPercent = 0,
+            source = throttleSource,
+        )
+        if (!headingLockKept) {
+            clearAutonomousCommands()
         }
         val resultText = "已进入空挡"
         mutableUiState.update {
@@ -2235,13 +2394,17 @@ class ControlViewModel(application: Application) : AndroidViewModel(application)
                 leftThrottlePercent = 0,
                 rightThrottlePercent = 0,
                 commandSource = throttleSource,
-                headingLockEnabled = false,
+                headingLockEnabled = headingLockKept,
                 selectedGear = ThrottleGear.Neutral,
                 throttleTrimPercent = 0,
                 voiceResultMessage = "实时语音：已进入空挡",
                 realtimeVoiceReply = resultText,
                 voiceCommandPreview = commandLine,
-                statusMessage = "实时语音空挡：$reason，按 App 普通推进下发",
+                statusMessage = if (headingLockKept) {
+                    "实时语音空挡：$reason，航向锁定保持，基础油门 0%"
+                } else {
+                    "实时语音空挡：$reason，按 App 普通推进下发"
+                },
             )
         }
         sendCurrentCommand()
@@ -2264,26 +2427,37 @@ class ControlViewModel(application: Application) : AndroidViewModel(application)
             ),
         )
         if (state.connectionState != ConnectionState.Connected) {
-            return rejectRealtimeVoiceEvent("未连接 ESP32", commandLine)
+            return rejectRealtimeVoiceEvent("未连接主控", commandLine)
         }
         if (!state.armed) {
             return rejectRealtimeVoiceEvent("语音不能解锁，请先手动解锁", commandLine)
         }
         clearRealtimeVoiceActionTimeout()
-        clearAutonomousCommands()
+        val headingLockKept = updateActiveHeadingLockBaseFromThrottle(
+            leftPercent = left,
+            rightPercent = right,
+            source = throttleSource,
+        )
+        if (!headingLockKept) {
+            clearAutonomousCommands()
+        }
         val resultText = "已设置左右推进：左 ${left.signedPercentText()}，右 ${right.signedPercentText()}"
         mutableUiState.update {
             it.copy(
                 leftThrottlePercent = left,
                 rightThrottlePercent = right,
                 commandSource = throttleSource,
-                headingLockEnabled = false,
+                headingLockEnabled = headingLockKept,
                 selectedGear = ThrottleGear.Neutral,
                 throttleTrimPercent = 0,
                 voiceResultMessage = "实时语音：已设置左右推进",
                 realtimeVoiceReply = resultText,
                 voiceCommandPreview = commandLine,
-                statusMessage = "实时语音左右推进：左 ${left.signedPercentText()}，右 ${right.signedPercentText()}，按 App 普通推进下发",
+                statusMessage = if (headingLockKept) {
+                    "实时语音左右推进：左 ${left.signedPercentText()}，右 ${right.signedPercentText()}，航向锁定保持"
+                } else {
+                    "实时语音左右推进：左 ${left.signedPercentText()}，右 ${right.signedPercentText()}，按 App 普通推进下发"
+                },
             )
         }
         sendCurrentCommand()
@@ -2296,7 +2470,7 @@ class ControlViewModel(application: Application) : AndroidViewModel(application)
     private fun executeRealtimeHeadingTarget(event: RealtimeVoiceControlEvent.AdjustHeadingTarget): String {
         val state = mutableUiState.value
         if (state.connectionState != ConnectionState.Connected) {
-            return rejectRealtimeVoiceEvent("未连接 ESP32", "adjust_heading_target：不发送")
+            return rejectRealtimeVoiceEvent("未连接主控", "adjust_heading_target：不发送")
         }
         if (!state.armed) {
             return rejectRealtimeVoiceEvent("语音不能解锁，请先手动解锁", "adjust_heading_target：不发送")
@@ -2381,7 +2555,7 @@ class ControlViewModel(application: Application) : AndroidViewModel(application)
     private fun executeRealtimeSetHeadingTarget(event: RealtimeVoiceControlEvent.SetHeadingTarget): String {
         val state = mutableUiState.value
         if (state.connectionState != ConnectionState.Connected) {
-            return rejectRealtimeVoiceEvent("未连接 ESP32", "set_heading_target：不发送")
+            return rejectRealtimeVoiceEvent("未连接主控", "set_heading_target：不发送")
         }
         if (!state.armed) {
             return rejectRealtimeVoiceEvent("语音不能解锁，请先手动解锁", "set_heading_target：不发送")
@@ -2466,15 +2640,25 @@ class ControlViewModel(application: Application) : AndroidViewModel(application)
                 return@launch
             }
             if (mutableUiState.value.commandSource != CommandSource.Voice) {
-                return@launch
+                val currentState = mutableUiState.value
+                if (!isHeadingLockActiveForState(currentState)) {
+                    return@launch
+                }
             }
-            clearAutonomousCommands()
+            val headingLockKept = updateActiveHeadingLockBaseFromThrottle(
+                leftPercent = 0,
+                rightPercent = 0,
+                source = CommandSource.App,
+            )
+            if (!headingLockKept) {
+                clearAutonomousCommands()
+            }
             mutableUiState.update {
                 it.copy(
                     leftThrottlePercent = 0,
                     rightThrottlePercent = 0,
-                    commandSource = CommandSource.Voice,
-                    headingLockEnabled = false,
+                    commandSource = if (headingLockKept) CommandSource.App else CommandSource.Voice,
+                    headingLockEnabled = headingLockKept,
                     selectedGear = ThrottleGear.Neutral,
                     throttleTrimPercent = 0,
                     statusMessage = message,
@@ -2679,12 +2863,18 @@ class ControlViewModel(application: Application) : AndroidViewModel(application)
                 return
             }
             VoiceCommandAction.DisableVoiceControl -> {
-                clearAutonomousCommands()
                 mutableUiState.update {
                     it.copy(
                         voiceControlEnabled = false,
+                        voiceAsrState = VoiceAsrState.Stopped,
+                        voiceAsrStatus = "Qwen ASR：已暂停",
+                        voiceResultMessage = "已停止声控",
+                        voiceCandidatePreview = candidateLine,
+                        voiceCommandPreview = "本地声控状态切换：不改变推进或锁航",
+                        statusMessage = "语音控制：已停止声控，推进和航向锁定保持不变",
                     )
                 }
+                return
             }
             VoiceCommandAction.Control -> {
                 if (!mutableUiState.value.voiceControlEnabled) {
@@ -2742,10 +2932,10 @@ class ControlViewModel(application: Application) : AndroidViewModel(application)
         if (command.armed && state.connectionState != ConnectionState.Connected) {
             mutableUiState.update {
                 it.copy(
-                    voiceResultMessage = "请先连接 ESP32",
+                    voiceResultMessage = "请先连接主控",
                     voiceCandidatePreview = candidateLine,
                     voiceCommandPreview = commandLine,
-                    statusMessage = "语音命令拒绝：未连接 ESP32",
+                    statusMessage = "语音命令拒绝：未连接主控",
                 )
             }
             return
@@ -2978,10 +3168,10 @@ class ControlViewModel(application: Application) : AndroidViewModel(application)
         if (state.connectionState != ConnectionState.Connected) {
             mutableUiState.update {
                 it.copy(
-                    voiceResultMessage = "请先连接 ESP32",
+                    voiceResultMessage = "请先连接主控",
                     voiceCandidatePreview = candidateLine,
                     voiceCommandPreview = commandLine,
-                    statusMessage = "语音命令拒绝：未连接 ESP32",
+                    statusMessage = "语音命令拒绝：未连接主控",
                 )
             }
             return
@@ -3024,8 +3214,11 @@ class ControlViewModel(application: Application) : AndroidViewModel(application)
         }
 
         val target = nextFineTuneTarget(increase, source)
-        val updatedHeadingLockBase = isHeadingLockActiveForState(state) &&
-            updateActiveHeadingLockSource(source)
+        val updatedHeadingLockBase = updateActiveHeadingLockBaseFromThrottle(
+            leftPercent = target.leftPercent,
+            rightPercent = target.rightPercent,
+            source = source,
+        )
         if (!updatedHeadingLockBase) {
             clearAutonomousCommands()
         }
@@ -3041,7 +3234,11 @@ class ControlViewModel(application: Application) : AndroidViewModel(application)
                 voiceResultMessage = voiceResult?.let { "已执行：${it.label}" } ?: it.voiceResultMessage,
                 voiceCandidatePreview = candidateLine ?: it.voiceCandidatePreview,
                 voiceCommandPreview = if (voiceResult != null) wireLine else it.voiceCommandPreview,
-                statusMessage = "微调${actionText} ${step}%：左 ${target.leftPercent.signedPercentText()}，右 ${target.rightPercent.signedPercentText()}",
+                statusMessage = if (updatedHeadingLockBase) {
+                    "微调${actionText} ${step}%：航向锁定保持，基础油门 ${target.averagePercent.signedPercentText()}"
+                } else {
+                    "微调${actionText} ${step}%：左 ${target.leftPercent.signedPercentText()}，右 ${target.rightPercent.signedPercentText()}"
+                },
             )
         }
         sendCurrentCommand {
@@ -3082,11 +3279,11 @@ class ControlViewModel(application: Application) : AndroidViewModel(application)
     ) {
         val nextTransport = transport
         if (nextTransport == null || mutableUiState.value.connectionState != ConnectionState.Connected) {
-            mutableUiState.update { it.copy(statusMessage = "$failurePrefix：未连接 ESP32") }
+            mutableUiState.update { it.copy(statusMessage = "$failurePrefix：未连接主控") }
             return
         }
         if (esp32OtaExclusive) {
-            mutableUiState.update { it.copy(statusMessage = "$failurePrefix：ESP32 OTA 进行中") }
+            mutableUiState.update { it.copy(statusMessage = "$failurePrefix：主控 OTA 进行中") }
             return
         }
 
@@ -3153,7 +3350,7 @@ class ControlViewModel(application: Application) : AndroidViewModel(application)
         return if (mutableSettingsState.value.usePhoneHeading) {
             "手机指南针暂无有效读数"
         } else {
-            "ESP32 IMU 航向暂无有效读数"
+            "主控 IMU 航向暂无有效读数"
         }
     }
 
@@ -3220,7 +3417,7 @@ class ControlViewModel(application: Application) : AndroidViewModel(application)
         viewModelScope.launch {
             val nextTransport = transport
             if (nextTransport == null || mutableUiState.value.connectionState != ConnectionState.Connected) {
-                mutableUpdateState.update { it.copy(message = "请先连接 ESP32 再更新固件") }
+                mutableUpdateState.update { it.copy(message = "请先连接主控再更新固件") }
                 return@launch
             }
 
@@ -3232,6 +3429,8 @@ class ControlViewModel(application: Application) : AndroidViewModel(application)
             commandHeartbeatJob?.cancel()
             clearAutonomousCommands()
             esp32OtaExclusive = true
+            esp32OtaAccepted = false
+            otaReconnectSawDisconnect = false
             pendingEsp32FirmwareVersion = targetVersion
             mutableUiState.update {
                 it.copy(
@@ -3242,7 +3441,7 @@ class ControlViewModel(application: Application) : AndroidViewModel(application)
                     headingLockEnabled = false,
                     selectedGear = ThrottleGear.Neutral,
                     throttleTrimPercent = 0,
-                    statusMessage = "准备更新 ESP32 固件，推进输出回空挡",
+                    statusMessage = "准备更新主控固件，推进输出回空挡",
                 )
             }
 
@@ -3253,7 +3452,7 @@ class ControlViewModel(application: Application) : AndroidViewModel(application)
                 it.copy(
                     esp32Uploading = true,
                     targetEsp32FirmwareVersion = targetVersion ?: it.targetEsp32FirmwareVersion,
-                    message = "正在通过蓝牙发送 $sourceLabel 到 ESP32",
+                    message = "正在通过蓝牙发送 $sourceLabel 到主控",
                     progressText = "0/${firmwareBytes.size} bytes",
                 )
             }
@@ -3265,27 +3464,78 @@ class ControlViewModel(application: Application) : AndroidViewModel(application)
                     }
                 }
             }.onSuccess {
+                esp32OtaAccepted = true
+                otaReconnectSawDisconnect = true
+                if (transport === nextTransport) {
+                    transport = null
+                }
+                telemetryJob?.cancel()
+                trackLogJob?.cancel()
+                trackLogSyncJob?.cancel()
+                commandHeartbeatJob?.cancel()
+                runCatching { nextTransport.closeSilently() }
+                mutableUiState.update {
+                    it.copy(
+                        connectionState = ConnectionState.Disconnected,
+                        armed = false,
+                        leftThrottlePercent = 0,
+                        rightThrottlePercent = 0,
+                        commandSource = CommandSource.App,
+                        headingLockEnabled = false,
+                        selectedGear = ThrottleGear.Neutral,
+                        throttleTrimPercent = 0,
+                        statusMessage = "主控 OTA 已完成，开始每 3 秒自动重连",
+                    )
+                }
+                startOtaReconnectLoop(forceRestart = true)
                 mutableUpdateState.update {
                     it.copy(
                         esp32Uploading = false,
                         message = if (targetVersion == null) {
-                            "ESP32 固件校验通过，设备正在重启；本地固件需要重连后人工确认版本"
+                            "主控固件校验通过；每 3 秒自动重连确认版本"
                         } else {
-                            "ESP32 固件校验通过，设备正在重启；重连后将验证 FW=$targetVersion"
+                            "主控固件校验通过；每 3 秒自动重连验证 FW=$targetVersion"
                         },
                         progressText = "",
                     )
                 }
             }.onFailure { error ->
                 esp32OtaExclusive = false
+                esp32OtaAccepted = false
                 pendingEsp32FirmwareVersion = null
+                stopOtaReconnectLoop()
+                if (transport === nextTransport) {
+                    transport = null
+                }
+                telemetryJob?.cancel()
+                trackLogJob?.cancel()
+                trackLogSyncJob?.cancel()
+                commandHeartbeatJob?.cancel()
+                clearAutonomousCommands()
+                runCatching { nextTransport.closeSilently() }
+                mutableUiState.update {
+                    it.copy(
+                        connectionState = ConnectionState.Disconnected,
+                        armed = false,
+                        leftThrottlePercent = 0,
+                        rightThrottlePercent = 0,
+                        commandSource = CommandSource.App,
+                        headingLockEnabled = false,
+                        selectedGear = ThrottleGear.Neutral,
+                        throttleTrimPercent = 0,
+                        statusMessage = "主控 OTA 已中断，蓝牙已断开；等待主控回退后再重连",
+                    )
+                }
+                mutableSettingsState.update {
+                    it.copy(message = "主控 OTA 中断，已静默断开蓝牙，避免普通控制命令污染固件流")
+                }
                 mutableUpdateState.update {
                     it.copy(
                         esp32Uploading = false,
-                        message = "ESP32 固件更新失败：${error.message ?: "未知错误"}",
+                        message = "主控固件更新失败：${error.message ?: "未知错误"}；已断开蓝牙，等待主控 OTA 超时回退后再重连",
+                        progressText = "",
                     )
                 }
-                startCommandHeartbeat()
             }
         }
     }
@@ -4153,6 +4403,35 @@ class ControlViewModel(application: Application) : AndroidViewModel(application)
         return true
     }
 
+    private fun updateActiveHeadingLockBaseFromThrottle(
+        leftPercent: Int,
+        rightPercent: Int,
+        source: CommandSource,
+    ): Boolean {
+        val command = activeHeadingLockCommand ?: return false
+        if (!command.headingLockEnabled || !mutableUiState.value.headingLockEnabled) {
+            return false
+        }
+        val settings = mutableSettingsState.value
+        val basePercent = ((leftPercent + rightPercent) / 2).coerceIn(-100, 100)
+        activeHeadingLockCommand = command.copy(
+            source = source,
+            headingLockBaseThrottlePercent = coerceHeadingLockBasePercent(
+                percent = basePercent,
+                source = source,
+            ),
+            headingLockToleranceDegrees = settings.headingLockToleranceDegrees,
+            headingLockFullCorrectionDegrees = settings.headingLockFullCorrectionDegrees,
+            headingLockNeutralPivotMinDifferencePercent = settings.headingLockNeutralPivotMinDifferencePercent,
+            headingLockNeutralPivotMaxDifferencePercent = settings.headingLockNeutralPivotMaxDifferencePercent,
+            headingLockTargetOffsetDegrees = null,
+            voicePowerLimitPercent = settings.voicePowerLimitPercent,
+            leftEscReversed = settings.leftEscReversed,
+            rightEscReversed = settings.rightEscReversed,
+        )
+        return true
+    }
+
     private fun ControlCommand.asHeadingLockHeartbeat(): ControlCommand {
         return if (mode == ControlCommandMode.HeadingLock) {
             copy(headingLockTargetOffsetDegrees = null)
@@ -4232,7 +4511,7 @@ class ControlViewModel(application: Application) : AndroidViewModel(application)
         return when {
             route == null -> "自动导航拒绝：未找到路线"
             route.points.size < 2 -> "自动导航拒绝：路线至少需要 2 个航点"
-            state.connectionState != ConnectionState.Connected -> "自动导航拒绝：未连接 ESP32"
+            state.connectionState != ConnectionState.Connected -> "自动导航拒绝：未连接主控"
             !state.armed -> "自动导航拒绝：请先手动解锁"
             currentGpsPointOrNull() == null -> "自动导航拒绝：GPS 未定位"
             gpsSatelliteCount() < AUTO_NAVIGATION_MIN_SATELLITES -> "自动导航拒绝：GPS 卫星数不足"
@@ -4488,12 +4767,105 @@ class ControlViewModel(application: Application) : AndroidViewModel(application)
         }
     }
 
+    private fun startOtaReconnectLoop(forceRestart: Boolean = false) {
+        if (forceRestart) {
+            otaReconnectJob?.cancel()
+            otaReconnectJob = null
+        }
+        if (otaReconnectJob?.isActive == true) {
+            return
+        }
+        otaReconnectAttempt = 0
+        otaReconnectJob = viewModelScope.launch {
+            while (esp32OtaExclusive && esp32OtaAccepted) {
+                val targetVersion = pendingEsp32FirmwareVersion
+                val savedDevice = mutableSettingsState.value.savedDevice
+                if (savedDevice == null) {
+                    mutableUpdateState.update {
+                        it.copy(message = "主控 OTA 已完成，但没有已保存设备，无法自动重连验证版本")
+                    }
+                    return@launch
+                }
+
+                val connectionState = mutableUiState.value.connectionState
+                if (!otaReconnectSawDisconnect && connectionState == ConnectionState.Connected) {
+                    mutableUpdateState.update {
+                        it.copy(
+                            message = targetVersion?.let { target ->
+                                "主控 OTA 已接受，等待主控重启断开后每 3 秒自动重连验证 FW=$target"
+                            } ?: "主控 OTA 已接受，等待主控重启断开后每 3 秒自动重连确认版本",
+                        )
+                    }
+                } else if (connectionState == ConnectionState.Connected && transport != null) {
+                    mutableUpdateState.value.currentEsp32FirmwareVersion?.let { firmwareVersion ->
+                        handlePendingOtaFirmwareVerification(
+                            firmwareVersion = firmwareVersion,
+                            allowMismatch = false,
+                        )
+                    }
+                    if (esp32OtaExclusive && esp32OtaAccepted) {
+                        mutableUpdateState.update {
+                            it.copy(
+                                message = targetVersion?.let { target ->
+                                    "已连接 ${savedDevice.name}，正在读取主控固件版本以验证 FW=$target"
+                                } ?: "已连接 ${savedDevice.name}，正在读取主控固件版本",
+                            )
+                        }
+                        runCatching { transport?.sendRawLine("INFO?") }
+                    }
+                } else {
+                    otaReconnectAttempt += 1
+                    Log.i(TAG, "OTA reconnect attempt=$otaReconnectAttempt device=${savedDevice.name} address=${savedDevice.address}")
+                    runCatching { transport?.closeSilently() }
+                    transport = null
+                    bluetoothConnectJob?.cancel()
+                    telemetryJob?.cancel()
+                    trackLogJob?.cancel()
+                    trackLogSyncJob?.cancel()
+                    commandHeartbeatJob?.cancel()
+                    mutableUiState.update {
+                        it.copy(
+                            connectionState = ConnectionState.Disconnected,
+                            armed = false,
+                            leftThrottlePercent = 0,
+                            rightThrottlePercent = 0,
+                            commandSource = CommandSource.App,
+                            headingLockEnabled = false,
+                            selectedGear = ThrottleGear.Neutral,
+                            throttleTrimPercent = 0,
+                            statusMessage = "OTA 后第 $otaReconnectAttempt 次自动重连 ${savedDevice.name}",
+                        )
+                    }
+                    mutableUpdateState.update {
+                        it.copy(
+                            message = targetVersion?.let { target ->
+                                "第 $otaReconnectAttempt 次自动重连 ${savedDevice.name}，验证 FW=$target"
+                            } ?: "第 $otaReconnectAttempt 次自动重连 ${savedDevice.name}，确认固件版本",
+                        )
+                    }
+                    connectBluetooth(savedDevice)
+                }
+                delay(OTA_RECONNECT_INTERVAL_MS)
+            }
+        }
+    }
+
+    private fun stopOtaReconnectLoop() {
+        otaReconnectJob?.cancel()
+        otaReconnectJob = null
+        otaReconnectAttempt = 0
+        otaReconnectSawDisconnect = false
+    }
+
     private fun handleTransportError(error: Throwable) {
         val updateStateBeforeDisconnect = mutableUpdateState.value
         val otaMayBeRebooting =
-            updateStateBeforeDisconnect.message.contains("校验通过") ||
-                updateStateBeforeDisconnect.message.contains("正在重启") ||
-                updateStateBeforeDisconnect.message.contains("等待设备校验并重启")
+            esp32OtaAccepted &&
+                (
+                    updateStateBeforeDisconnect.message.contains("校验通过") ||
+                        updateStateBeforeDisconnect.message.contains("正在重启") ||
+                        updateStateBeforeDisconnect.message.contains("等待设备校验并重启")
+                    )
         transport = null
         telemetryJob?.cancel()
         commandHeartbeatJob?.cancel()
@@ -4522,15 +4894,20 @@ class ControlViewModel(application: Application) : AndroidViewModel(application)
         ) {
             if (!otaMayBeRebooting) {
                 esp32OtaExclusive = false
+                esp32OtaAccepted = false
                 pendingEsp32FirmwareVersion = null
+                stopOtaReconnectLoop()
+            } else {
+                otaReconnectSawDisconnect = true
+                startOtaReconnectLoop(forceRestart = true)
             }
             mutableUpdateState.update {
                 it.copy(
                     esp32Uploading = false,
                     message = if (otaMayBeRebooting) {
                         pendingEsp32FirmwareVersion?.let { target ->
-                            "蓝牙已断开，ESP32 可能已重启；请重新连接后验证 FW=$target"
-                        } ?: "蓝牙已断开，ESP32 可能已重启；请重新连接后确认固件状态"
+                            "蓝牙已断开，主控正在重启；每 3 秒自动重连验证 FW=$target"
+                        } ?: "蓝牙已断开，主控正在重启；每 3 秒自动重连确认固件版本"
                     } else {
                         "蓝牙 OTA 中断：${error.message ?: "未知错误"}"
                     },
@@ -4641,18 +5018,51 @@ class ControlViewModel(application: Application) : AndroidViewModel(application)
     private fun handleControllerInfoFields(fields: Map<String, String>) {
         val firmwareVersion = fields["FW"]?.takeIf { it.isNotBlank() } ?: return
         mutableUpdateState.update {
-            it.copy(currentEsp32FirmwareVersion = firmwareVersion)
+            it.copy(
+                currentEsp32FirmwareVersion = firmwareVersion,
+                esp32UpdateAvailable = isEsp32FirmwareUpdateAvailable(
+                    targetVersion = it.targetEsp32FirmwareVersion,
+                    currentVersion = firmwareVersion,
+                ) && it.firmwareDownloadUrl != null && it.firmwareManifestName != null,
+            )
         }
+        handlePendingOtaFirmwareVerification(firmwareVersion = firmwareVersion, allowMismatch = true)
+    }
 
+    private fun handlePendingOtaFirmwareVerification(firmwareVersion: String, allowMismatch: Boolean) {
         val targetVersion = pendingEsp32FirmwareVersion
         if (!esp32OtaExclusive) {
             return
         }
 
+        if (!esp32OtaAccepted) {
+            mutableUpdateState.update {
+                if (it.esp32Uploading) {
+                    it
+                } else {
+                    it.copy(message = "等待主控 OTA 完成；当前仍为 $firmwareVersion")
+                }
+            }
+            return
+        }
+
+        if (!otaReconnectSawDisconnect) {
+            mutableUpdateState.update {
+                it.copy(
+                    message = targetVersion?.let { target ->
+                        "主控固件校验通过；等待断开后每 3 秒自动重连验证 FW=$target"
+                    } ?: "主控固件校验通过；等待断开后每 3 秒自动重连确认版本",
+                )
+            }
+            return
+        }
+
         if (targetVersion == null) {
             esp32OtaExclusive = false
+            esp32OtaAccepted = false
+            stopOtaReconnectLoop()
             mutableUpdateState.update {
-                it.copy(message = "ESP32 已重连，当前固件 $firmwareVersion")
+                it.copy(message = "主控已重连，当前固件 $firmwareVersion")
             }
             startCommandHeartbeat()
             sendIdle()
@@ -4663,27 +5073,38 @@ class ControlViewModel(application: Application) : AndroidViewModel(application)
         if (sameVersion(firmwareVersion, targetVersion)) {
             pendingEsp32FirmwareVersion = null
             esp32OtaExclusive = false
+            esp32OtaAccepted = false
+            stopOtaReconnectLoop()
             mutableUpdateState.update {
                 it.copy(
                     esp32Uploading = false,
-                    message = "ESP32 固件已验证：$firmwareVersion",
+                    esp32UpdateAvailable = false,
+                    message = "主控固件已验证：$firmwareVersion",
                     progressText = "",
                 )
             }
             mutableUiState.update {
-                it.copy(statusMessage = "ESP32 固件已更新到 $firmwareVersion，系统保持锁定")
+                it.copy(statusMessage = "主控固件已更新到 $firmwareVersion，系统保持锁定")
             }
             startCommandHeartbeat()
             sendIdle()
             requestTrackLogSync()
             speakVoiceReply("主控固件已更新")
         } else {
+            if (!allowMismatch) {
+                mutableUpdateState.update {
+                    it.copy(message = "已重连主控，等待主控回报 FW=$targetVersion")
+                }
+                return
+            }
             pendingEsp32FirmwareVersion = null
             esp32OtaExclusive = false
+            esp32OtaAccepted = false
+            stopOtaReconnectLoop()
             mutableUpdateState.update {
                 it.copy(
                     esp32Uploading = false,
-                    message = "ESP32 固件版本验证失败：当前 $firmwareVersion，目标 $targetVersion",
+                    message = "主控固件版本验证失败：当前 $firmwareVersion，目标 $targetVersion",
                     progressText = "",
                 )
             }
@@ -4699,32 +5120,70 @@ class ControlViewModel(application: Application) : AndroidViewModel(application)
         when {
             line.startsWith("OTA;READY") -> {
                 mutableUpdateState.update {
-                    it.copy(message = "ESP32 已进入 OTA 接收模式")
+                    it.copy(message = "主控已进入 OTA 接收模式")
                 }
             }
             line.startsWith("OTA;PROGRESS=") -> {
                 mutableUpdateState.update {
-                    it.copy(message = "ESP32 正在写入固件", progressText = line.removePrefix("OTA;PROGRESS="))
+                    it.copy(message = "主控正在写入固件", progressText = line.removePrefix("OTA;PROGRESS="))
                 }
             }
             line.startsWith("OTA;OK") -> {
+                esp32OtaAccepted = true
+                startOtaReconnectLoop()
                 mutableUpdateState.update {
                     it.copy(
                         esp32Uploading = false,
                         message = pendingEsp32FirmwareVersion?.let { target ->
-                            "ESP32 固件校验通过，设备正在重启；重连后验证 FW=$target"
-                        } ?: "ESP32 固件校验通过，设备正在重启；请重连后确认版本",
+                            "主控固件校验通过，设备正在重启；每 3 秒自动重连验证 FW=$target"
+                        } ?: "主控固件校验通过，设备正在重启；每 3 秒自动重连确认版本",
+                        progressText = "",
+                    )
+                }
+            }
+            line.startsWith("OTA;REBOOTING") -> {
+                Log.i(TAG, "OTA rebooting event received; start reconnect loop")
+                esp32OtaAccepted = true
+                otaReconnectSawDisconnect = true
+                transport = null
+                bluetoothConnectJob?.cancel()
+                telemetryJob?.cancel()
+                trackLogJob?.cancel()
+                trackLogSyncJob?.cancel()
+                commandHeartbeatJob?.cancel()
+                mutableUiState.update {
+                    it.copy(
+                        connectionState = ConnectionState.Disconnected,
+                        armed = false,
+                        leftThrottlePercent = 0,
+                        rightThrottlePercent = 0,
+                        commandSource = CommandSource.App,
+                        headingLockEnabled = false,
+                        selectedGear = ThrottleGear.Neutral,
+                        throttleTrimPercent = 0,
+                        statusMessage = "主控 OTA 后蓝牙已断开，等待自动重连",
+                    )
+                }
+                startOtaReconnectLoop(forceRestart = true)
+                mutableUpdateState.update {
+                    it.copy(
+                        esp32Uploading = false,
+                        message = pendingEsp32FirmwareVersion?.let { target ->
+                            "主控正在重启；每 3 秒自动重连验证 FW=$target"
+                        } ?: "主控正在重启；每 3 秒自动重连确认固件版本",
                         progressText = "",
                     )
                 }
             }
             line.startsWith("OTA;ERR=") -> {
                 esp32OtaExclusive = false
+                esp32OtaAccepted = false
                 pendingEsp32FirmwareVersion = null
+                stopOtaReconnectLoop()
                 mutableUpdateState.update {
                     it.copy(
                         esp32Uploading = false,
-                        message = "ESP32 固件更新失败：${line.removePrefix("OTA;ERR=")}",
+                        message = "主控固件更新失败：${line.removePrefix("OTA;ERR=")}",
                         progressText = "",
                     )
                 }
@@ -4841,12 +5300,12 @@ class ControlViewModel(application: Application) : AndroidViewModel(application)
         val trackCount = fields["TRK_COUNT"] ?: info.count.toString()
 
         if (fix != "1") {
-            return "ESP32 没有新增有效轨迹：GPS 未定位，卫星 $satellites，天线 $antenna，缓存 $trackCount/${info.capacity}"
+            return "主控没有新增有效轨迹：GPS 未定位，卫星 $satellites，天线 $antenna，缓存 $trackCount/${info.capacity}"
         }
         if (info.count == 0) {
-            return "ESP32 轨迹缓存为空：GPS 已定位但还没有写入轨迹点"
+            return "主控轨迹缓存为空：GPS 已定位但还没有写入轨迹点"
         }
-        return "ESP32 暂无新轨迹点，缓存 $trackCount/${info.capacity}"
+        return "主控暂无新轨迹点，缓存 $trackCount/${info.capacity}"
     }
 
     private fun handleTrackLogEnd(nextSequence: Int) {
@@ -4862,7 +5321,7 @@ class ControlViewModel(application: Application) : AndroidViewModel(application)
 
     private fun sendTrackLogRead(nextTransport: ControlTransport, fromSequence: Int) {
         if (esp32OtaExclusive) {
-            refreshGpsTrackState("ESP32 OTA 进行中，暂不同步轨迹")
+            refreshGpsTrackState("主控 OTA 进行中，暂不同步轨迹")
             return
         }
         trackLogSyncJob?.cancel()
@@ -4914,7 +5373,7 @@ class ControlViewModel(application: Application) : AndroidViewModel(application)
         val hadAutonomousCommand = activeTurnCommand != null || activeHeadingLockCommand != null
         if (!hadAutonomousCommand) {
             mutableUiState.update {
-                it.copy(statusMessage = "ESP32 错误：${line.removePrefix("ERR;")}")
+                it.copy(statusMessage = "主控错误：${line.removePrefix("ERR;")}")
             }
             return
         }
@@ -4926,7 +5385,7 @@ class ControlViewModel(application: Application) : AndroidViewModel(application)
                 headingLockEnabled = false,
                 selectedGear = ThrottleGear.Neutral,
                 throttleTrimPercent = 0,
-                statusMessage = "ESP32 拒绝自主控制：${line.removePrefix("ERR;")}，已回到手动心跳",
+                statusMessage = "主控拒绝自主控制：${line.removePrefix("ERR;")}，已回到手动心跳",
             )
         }
         sendCurrentCommand()
@@ -5098,6 +5557,7 @@ class ControlViewModel(application: Application) : AndroidViewModel(application)
         private const val KEY_GITHUB_TOKEN = "github_token"
         private const val KEY_GEAR_PREFIX = "gear_percent_"
         private const val COMMAND_HEARTBEAT_MS = 100L
+        private const val OTA_RECONNECT_INTERVAL_MS = 3_000L
         private const val PHONE_HEADING_STALE_MS = 1_500L
         private const val YB_IMU_HEADING_STALE_MS = 500L
         private const val APP_TURN_TIMEOUT_MS = 8_000L
@@ -5279,6 +5739,14 @@ class ControlViewModel(application: Application) : AndroidViewModel(application)
             }
         }
         return false
+    }
+
+    private fun isEsp32FirmwareUpdateAvailable(targetVersion: String?, currentVersion: String?): Boolean {
+        if (targetVersion.isNullOrBlank() || currentVersion.isNullOrBlank()) {
+            return false
+        }
+        return !sameVersion(currentVersion, targetVersion) &&
+            isVersionGreaterThan(targetVersion, currentVersion)
     }
 
     private fun parseVersion(value: String): List<Int> {

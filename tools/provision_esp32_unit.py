@@ -70,7 +70,7 @@ def allocate_unit(data: dict, requested_id: int | None, note: str) -> int:
 
 
 def run_platformio(root: Path, unit_id: int, flash: bool, port: str | None) -> None:
-    cmd = ["pio", "run"]
+    cmd = ["pio", "run", "-e", "lolin32_lite"]
     if flash:
         cmd.extend(["-t", "upload"])
     if port:
@@ -90,7 +90,7 @@ def run_platformio(root: Path, unit_id: int, flash: bool, port: str | None) -> N
         subprocess.run(cmd, cwd=firmware_dir, env=env, check=True)
     finally:
         header_path.unlink(missing_ok=True)
-        subprocess.run(["pio", "run", "-t", "clean"], cwd=firmware_dir, env=env, check=False)
+        subprocess.run(["pio", "run", "-e", "lolin32_lite", "-t", "clean"], cwd=firmware_dir, env=env, check=False)
 
 
 def main() -> int:

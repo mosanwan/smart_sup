@@ -74,7 +74,8 @@ object VoiceCommandParser {
         "呀",
         "了",
     )
-    private val stopWords = listOf("停止", "停下", "急停", "锁定", "刹车", "停住", "制动")
+    private val lockWords = listOf("急停", "锁定", "锁主控", "刹车", "停住", "制动")
+    private val neutralWords = listOf("停止", "停下", "停", "空档", "空挡", "回空档", "回空挡", "挂空档", "挂空挡")
     private val forwardWords = listOf("前进", "向前", "往前")
     private val reverseWords = listOf("后退", "倒车", "倒退", "向后", "往后")
     private val fasterWords = listOf("快点", "快一点", "快一点点", "快一些", "再快点", "再快一点", "再快一点点", "加速", "速度快点", "稍微快点")
@@ -119,21 +120,21 @@ object VoiceCommandParser {
         CommandSpec(
             label = "停止声控",
             minScore = MIN_GATE_SCORE,
-            command = command(armed = false, left = 0, right = 0),
+            command = null,
             action = VoiceCommandAction.DisableVoiceControl,
             phrases = listOf("停止声控", "关闭声控", "暂停声控", "禁用声控"),
         ),
         CommandSpec(
-            label = "停止 / 锁定",
+            label = "锁定 / 急停",
             minScore = MIN_STOP_SCORE,
             command = command(armed = false, left = 0, right = 0),
-            phrases = stopWords,
+            phrases = lockWords,
         ),
         CommandSpec(
             label = "空档",
             minScore = MIN_MOVE_SCORE,
             command = command(armed = true, left = 0, right = 0),
-            phrases = listOf("空档", "空挡", "回空档", "回空挡", "挂空档", "挂空挡"),
+            phrases = neutralWords,
         ),
         CommandSpec(
             label = "快点",
@@ -325,8 +326,8 @@ object VoiceCommandParser {
 
         val hasCancelHoldHeading = cancelHoldHeadingWords.any { it in commandText }
         val hasHoldHeading = !hasCancelHoldHeading && holdHeadingWords.any { it in commandText }
-        val hasStop = !hasHoldHeading && !hasCancelHoldHeading && stopWords.any { it in commandText }
-        val hasNeutral = !hasStop && listOf("空档", "空挡").any { it in commandText }
+        val hasStop = !hasHoldHeading && !hasCancelHoldHeading && lockWords.any { it in commandText }
+        val hasNeutral = !hasStop && neutralWords.any { it in commandText }
         val hasForward = forwardWords.any { it in commandText }
         val hasReverse = reverseWords.any { it in commandText }
         val hasFaster = fasterWords.any { it in commandText }

@@ -8,6 +8,7 @@ data class UpdateUiState(
     val currentEsp32FirmwareVersion: String? = null,
     val targetEsp32FirmwareVersion: String? = null,
     val appUpdateAvailable: Boolean = false,
+    val esp32UpdateAvailable: Boolean = false,
     val appAssetName: String? = null,
     val firmwareAssetName: String? = null,
     val firmwareManifestName: String? = null,

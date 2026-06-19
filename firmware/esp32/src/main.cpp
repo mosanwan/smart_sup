@@ -55,11 +55,13 @@ constexpr uint16_t ESC_NEUTRAL_US = 1500;
 constexpr uint16_t ESC_FORWARD_US = 2000;
 constexpr uint16_t THROTTLE_RAMP_US_PER_TICK = 5;
 constexpr uint32_t CONTROL_TICK_MS = 20;
+constexpr uint32_t ESC_BOOT_NEUTRAL_HOLD_MS = 3000;
 constexpr uint32_t ARM_HOLD_MS = 1500;
 constexpr uint32_t BT_COMMAND_TIMEOUT_MS = 1000;
 constexpr uint32_t BT_STATUS_INTERVAL_MS = 1000;
 constexpr uint32_t BT_YB_IMU_STATUS_INTERVAL_MS = 100;
-constexpr uint32_t OTA_TIMEOUT_MS = 15000;
+constexpr uint32_t OTA_TIMEOUT_MS = 30000;
+constexpr uint32_t OTA_READ_COALESCE_MS = 20;
 constexpr uint32_t TURN_CONTROL_TIMEOUT_MS = 8000;
 constexpr uint8_t MIN_VOICE_POWER_LIMIT_PERCENT = 5;
 constexpr uint8_t MAX_VOICE_POWER_LIMIT_PERCENT = 100;
@@ -128,6 +130,8 @@ constexpr size_t BT_RX_BUFFER_SIZE = 192;
 constexpr size_t SERIAL_RX_BUFFER_SIZE = 96;
 constexpr size_t GPS_RX_BUFFER_SIZE = 128;
 constexpr size_t OTA_BUFFER_SIZE = 512;
+constexpr size_t OTA_MAX_CHUNK_SIZE = 1024;
+constexpr size_t OTA_PROGRESS_INTERVAL_BYTES = 16 * 1024;
 constexpr size_t BT_DEVICE_NAME_SIZE = 16;
 constexpr uint32_t GPS_BAUDS[] = {9600, 38400, 57600, 115200, 4800, 19200};
 constexpr uint32_t GPS_BAUD_SCAN_MS = 5000;
@@ -227,10 +231,22 @@ size_t serialRxLen = 0;
 char gpsRxBuffer[GPS_RX_BUFFER_SIZE] = {};
 size_t gpsRxLen = 0;
 bool otaInProgress = false;
+bool otaChunkedProtocol = false;
+bool otaChunkReceivingData = false;
 size_t otaExpectedBytes = 0;
 size_t otaWrittenBytes = 0;
+size_t otaChunkSize = OTA_MAX_CHUNK_SIZE;
+size_t otaChunkOffset = 0;
+size_t otaChunkLength = 0;
+size_t otaChunkReceived = 0;
+uint32_t otaChunkExpectedCrc = 0;
+uint32_t otaChunkRunningCrc = 0;
 uint32_t otaLastDataMs = 0;
 uint32_t otaLastProgressMs = 0;
+size_t otaLastProgressBytes = 0;
+char otaLineBuffer[BT_RX_BUFFER_SIZE] = {};
+size_t otaLineLen = 0;
+uint8_t otaChunkBuffer[OTA_MAX_CHUNK_SIZE] = {};
 bool nvsReady = false;
 uint16_t unitId = DEFAULT_UNIT_ID;
 char btDeviceName[BT_DEVICE_NAME_SIZE] = {};
@@ -451,6 +467,19 @@ uint32_t pulseUsToDuty(uint16_t pulseUs) {
 
 void writeEsc(uint8_t channel, uint16_t pulseUs) {
   ledcWrite(channel, pulseUsToDuty(pulseUs));
+}
+
+void holdEscNeutralDuringBoot() {
+  const uint32_t startedAt = millis();
+  leftPulseUs = ESC_NEUTRAL_US;
+  rightPulseUs = ESC_NEUTRAL_US;
+  Serial.print("Holding ESC neutral for boot arming window ms=");
+  Serial.println(ESC_BOOT_NEUTRAL_HOLD_MS);
+  while (millis() - startedAt < ESC_BOOT_NEUTRAL_HOLD_MS) {
+    writeEsc(LEFT_ESC_CHANNEL, ESC_NEUTRAL_US);
+    writeEsc(RIGHT_ESC_CHANNEL, ESC_NEUTRAL_US);
+    delay(CONTROL_TICK_MS);
+  }
 }
 
 uint16_t signedPercentToPulseUs(int8_t percent) {
@@ -2506,6 +2535,56 @@ bool parseBoolToken(const char* token, const char* prefix, bool& outValue) {
   return false;
 }
 
+uint32_t updateCrc32(uint32_t crc, const uint8_t* data, size_t length) {
+  for (size_t i = 0; i < length; ++i) {
+    crc ^= data[i];
+    for (uint8_t bit = 0; bit < 8; ++bit) {
+      const uint32_t mask = static_cast<uint32_t>(-(static_cast<int32_t>(crc & 1)));
+      crc = (crc >> 1) ^ (0xEDB88320UL & mask);
+    }
+  }
+  return crc;
+}
+
+uint32_t finishCrc32(uint32_t crc) {
+  return crc ^ 0xFFFFFFFFUL;
+}
+
+void resetOtaTransferState() {
+  otaInProgress = false;
+  otaChunkedProtocol = false;
+  otaChunkReceivingData = false;
+  otaExpectedBytes = 0;
+  otaWrittenBytes = 0;
+  otaChunkSize = OTA_MAX_CHUNK_SIZE;
+  otaChunkOffset = 0;
+  otaChunkLength = 0;
+  otaChunkReceived = 0;
+  otaChunkExpectedCrc = 0;
+  otaChunkRunningCrc = 0;
+  otaLineLen = 0;
+  otaLastDataMs = 0;
+  otaLastProgressMs = 0;
+  otaLastProgressBytes = 0;
+}
+
+void abortOtaWithError(const char* errorCode) {
+  Update.abort();
+  resetOtaTransferState();
+  forceNeutralAndDisarm();
+  SerialBT.print("OTA;ERR=");
+  SerialBT.println(errorCode);
+  Serial.print("OTA aborted: ");
+  Serial.println(errorCode);
+}
+
+void printOtaNack(size_t offset, const char* errorCode) {
+  SerialBT.print("OTA;NACK;OFFSET=");
+  SerialBT.print(offset);
+  SerialBT.print(";ERR=");
+  SerialBT.println(errorCode);
+}
+
 void printIdentity(Print& output) {
   output.print("ID;VALUE=");
   printPaddedUnitId(output, unitId);
@@ -2554,7 +2633,9 @@ bool applyIdentityLine(char* line, Print& response) {
 void beginOta(char* line) {
   bool sawSize = false;
   bool sawMd5 = false;
+  bool requestChunkedProtocol = false;
   size_t nextSize = 0;
+  uint16_t nextChunkSize = OTA_MAX_CHUNK_SIZE;
   char nextMd5[33] = {};
 
   char* token = strtok(line, ";");
@@ -2565,6 +2646,10 @@ void beginOta(char* line) {
       sawSize = true;
     } else if (parseMd5Token(token, "MD5=", nextMd5, sizeof(nextMd5))) {
       sawMd5 = true;
+    } else if (strcmp(token, "PROTO=2") == 0) {
+      requestChunkedProtocol = true;
+    } else if (parseUnsignedToken(token, "CHUNK=", 128, OTA_MAX_CHUNK_SIZE, nextChunkSize)) {
+      // Optional requested chunk size for protocol 2.
     }
     token = strtok(nullptr, ";");
   }
@@ -2593,16 +2678,31 @@ void beginOta(char* line) {
   }
 
   otaInProgress = true;
+  otaChunkedProtocol = requestChunkedProtocol;
+  otaChunkReceivingData = false;
   otaExpectedBytes = nextSize;
   otaWrittenBytes = 0;
+  otaChunkSize = nextChunkSize;
+  otaChunkOffset = 0;
+  otaChunkLength = 0;
+  otaChunkReceived = 0;
+  otaChunkExpectedCrc = 0;
+  otaChunkRunningCrc = 0;
   otaLastDataMs = millis();
-  otaLastProgressMs = 0;
+  otaLastProgressMs = otaLastDataMs;
+  otaLastProgressBytes = 0;
+  otaLineLen = 0;
   btRxLen = 0;
 
   Serial.print("OTA begin size=");
   Serial.println(otaExpectedBytes);
   SerialBT.print("OTA;READY;SIZE=");
-  SerialBT.println(otaExpectedBytes);
+  SerialBT.print(otaExpectedBytes);
+  if (otaChunkedProtocol) {
+    SerialBT.print(";PROTO=2;CHUNK=");
+    SerialBT.print(otaChunkSize);
+  }
+  SerialBT.println();
 }
 
 void finishOta() {
@@ -2611,30 +2711,44 @@ void finishOta() {
     SerialBT.println(Update.getError());
     Serial.print("OTA end failed code=");
     Serial.println(Update.getError());
-    otaInProgress = false;
+    resetOtaTransferState();
     return;
   }
 
-  SerialBT.print("OTA;OK;BYTES=");
-  SerialBT.println(otaWrittenBytes);
+  const size_t completedBytes = otaWrittenBytes;
+  resetOtaTransferState();
+  for (uint8_t i = 0; i < 3; ++i) {
+    SerialBT.print("OTA;OK;BYTES=");
+    SerialBT.println(completedBytes);
+    delay(150);
+  }
   Serial.println("OTA complete; rebooting");
-  delay(500);
+  delay(700);
   ESP.restart();
 }
 
-void processOtaBytes() {
+void processOtaRawBytes() {
   uint8_t buffer[OTA_BUFFER_SIZE];
-  while (otaInProgress && SerialBT.available() > 0 && otaWrittenBytes < otaExpectedBytes) {
+  while (otaInProgress && otaWrittenBytes < otaExpectedBytes) {
     const int availableBytes = SerialBT.available();
     if (availableBytes <= 0) {
       break;
     }
     const size_t remaining = otaExpectedBytes - otaWrittenBytes;
-    const size_t toRead = min(
-      remaining,
-      min(sizeof(buffer), static_cast<size_t>(availableBytes))
-    );
-    const size_t readBytes = SerialBT.readBytes(buffer, toRead);
+    const size_t targetBytes = min(remaining, sizeof(buffer));
+    size_t readBytes = 0;
+    const uint32_t readStartMs = millis();
+    while (readBytes < targetBytes) {
+      const int nextByte = SerialBT.read();
+      if (nextByte >= 0) {
+        buffer[readBytes++] = static_cast<uint8_t>(nextByte);
+        continue;
+      }
+      if (millis() - readStartMs >= OTA_READ_COALESCE_MS) {
+        break;
+      }
+      delay(1);
+    }
     if (readBytes == 0) {
       break;
     }
@@ -2644,17 +2758,21 @@ void processOtaBytes() {
     otaLastDataMs = millis();
 
     if (written != readBytes) {
-      Update.abort();
-      otaInProgress = false;
+      const uint8_t error = Update.getError();
+      resetOtaTransferState();
+      forceNeutralAndDisarm();
       SerialBT.print("OTA;ERR=WRITE_FAILED;CODE=");
-      SerialBT.println(Update.getError());
+      SerialBT.println(error);
       Serial.println("OTA write failed");
       return;
     }
 
     const uint32_t now = millis();
-    if (now - otaLastProgressMs >= 1000 || otaWrittenBytes == otaExpectedBytes) {
+    if (now - otaLastProgressMs >= 1000 ||
+        otaWrittenBytes - otaLastProgressBytes >= OTA_PROGRESS_INTERVAL_BYTES ||
+        otaWrittenBytes == otaExpectedBytes) {
       otaLastProgressMs = now;
+      otaLastProgressBytes = otaWrittenBytes;
       SerialBT.print("OTA;PROGRESS=");
       SerialBT.print(otaWrittenBytes);
       SerialBT.print("/");
@@ -2663,8 +2781,174 @@ void processOtaBytes() {
   }
 
   if (otaInProgress && otaWrittenBytes == otaExpectedBytes) {
-    otaInProgress = false;
     finishOta();
+  }
+}
+
+void beginOtaChunk(char* line) {
+  bool sawOffset = false;
+  bool sawLength = false;
+  bool sawCrc = false;
+  uint32_t nextOffset = 0;
+  uint32_t nextLength = 0;
+  uint32_t nextCrc = 0;
+  bool badToken = false;
+
+  char* token = strtok(line, ";");
+  while (token != nullptr) {
+    if (strcmp(token, "OTA_CHUNK") == 0) {
+      // Header marker.
+    } else if (parseUint32Token(token, "OFFSET=", 0, 0xFFFFFFFFUL, nextOffset)) {
+      sawOffset = true;
+    } else if (parseUint32Token(token, "LEN=", 1, OTA_MAX_CHUNK_SIZE, nextLength)) {
+      sawLength = true;
+    } else if (parseUint32Token(token, "CRC=", 0, 0xFFFFFFFFUL, nextCrc)) {
+      sawCrc = true;
+    } else {
+      badToken = true;
+    }
+    token = strtok(nullptr, ";");
+  }
+
+  if (!sawOffset || !sawLength || !sawCrc || badToken) {
+    printOtaNack(otaWrittenBytes, "BAD_CHUNK_HEADER");
+    return;
+  }
+  if (nextOffset != otaWrittenBytes) {
+    printOtaNack(otaWrittenBytes, "BAD_CHUNK_OFFSET");
+    return;
+  }
+  if (nextLength > otaChunkSize || nextLength > otaExpectedBytes - otaWrittenBytes) {
+    printOtaNack(otaWrittenBytes, "BAD_CHUNK_LENGTH");
+    return;
+  }
+
+  otaChunkOffset = nextOffset;
+  otaChunkLength = nextLength;
+  otaChunkReceived = 0;
+  otaChunkExpectedCrc = nextCrc;
+  otaChunkRunningCrc = 0xFFFFFFFFUL;
+  otaChunkReceivingData = true;
+  otaLastDataMs = millis();
+}
+
+void commitOtaChunk() {
+  const uint32_t actualCrc = finishCrc32(otaChunkRunningCrc);
+  if (actualCrc != otaChunkExpectedCrc) {
+    otaChunkReceivingData = false;
+    otaChunkReceived = 0;
+    printOtaNack(otaWrittenBytes, "BAD_CHUNK_CRC");
+    return;
+  }
+
+  const size_t written = Update.write(otaChunkBuffer, otaChunkLength);
+  if (written != otaChunkLength) {
+    const uint8_t error = Update.getError();
+    resetOtaTransferState();
+    forceNeutralAndDisarm();
+    SerialBT.print("OTA;ERR=WRITE_FAILED;CODE=");
+    SerialBT.println(error);
+    Serial.println("OTA chunk write failed");
+    return;
+  }
+
+  otaWrittenBytes += written;
+  otaLastDataMs = millis();
+  otaChunkReceivingData = false;
+  otaChunkOffset = 0;
+  otaChunkLength = 0;
+  otaChunkReceived = 0;
+
+  SerialBT.print("OTA;ACK;OFFSET=");
+  SerialBT.print(otaWrittenBytes);
+  SerialBT.print(";CRC=");
+  SerialBT.println(actualCrc);
+
+  const uint32_t now = millis();
+  if (now - otaLastProgressMs >= 1000 ||
+      otaWrittenBytes - otaLastProgressBytes >= OTA_PROGRESS_INTERVAL_BYTES ||
+      otaWrittenBytes == otaExpectedBytes) {
+    otaLastProgressMs = now;
+    otaLastProgressBytes = otaWrittenBytes;
+    SerialBT.print("OTA;PROGRESS=");
+    SerialBT.print(otaWrittenBytes);
+    SerialBT.print("/");
+    SerialBT.println(otaExpectedBytes);
+  }
+
+  if (otaWrittenBytes == otaExpectedBytes) {
+    finishOta();
+  }
+}
+
+void processOtaChunkedBytes() {
+  while (otaInProgress && otaChunkedProtocol && SerialBT.available() > 0) {
+    if (!otaChunkReceivingData) {
+      const int nextByte = SerialBT.read();
+      if (nextByte < 0) {
+        break;
+      }
+      const char next = static_cast<char>(nextByte);
+      if (next == '\r') {
+        continue;
+      }
+      if (next == '\n') {
+        otaLineBuffer[otaLineLen] = '\0';
+        if (otaLineLen > 0) {
+          beginOtaChunk(otaLineBuffer);
+          if (!otaInProgress) {
+            return;
+          }
+        }
+        otaLineLen = 0;
+        continue;
+      }
+      if (otaLineLen < sizeof(otaLineBuffer) - 1) {
+        otaLineBuffer[otaLineLen++] = next;
+      } else {
+        abortOtaWithError("CHUNK_HEADER_TOO_LONG");
+        return;
+      }
+      continue;
+    }
+
+    const int availableBytes = SerialBT.available();
+    if (availableBytes <= 0) {
+      break;
+    }
+    const size_t remaining = otaChunkLength - otaChunkReceived;
+    const size_t readTarget = min(remaining, static_cast<size_t>(availableBytes));
+    const size_t crcStart = otaChunkReceived;
+    size_t actualRead = 0;
+    for (size_t i = 0; i < readTarget; ++i) {
+      const int nextByte = SerialBT.read();
+      if (nextByte < 0) {
+        break;
+      }
+      otaChunkBuffer[otaChunkReceived++] = static_cast<uint8_t>(nextByte);
+      actualRead += 1;
+    }
+    if (actualRead == 0) {
+      break;
+    }
+    otaChunkRunningCrc = updateCrc32(
+      otaChunkRunningCrc,
+      otaChunkBuffer + crcStart,
+      actualRead
+    );
+    otaLastDataMs = millis();
+
+    if (otaChunkReceived == otaChunkLength) {
+      commitOtaChunk();
+    }
+  }
+}
+
+void processOtaBytes() {
+  if (otaChunkedProtocol) {
+    processOtaChunkedBytes();
+  } else {
+    processOtaRawBytes();
   }
 }
 
@@ -2673,11 +2957,7 @@ void handleOtaTimeout(uint32_t now) {
     return;
   }
 
-  Update.abort();
-  otaInProgress = false;
-  forceNeutralAndDisarm();
-  SerialBT.println("OTA;ERR=TIMEOUT");
-  Serial.println("OTA timeout; aborted");
+  abortOtaWithError("TIMEOUT");
 }
 
 void applyTurnAngleCommand(
@@ -3740,6 +4020,7 @@ void setup() {
 
   writeEsc(LEFT_ESC_CHANNEL, ESC_NEUTRAL_US);
   writeEsc(RIGHT_ESC_CHANNEL, ESC_NEUTRAL_US);
+  holdEscNeutralDuringBoot();
   setupImu();
   setupGps();
   setupTrackLog();

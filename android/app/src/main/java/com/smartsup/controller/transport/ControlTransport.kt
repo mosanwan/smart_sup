@@ -11,6 +11,7 @@ interface ControlTransport {
 
     suspend fun connect()
     suspend fun disconnect()
+    suspend fun closeSilently()
     suspend fun send(command: ControlCommand)
     suspend fun sendRawLine(line: String)
     suspend fun uploadFirmware(

@@ -92,10 +92,10 @@ Android AudioRecord
 
 | tool name | 允许参数 | 说明 |
 | --- | --- | --- |
-| `sup_stop` | `reason` | 停止/空挡，只把左右推进器归零，保持当前主控解锁状态，不提供锁主控能力 |
-| `sup_set_gear` | `gear`、`reason` | 固定档位：`forward_1..4`、`reverse_1..3`、`neutral` |
+| `sup_stop` | `reason` | 停止/空挡，只把基础推进归零，保持当前主控解锁状态，不提供锁主控能力；航向锁定中只把锁航基础油门设为 `0%`，不取消锁航 |
+| `sup_set_gear` | `gear`、`reason` | 固定档位：`forward_1..4`、`reverse_1..3`、`neutral`；航向锁定中只更新锁航基础油门，不取消锁航 |
 | `sup_pivot_turn` | `direction`、`reason` | 原地掉头；`left` 或 `right`。Android 内部先切空挡并等待 `1s`，再用空挡航向锁定执行约 180 度掉头 |
-| `sup_set_limited_power` | `left_percent`、`right_percent`、`reason` | 仅用于用户明确要求左右推进器百分比；受声控功率限制和 ESP32 二次限幅 |
+| `sup_set_limited_power` | `left_percent`、`right_percent`、`reason` | 仅用于用户明确要求左右推进器百分比；航向锁定中只更新锁航基础油门，不取消锁航；受声控功率限制和 ESP32 二次限幅 |
 | `sup_adjust_heading_target` | `delta_deg`、`base_power_percent`、`duration_ms`、`reason` | 相对角度转向，只用于“左转/右转 X 度” |
 | `sup_set_heading_target` | `target_heading_deg`、`base_power_percent`、`reason` | 设置绝对目标航向并持续进入航向锁定 |
 | `sup_cancel_heading_lock` | `reason` | 只取消航向锁定，不解锁推进、不关闭保护 |
@@ -204,7 +204,7 @@ tools/prepare_qwen_asr_model.sh
 
 | 语音意图 | 示例说法 | 控制行为 |
 | --- | --- | --- |
-| 停止/空档 | `停止`、`停下`、`空档`、`空挡`、`回空档` | 保持当前主控解锁状态，把左右目标设为 `0%` |
+| 停止/空档 | `停止`、`停下`、`空档`、`空挡`、`回空档` | 保持当前主控解锁状态，把基础推进设为 `0%`；航向锁定中不取消锁航 |
 | 前进一档 | `前进1`、`前进一档`、`慢速前进` | 低速前进 |
 | 前进二档 | `前进2`、`前进二档` | 受语音最大油门限制的前进 |
 | 前进三档 | `前进三档`、`前进3档` | 使用设置页三档目标，继续受语音最大油门限制 |
@@ -256,7 +256,7 @@ tools/prepare_qwen_asr_model.sh
 
 屏幕停止按钮、硬件急停和 ESP32 失联保护不受上述限幅限制，任何状态下都应立即回到空闲油门。云端语音 Agent 不提供锁主控、硬件急停或关闭保护能力；普通语音 `停止` 只作为辅助空挡入口。网络或实时会话异常时，用户必须仍能通过本地按钮、硬件急停或遥控器停止。
 
-实时 AI 的普通档位、左右推进百分比和空挡命令由 Android App 完成权限检查和限幅后，按普通 App 推进心跳下发给 ESP32。这样 AI 设置 `-40%` 与手动设置 `-40%` 使用同一条实际推进路径；AI 仍不得解锁系统。
+实时 AI 的普通档位、左右推进百分比和空挡命令由 Android App 完成权限检查和限幅后，按普通 App 推进心跳下发给 ESP32。这样 AI 设置 `-40%` 与手动设置 `-40%` 使用同一条实际推进路径；航向锁定中这些命令只更新锁航基础油门，不取消锁航；AI 仍不得解锁系统。
 
 `停止声控` 是语音门控命令，不等同于普通 `停止`：执行后 Android 关闭或暂停实时语音会话；恢复需要用户在 App 中重新开启实时语音或按住说话。
 

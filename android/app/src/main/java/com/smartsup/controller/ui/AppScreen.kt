@@ -216,7 +216,6 @@ fun AppScreen(viewModel: ControlViewModel) {
                 onCheckUpdates = viewModel::checkForUpdates,
                 onInstallAppUpdate = viewModel::installLatestAppUpdate,
                 onUpdateEsp32FromGitHub = viewModel::downloadAndUploadLatestEsp32Firmware,
-                onUploadLocalEsp32Firmware = viewModel::uploadLocalEsp32Firmware,
             )
         }
     }

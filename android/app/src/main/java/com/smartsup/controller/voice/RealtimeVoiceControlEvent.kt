@@ -63,7 +63,7 @@ sealed interface RealtimeVoiceControlEvent {
                 .put(
                     functionTool(
                         name = TOOL_STOP,
-                        description = "停/停止/停下/空档/空挡。只把左右推进器归零，保持当前主控解锁状态，不锁定主控",
+                        description = "停/停止/停下/空档/空挡。只把基础推进归零，保持当前主控解锁状态，不锁定主控；如果航向锁定已开启，只把锁航基础油门设为0，不取消锁航",
                         properties = JSONObject()
                             .put("reason", stringProperty("原因")),
                         required = JSONArray().put("reason"),
@@ -72,7 +72,7 @@ sealed interface RealtimeVoiceControlEvent {
                 .put(
                     functionTool(
                         name = TOOL_SET_GEAR,
-                        description = "设置固定档位。前进1/前进一档=forward_1，前进2=forward_2，前进3=forward_3，前进4=forward_4，后退/后退1/倒车=reverse_1，后退2=reverse_2，后退3=reverse_3，空档/停止=neutral",
+                        description = "设置固定档位。前进1/前进一档=forward_1，前进2=forward_2，前进3=forward_3，前进4=forward_4，后退/后退1/倒车=reverse_1，后退2=reverse_2，后退3=reverse_3，空档/停止=neutral；如果航向锁定已开启，只更新锁航基础油门，不取消锁航",
                         properties = JSONObject()
                             .put("gear", enumProperty("档位", GEAR_VALUES))
                             .put("reason", stringProperty("原因")),
@@ -96,7 +96,7 @@ sealed interface RealtimeVoiceControlEvent {
                 .put(
                     functionTool(
                         name = TOOL_SET_LIMITED_POWER,
-                        description = "直接设置左右推进百分比。仅用于用户明确要求左右推进器百分比；前进为正，后退为负；不需要持续时间",
+                        description = "直接设置左右推进百分比。仅用于用户明确要求左右推进器百分比；前进为正，后退为负；不需要持续时间；如果航向锁定已开启，只更新锁航基础油门，不取消锁航",
                         properties = JSONObject()
                             .put("left_percent", numberProperty("左推进百分比，-100到100"))
                             .put("right_percent", numberProperty("右推进百分比，-100到100"))

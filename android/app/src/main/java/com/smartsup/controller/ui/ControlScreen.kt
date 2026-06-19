@@ -625,7 +625,7 @@ private fun CenterControlPanel(
                 modifier = Modifier.padding(12.dp),
                 verticalArrangement = Arrangement.spacedBy(7.dp),
             ) {
-                CompactInfoRow("ESP32 IMU", state.ybImuModuleText())
+                CompactInfoRow("主控 IMU", state.ybImuModuleText())
                 CompactInfoRow("IMU 航向", state.ybHeadingText())
                 CompactInfoRow("横滚 / 俯仰", state.ybRollPitchText())
                 CompactInfoRow("Z 角速度", state.ybGyroZText())
@@ -1106,7 +1106,7 @@ private fun ArmToggleButton(
                     fontWeight = FontWeight.SemiBold,
                 )
                 Text(
-                    if (state.connectionState == ConnectionState.Connected) "点击右侧图标切换" else "连接 ESP32 后可解锁",
+                    if (state.connectionState == ConnectionState.Connected) "点击右侧图标切换" else "连接主控后可解锁",
                     style = MaterialTheme.typography.labelSmall,
                     color = MaterialTheme.colorScheme.onSurfaceVariant,
                 )

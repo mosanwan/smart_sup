@@ -924,7 +924,7 @@ private fun TrackLibraryDialog(
         text = {
             if (tracks.isEmpty()) {
                 Text(
-                    "手机本地还没有轨迹。连接 ESP32 后先同步轨迹缓存。",
+                    "手机本地还没有轨迹。连接主控后先同步轨迹缓存。",
                     style = MaterialTheme.typography.bodyMedium,
                     color = MaterialTheme.colorScheme.onSurfaceVariant,
                 )

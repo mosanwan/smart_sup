@@ -87,6 +87,10 @@ class MockControlTransport : ControlTransport {
         telemetryState.value = Telemetry(controllerMessage = "已断开，推进输出保持空闲")
     }
 
+    override suspend fun closeSilently() {
+        telemetryState.value = Telemetry(controllerMessage = "已静默断开模拟链路")
+    }
+
     override suspend fun send(command: ControlCommand) {
         telemetryState.value = telemetryState.value.copy(
             controllerMessage = when {

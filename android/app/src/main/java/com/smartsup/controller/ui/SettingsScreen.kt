@@ -11,8 +11,6 @@ import androidx.compose.foundation.layout.size
 import androidx.compose.foundation.rememberScrollState
 import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.foundation.verticalScroll
-import androidx.activity.compose.rememberLauncherForActivityResult
-import androidx.activity.result.contract.ActivityResultContracts
 import androidx.compose.material3.Card
 import androidx.compose.material3.CardDefaults
 import androidx.compose.material3.DropdownMenuItem
@@ -33,7 +31,6 @@ import androidx.compose.material.icons.outlined.Settings
 import androidx.compose.material.icons.outlined.Speed
 import androidx.compose.material.icons.outlined.SystemUpdate
 import androidx.compose.material.icons.outlined.Tune
-import androidx.compose.material.icons.outlined.UploadFile
 import androidx.compose.material3.Icon
 import androidx.compose.material3.MaterialTheme
 import androidx.compose.material3.OutlinedTextField
@@ -124,16 +121,7 @@ fun SettingsScreen(
     onCheckUpdates: () -> Unit,
     onInstallAppUpdate: () -> Unit,
     onUpdateEsp32FromGitHub: () -> Unit,
-    onUploadLocalEsp32Firmware: (android.net.Uri) -> Unit,
 ) {
-    val firmwarePicker = rememberLauncherForActivityResult(
-        contract = ActivityResultContracts.OpenDocument(),
-    ) { uri ->
-        if (uri != null) {
-            onUploadLocalEsp32Firmware(uri)
-        }
-    }
-
     Column(
         modifier = modifier
             .fillMaxSize()
@@ -157,15 +145,6 @@ fun SettingsScreen(
             onCheckUpdates = onCheckUpdates,
             onInstallAppUpdate = onInstallAppUpdate,
             onUpdateEsp32FromGitHub = onUpdateEsp32FromGitHub,
-            onPickLocalFirmware = {
-                firmwarePicker.launch(
-                    arrayOf(
-                        "application/octet-stream",
-                        "application/macbinary",
-                        "*/*",
-                    ),
-                )
-            },
         )
 
         SafetySettingsCard(
@@ -321,7 +300,7 @@ private fun BluetoothCard(
             verticalArrangement = Arrangement.spacedBy(10.dp),
         ) {
             SettingsSectionHeader(
-                title = "ESP32 经典蓝牙",
+                title = "主控蓝牙",
                 icon = Icons.Outlined.Bluetooth,
                 color = Color(0xFF1565C0),
             )
@@ -371,7 +350,7 @@ private fun BluetoothCard(
             if (controlState.connectionState != ConnectionState.Disconnected) {
                 SettingsActionButton(
                     onClick = onDisconnect,
-                    text = "断开 ESP32",
+                    text = "断开主控",
                     icon = Icons.Outlined.LinkOff,
                     color = Color(0xFFC62828),
                     modifier = Modifier.fillMaxWidth(),
@@ -407,9 +386,9 @@ private fun BluetoothCard(
             } else {
                 Text(
                     if (settingsState.discovering) {
-                        "正在扫描附近名称以 ${settingsState.deviceNamePrefix} 开头的 ESP32..."
+                        "正在扫描附近名称以 ${settingsState.deviceNamePrefix} 开头的主控..."
                     } else {
-                        "点击“扫描 SmartSUP 设备”在 App 内发现 ESP32。"
+                        "点击“扫描 SmartSUP 设备”在 App 内发现主控。"
                     },
                     style = MaterialTheme.typography.bodyMedium,
                 )
@@ -471,9 +450,14 @@ private fun UpdateSettingsCard(
     onCheckUpdates: () -> Unit,
     onInstallAppUpdate: () -> Unit,
     onUpdateEsp32FromGitHub: () -> Unit,
-    onPickLocalFirmware: () -> Unit,
 ) {
     val busy = updateState.checking || updateState.downloading || updateState.esp32Uploading
+    val showAppUpdate = updateState.appUpdateAvailable && updateState.appDownloadUrl != null
+    val showEsp32Update = updateState.esp32UpdateAvailable &&
+        updateState.firmwareDownloadUrl != null &&
+        updateState.firmwareManifestName != null
+    val showTargetEsp32 = updateState.targetEsp32FirmwareVersion != null &&
+        (showEsp32Update || updateState.esp32Uploading)
     Card(
         colors = CardDefaults.cardColors(containerColor = MaterialTheme.colorScheme.surface),
         modifier = Modifier.fillMaxWidth(),
@@ -488,18 +472,11 @@ private fun UpdateSettingsCard(
                 color = Color(0xFFE65100),
             )
             SettingsRow("当前 App", BuildConfig.VERSION_NAME)
-            SettingsRow("当前 ESP32", updateState.currentEsp32FirmwareVersion ?: "--")
-            SettingsRow("GitHub 最新", updateState.latestVersionName ?: "--")
-            SettingsRow("目标 ESP32", updateState.targetEsp32FirmwareVersion ?: "--")
-            SettingsRow("App 产物", updateState.appAssetName ?: "--")
-            SettingsRow("ESP32 固件", updateState.firmwareAssetName ?: "--")
-            SettingsRow("发布清单", updateState.firmwareManifestName ?: "--")
-            SettingsRow("更新源", "GitHub Public Release")
-            Text(
-                "当前仓库已公开，App 检查更新不需要 Token。",
-                style = MaterialTheme.typography.bodySmall,
-                color = MaterialTheme.colorScheme.onSurfaceVariant,
-            )
+            SettingsRow("当前主控", updateState.currentEsp32FirmwareVersion ?: "--")
+            updateState.latestVersionName?.let { SettingsRow("最新 App", it) }
+            if (showTargetEsp32) {
+                SettingsRow("目标主控", updateState.targetEsp32FirmwareVersion ?: "--")
+            }
             Text(updateState.message, color = MaterialTheme.colorScheme.primary)
             if (updateState.progressText.isNotBlank()) {
                 Text(updateState.progressText, style = MaterialTheme.typography.bodySmall)
@@ -508,41 +485,33 @@ private fun UpdateSettingsCard(
             SettingsActionButton(
                 onClick = onCheckUpdates,
                 enabled = !busy,
-                text = if (updateState.checking) "正在检查..." else "检查 GitHub 更新",
+                text = if (updateState.checking) "正在检查..." else "检查更新",
                 icon = Icons.Outlined.Refresh,
                 color = Color(0xFF1565C0),
                 modifier = Modifier.fillMaxWidth(),
             )
 
-            SettingsActionButton(
-                onClick = onInstallAppUpdate,
-                enabled = !busy && updateState.appUpdateAvailable && updateState.appDownloadUrl != null,
-                text = "下载并安装 App 更新",
-                icon = Icons.Outlined.Download,
-                color = Color(0xFF2E7D32),
-                modifier = Modifier.fillMaxWidth(),
-            )
+            if (showAppUpdate) {
+                SettingsActionButton(
+                    onClick = onInstallAppUpdate,
+                    enabled = !busy,
+                    text = "下载并安装 App 更新",
+                    icon = Icons.Outlined.Download,
+                    color = Color(0xFF2E7D32),
+                    modifier = Modifier.fillMaxWidth(),
+                )
+            }
 
-            SettingsActionButton(
-                onClick = onUpdateEsp32FromGitHub,
-                enabled = !busy &&
-                    controlState.connectionState == ConnectionState.Connected &&
-                    updateState.firmwareDownloadUrl != null &&
-                    updateState.firmwareManifestName != null,
-                text = "从 GitHub 更新 ESP32 固件",
-                icon = Icons.Outlined.SystemUpdate,
-                color = Color(0xFFE65100),
-                modifier = Modifier.fillMaxWidth(),
-            )
-
-            SettingsActionButton(
-                onClick = onPickLocalFirmware,
-                enabled = !busy && controlState.connectionState == ConnectionState.Connected,
-                text = "选择本地 ESP32 固件 .bin",
-                icon = Icons.Outlined.UploadFile,
-                color = Color(0xFF546E7A),
-                modifier = Modifier.fillMaxWidth(),
-            )
+            if (showEsp32Update) {
+                SettingsActionButton(
+                    onClick = onUpdateEsp32FromGitHub,
+                    enabled = !busy && controlState.connectionState == ConnectionState.Connected,
+                    text = "更新主控固件",
+                    icon = Icons.Outlined.SystemUpdate,
+                    color = Color(0xFFE65100),
+                    modifier = Modifier.fillMaxWidth(),
+                )
+            }
         }
     }
 }
@@ -578,7 +547,7 @@ private fun SafetySettingsCard(
                 color = Color(0xFFC62828),
             )
             SwitchRow(
-                label = "启动后自动连接已保存 ESP32",
+                label = "启动后自动连接已保存主控",
                 checked = settingsState.autoReconnect,
                 onCheckedChange = onAutoReconnectChange,
             )
@@ -598,7 +567,7 @@ private fun SafetySettingsCard(
                 onCheckedChange = onRightEscReversedChange,
             )
             SwitchRow(
-                label = "航向锁定使用 ESP32 IMU",
+                label = "航向锁定使用主控 IMU",
                 checked = !settingsState.usePhoneHeading,
                 onCheckedChange = { useEsp32Imu -> onUsePhoneHeadingChange(!useEsp32Imu) },
             )
@@ -776,7 +745,7 @@ private fun PhoneHeadingSettingsCard(
             SettingsRow("连接", connectionText(controlState.connectionState))
             SettingsRow(
                 "当前来源",
-                if (settingsState.usePhoneHeading) "手机指南针" else "ESP32 IMU 测试模式",
+                if (settingsState.usePhoneHeading) "手机指南针" else "主控 IMU 测试模式",
             )
             SettingsRow(
                 "手机航向",
@@ -803,7 +772,7 @@ private fun PhoneHeadingSettingsCard(
                 controlState.appHeadingLockErrorDegrees?.let { "${it.roundToInt()}°" } ?: "--",
             )
             SettingsRow("App 差速修正", "${controlState.appHeadingLockCorrectionPercent}%")
-            SettingsRow("ESP32 航向闭环", "停用，仅执行左右 ESC 功率")
+            SettingsRow("主控航向闭环", "停用，仅执行左右 ESC 功率")
         }
     }
 }
@@ -832,7 +801,7 @@ private fun Esp32ImuObservationCard(
             verticalArrangement = Arrangement.spacedBy(12.dp),
         ) {
             SettingsSectionHeader(
-                title = "ESP32 IMU 观测",
+                title = "主控 IMU 观测",
                 icon = Icons.Outlined.Settings,
                 color = Color(0xFF455A64),
             )
@@ -848,13 +817,13 @@ private fun Esp32ImuObservationCard(
             SettingsRow("手机航向", phoneHeading?.let { "${it.roundToInt()}°" } ?: "--")
             SettingsRow("IMU 航向 YBY", ybHeading?.let { "${it.roundToInt()}°" } ?: "--")
             SettingsRow(
-                "ESP32 航向",
+                "主控航向",
                 espHeading?.let { "${it.roundToInt()}°" } ?: fields.imuValue("IHDG", "°"),
             )
             SettingsRow("手机 - IMU", headingDeltaText(phoneHeading, ybHeading))
             SettingsRow("裸磁航向", fields.imuValue("IMHDG", "°"))
             SettingsRow("Mahony yaw", fields.imuValue("IAHRS", "°"))
-            SettingsRow("手机 - ESP32", headingDeltaText(phoneHeading, espHeading))
+            SettingsRow("手机 - 主控", headingDeltaText(phoneHeading, espHeading))
             HorizontalDivider()
             SettingsRow(
                 "YB 姿态",
@@ -1094,10 +1063,10 @@ private fun magCalibrationStateText(state: String): String {
 
 private fun imuObservationStateText(isConnected: Boolean, fields: Map<String, String>): String {
     return when {
-        !isConnected -> "未连接 ESP32"
+        !isConnected -> "未连接主控"
         fields["YBIMU"] == "1" || fields.containsKey("IAX") -> "观测中"
         fields["IMU"] == "0" -> "IMU 不可用"
-        else -> "等待 ESP32 新字段"
+        else -> "等待主控新字段"
     }
 }
 
