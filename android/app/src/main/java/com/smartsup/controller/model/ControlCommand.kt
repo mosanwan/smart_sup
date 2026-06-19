@@ -14,7 +14,8 @@ data class ControlCommand(
     val headingLockBaseThrottlePercent: Int = 0,
     val headingLockToleranceDegrees: Int = 4,
     val headingLockFullCorrectionDegrees: Int = 6,
-    val headingLockNeutralReversePercent: Int = 70,
+    val headingLockNeutralPivotForwardPercent: Int = 28,
+    val headingLockNeutralPivotReversePercent: Int = 31,
     val headingLockTargetOffsetDegrees: Int? = null,
     val voicePowerLimitPercent: Int = 70,
     val leftEscReversed: Boolean = false,
@@ -43,7 +44,8 @@ data class ControlCommand(
             require(headingLockBaseThrottlePercent in -100..100)
             require(headingLockToleranceDegrees in 1..20) { "航向锁定容差只允许 1..20 度" }
             require(headingLockFullCorrectionDegrees in 5..180) { "航向锁定最大转向角只允许 5..180 度" }
-            require(headingLockNeutralReversePercent in 0..100) { "空档锁航最大反推只允许 0..100%" }
+            require(headingLockNeutralPivotForwardPercent in 0..100) { "空档原地转向正推只允许 0..100%" }
+            require(headingLockNeutralPivotReversePercent in 0..100) { "空档原地转向反推只允许 0..100%" }
             require(headingLockFullCorrectionDegrees > headingLockToleranceDegrees) {
                 "航向锁定最大转向角必须大于容差"
             }
@@ -76,7 +78,8 @@ data class ControlCommand(
                 "SRC=${source.wireValue};ARM=1;MODE=${mode.wireValue};" +
                     "HLOCK=${if (headingLockEnabled) 1 else 0};BASE=$headingLockBaseThrottlePercent;" +
                     "HTOL=$headingLockToleranceDegrees;HFULL=$headingLockFullCorrectionDegrees;" +
-                    "HREV=$headingLockNeutralReversePercent" +
+                    "HREV=$headingLockNeutralPivotReversePercent;" +
+                    "HPF=$headingLockNeutralPivotForwardPercent;HPR=$headingLockNeutralPivotReversePercent" +
                     idToken +
                     offsetToken +
                     ";LREV=${if (leftEscReversed) 1 else 0};RREV=${if (rightEscReversed) 1 else 0}" +

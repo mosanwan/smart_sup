@@ -108,8 +108,8 @@ fun SettingsScreen(
     onRightEscReversedChange: (Boolean) -> Unit,
     onHeadingLockToleranceChange: (Int) -> Unit,
     onHeadingLockFullCorrectionChange: (Int) -> Unit,
-    onHeadingLockNeutralReverseChange: (Int) -> Unit,
-    onHeadingLockNeutralReverseBoostChange: (Int) -> Unit,
+    onHeadingLockNeutralPivotForwardChange: (Int) -> Unit,
+    onHeadingLockNeutralPivotReverseChange: (Int) -> Unit,
     onAutoNavigationGpsJumpResetChange: (Int) -> Unit,
     onUsePhoneHeadingChange: (Boolean) -> Unit,
     onRealtimeVoiceEndpointChange: (String) -> Unit,
@@ -179,8 +179,8 @@ fun SettingsScreen(
             onRightEscReversedChange = onRightEscReversedChange,
             onHeadingLockToleranceChange = onHeadingLockToleranceChange,
             onHeadingLockFullCorrectionChange = onHeadingLockFullCorrectionChange,
-            onHeadingLockNeutralReverseChange = onHeadingLockNeutralReverseChange,
-            onHeadingLockNeutralReverseBoostChange = onHeadingLockNeutralReverseBoostChange,
+            onHeadingLockNeutralPivotForwardChange = onHeadingLockNeutralPivotForwardChange,
+            onHeadingLockNeutralPivotReverseChange = onHeadingLockNeutralPivotReverseChange,
             onAutoNavigationGpsJumpResetChange = onAutoNavigationGpsJumpResetChange,
             onUsePhoneHeadingChange = onUsePhoneHeadingChange,
         )
@@ -559,8 +559,8 @@ private fun SafetySettingsCard(
     onRightEscReversedChange: (Boolean) -> Unit,
     onHeadingLockToleranceChange: (Int) -> Unit,
     onHeadingLockFullCorrectionChange: (Int) -> Unit,
-    onHeadingLockNeutralReverseChange: (Int) -> Unit,
-    onHeadingLockNeutralReverseBoostChange: (Int) -> Unit,
+    onHeadingLockNeutralPivotForwardChange: (Int) -> Unit,
+    onHeadingLockNeutralPivotReverseChange: (Int) -> Unit,
     onAutoNavigationGpsJumpResetChange: (Int) -> Unit,
     onUsePhoneHeadingChange: (Boolean) -> Unit,
 ) {
@@ -643,21 +643,21 @@ private fun SafetySettingsCard(
                 onValueChange = onHeadingLockFullCorrectionChange,
             )
             PercentSliderRow(
-                label = "空档锁航最大反推",
-                value = settingsState.headingLockNeutralReversePercent,
+                label = "空档转向正推",
+                value = settingsState.headingLockNeutralPivotForwardPercent,
                 valueRange = 0f..100f,
                 steps = 99,
-                onValueChange = onHeadingLockNeutralReverseChange,
+                onValueChange = onHeadingLockNeutralPivotForwardChange,
             )
             PercentSliderRow(
-                label = "空档反推增幅",
-                value = settingsState.headingLockNeutralReverseBoostPercent,
+                label = "空档转向反推",
+                value = settingsState.headingLockNeutralPivotReversePercent,
                 valueRange = 0f..100f,
                 steps = 99,
-                onValueChange = onHeadingLockNeutralReverseBoostChange,
+                onValueChange = onHeadingLockNeutralPivotReverseChange,
             )
             Text(
-                "仅空档原地掉头时生效：反推一侧会按增幅提高，仍受最大反推和输出限幅约束。",
+                "仅空档原地掉头时生效：误差超过容差后固定输出一侧正推、一侧反推，默认 +28% / -31%。",
                 style = MaterialTheme.typography.bodySmall,
                 color = MaterialTheme.colorScheme.onSurfaceVariant,
             )
