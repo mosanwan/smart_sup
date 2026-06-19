@@ -2051,12 +2051,13 @@ class ControlViewModel(application: Application) : AndroidViewModel(application)
             return executeRealtimeNeutral(event.reason)
         }
         val state = mutableUiState.value
-        val gearThrottle = coerceCommandPercentForSource(gearPercent(gear), CommandSource.Voice)
+        val throttleSource = CommandSource.App
+        val gearThrottle = coerceCommandPercentForSource(gearPercent(gear), throttleSource)
         val command = ControlCommand(
             armed = true,
             leftThrottlePercent = gearThrottle,
             rightThrottlePercent = gearThrottle,
-            source = CommandSource.Voice,
+            source = throttleSource,
         )
         val commandLine = formatCommandLine(prepareRuntimeCommand(command))
         if (state.connectionState != ConnectionState.Connected) {
@@ -2066,7 +2067,7 @@ class ControlViewModel(application: Application) : AndroidViewModel(application)
             return rejectRealtimeVoiceEvent("语音不能解锁，请先手动解锁", commandLine)
         }
         clearRealtimeVoiceActionTimeout()
-        val headingLockKept = updateActiveHeadingLockSource(CommandSource.Voice)
+        val headingLockKept = updateActiveHeadingLockSource(throttleSource)
         if (!headingLockKept) {
             clearAutonomousCommands()
         }
@@ -2075,7 +2076,7 @@ class ControlViewModel(application: Application) : AndroidViewModel(application)
             it.copy(
                 leftThrottlePercent = gearThrottle,
                 rightThrottlePercent = gearThrottle,
-                commandSource = CommandSource.Voice,
+                commandSource = throttleSource,
                 headingLockEnabled = if (headingLockKept) true else false,
                 selectedGear = gear,
                 throttleTrimPercent = 0,
@@ -2083,9 +2084,9 @@ class ControlViewModel(application: Application) : AndroidViewModel(application)
                 realtimeVoiceReply = resultText,
                 voiceCommandPreview = commandLine,
                 statusMessage = if (headingLockKept) {
-                    "实时语音档位：${gear.label} ${gearThrottle.signedPercentText()}，航向锁定保持"
+                    "实时语音档位：${gear.label} ${gearThrottle.signedPercentText()}，按 App 普通推进下发，航向锁定保持"
                 } else {
-                    "实时语音档位：${gear.label} ${gearThrottle.signedPercentText()}"
+                    "实时语音档位：${gear.label} ${gearThrottle.signedPercentText()}，按 App 普通推进下发"
                 },
             )
         }
@@ -2124,7 +2125,7 @@ class ControlViewModel(application: Application) : AndroidViewModel(application)
                     armed = true,
                     leftThrottlePercent = 0,
                     rightThrottlePercent = 0,
-                    source = CommandSource.Voice,
+                    source = CommandSource.App,
                 ),
             ),
         )
@@ -2134,7 +2135,7 @@ class ControlViewModel(application: Application) : AndroidViewModel(application)
             it.copy(
                 leftThrottlePercent = 0,
                 rightThrottlePercent = 0,
-                commandSource = CommandSource.Voice,
+                commandSource = CommandSource.App,
                 headingLockEnabled = false,
                 selectedGear = ThrottleGear.Neutral,
                 throttleTrimPercent = 0,
@@ -2212,13 +2213,14 @@ class ControlViewModel(application: Application) : AndroidViewModel(application)
         clearRealtimeVoiceActionTimeout()
         clearAutonomousCommands()
         val state = mutableUiState.value
+        val throttleSource = CommandSource.App
         val commandLine = formatCommandLine(
             prepareRuntimeCommand(
                 ControlCommand(
                     armed = state.armed,
                     leftThrottlePercent = 0,
                     rightThrottlePercent = 0,
-                    source = CommandSource.Voice,
+                    source = throttleSource,
                 ),
             ),
         )
@@ -2230,14 +2232,14 @@ class ControlViewModel(application: Application) : AndroidViewModel(application)
             it.copy(
                 leftThrottlePercent = 0,
                 rightThrottlePercent = 0,
-                commandSource = CommandSource.Voice,
+                commandSource = throttleSource,
                 headingLockEnabled = false,
                 selectedGear = ThrottleGear.Neutral,
                 throttleTrimPercent = 0,
                 voiceResultMessage = "实时语音：已进入空挡",
                 realtimeVoiceReply = resultText,
                 voiceCommandPreview = commandLine,
-                statusMessage = "实时语音空挡：$reason",
+                statusMessage = "实时语音空挡：$reason，按 App 普通推进下发",
             )
         }
         sendCurrentCommand()
@@ -2246,15 +2248,16 @@ class ControlViewModel(application: Application) : AndroidViewModel(application)
 
     private fun executeRealtimeLimitedPower(event: RealtimeVoiceControlEvent.SetLimitedPower): String {
         val state = mutableUiState.value
-        val left = coerceCommandPercentForSource(event.leftPercent, CommandSource.Voice)
-        val right = coerceCommandPercentForSource(event.rightPercent, CommandSource.Voice)
+        val throttleSource = CommandSource.App
+        val left = coerceCommandPercentForSource(event.leftPercent, throttleSource)
+        val right = coerceCommandPercentForSource(event.rightPercent, throttleSource)
         val commandLine = formatCommandLine(
             prepareRuntimeCommand(
                 ControlCommand(
                     armed = true,
                     leftThrottlePercent = left,
                     rightThrottlePercent = right,
-                    source = CommandSource.Voice,
+                    source = throttleSource,
                 ),
             ),
         )
@@ -2271,14 +2274,14 @@ class ControlViewModel(application: Application) : AndroidViewModel(application)
             it.copy(
                 leftThrottlePercent = left,
                 rightThrottlePercent = right,
-                commandSource = CommandSource.Voice,
+                commandSource = throttleSource,
                 headingLockEnabled = false,
                 selectedGear = ThrottleGear.Neutral,
                 throttleTrimPercent = 0,
                 voiceResultMessage = "实时语音：已设置左右推进",
                 realtimeVoiceReply = resultText,
                 voiceCommandPreview = commandLine,
-                statusMessage = "实时语音左右推进：左 ${left.signedPercentText()}，右 ${right.signedPercentText()}",
+                statusMessage = "实时语音左右推进：左 ${left.signedPercentText()}，右 ${right.signedPercentText()}，按 App 普通推进下发",
             )
         }
         sendCurrentCommand()

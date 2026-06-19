@@ -89,7 +89,9 @@ SRC=APP;ARM=1;L=28;R=12
 
 ## 语音控制来源
 
-Android 本地语音控制方案见 [Android 本地语音控制方案](voice_control_plan.md)。语音命令必须带 `SRC=VOICE`，并在 Android 和 ESP32 两侧同时限幅。
+Android 本地语音控制方案见 [Android 本地语音控制方案](voice_control_plan.md)。旧的固件级语音控制命令使用 `SRC=VOICE`，并在 Android 和 ESP32 两侧同时限幅。
+
+2026-06-19 起，实时 AI 的普通档位、左右推进百分比和空挡命令改由 Android App 校验后按普通 `SRC=APP;ARM=1;L=...;R=...` 心跳下发，避免同一个 `-40%` 在手动路径和 AI 路径上经过不同的 ESP32 `SRC=VOICE` 限制逻辑。AI 仍不能解锁，且数值仍先受 App 当前手动油门上限约束。AI 原地掉头和航向目标仍由 App 本地航向控制计算最终 `L/R`。
 
 初始固件级语音限幅：
 
