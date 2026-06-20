@@ -85,6 +85,7 @@ fun ControlScreen(
     leftEscReversed: Boolean,
     rightEscReversed: Boolean,
     ybImuHeadingOffsetDegrees: Float,
+    ybImuHeadingMode: Int,
     modifier: Modifier = Modifier,
     onArm: () -> Unit,
     onDisarm: () -> Unit,
@@ -180,6 +181,7 @@ fun ControlScreen(
                 fineTuneStepPercent = fineTuneStepPercent,
                 gearPercents = gearPercents,
                 ybImuHeadingOffsetDegrees = ybImuHeadingOffsetDegrees,
+                ybImuHeadingMode = ybImuHeadingMode,
                 modifier = Modifier
                     .weight(1f)
                     .fillMaxHeight(),
@@ -564,6 +566,7 @@ private fun CenterControlPanel(
     fineTuneStepPercent: Int,
     gearPercents: Map<ThrottleGear, Int>,
     ybImuHeadingOffsetDegrees: Float,
+    ybImuHeadingMode: Int,
     modifier: Modifier = Modifier,
     onArm: () -> Unit,
     onDisarm: () -> Unit,
@@ -630,7 +633,7 @@ private fun CenterControlPanel(
                 verticalArrangement = Arrangement.spacedBy(7.dp),
             ) {
                 CompactInfoRow("主控 IMU", state.ybImuModuleText())
-                CompactInfoRow("IMU 航向", state.ybHeadingText(ybImuHeadingOffsetDegrees))
+                CompactInfoRow("IMU 航向", state.ybHeadingText(ybImuHeadingOffsetDegrees, ybImuHeadingMode))
                 CompactInfoRow("横滚 / 俯仰", state.ybRollPitchText())
                 CompactInfoRow("Z 角速度", state.ybGyroZText())
                 CompactInfoRow("加速度", state.ybAccelText())
@@ -1458,8 +1461,12 @@ private fun ControlUiState.ybImuModuleText(): String {
     }
 }
 
-private fun ControlUiState.ybHeadingText(ybImuHeadingOffsetDegrees: Float): String {
-    return ybImuHeadingDegrees(telemetry, ybImuHeadingOffsetDegrees).formatDegrees()
+private fun ControlUiState.ybHeadingText(ybImuHeadingOffsetDegrees: Float, ybImuHeadingMode: Int): String {
+    return ybImuHeadingDegrees(
+        telemetry = telemetry,
+        offsetDegrees = ybImuHeadingOffsetDegrees,
+        modeId = ybImuHeadingMode,
+    ).formatDegrees()
 }
 
 private fun ControlUiState.ybRollPitchText(): String {

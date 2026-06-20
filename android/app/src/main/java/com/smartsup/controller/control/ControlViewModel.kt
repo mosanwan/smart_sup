@@ -40,9 +40,12 @@ import com.smartsup.controller.model.ThrottleGear
 import com.smartsup.controller.model.TrackLogEvent
 import com.smartsup.controller.model.UpdateUiState
 import com.smartsup.controller.model.VoiceAsrState
+import com.smartsup.controller.model.YB_IMU_HEADING_MODE_DEFAULT
 import com.smartsup.controller.model.calibrateYbImuHeadingToPhone
-import com.smartsup.controller.model.ybImuHeadingDegrees
+import com.smartsup.controller.model.coerceYbImuHeadingModeId
 import com.smartsup.controller.model.ybImuHeadingAlgorithmLabel
+import com.smartsup.controller.model.ybImuHeadingDegrees
+import com.smartsup.controller.model.ybImuHeadingModeLabel
 import com.smartsup.controller.transport.BluetoothClassicTransport
 import com.smartsup.controller.transport.ControlTransport
 import com.smartsup.controller.update.AppUpdateInstaller
@@ -872,6 +875,25 @@ class ControlViewModel(application: Application) : AndroidViewModel(application)
         sendCurrentCommand()
     }
 
+    fun setYbImuHeadingMode(modeId: Int) {
+        val actualMode = coerceYbImuHeadingModeId(modeId)
+        preferences.edit().putInt(KEY_YB_IMU_HEADING_MODE, actualMode).apply()
+        clearAutonomousCommands()
+        mutableSettingsState.update { it.copy(ybImuHeadingMode = actualMode) }
+        mutableUiState.update {
+            it.copy(
+                leftThrottlePercent = 0,
+                rightThrottlePercent = 0,
+                commandSource = CommandSource.App,
+                headingLockEnabled = false,
+                selectedGear = ThrottleGear.Neutral,
+                throttleTrimPercent = 0,
+                statusMessage = "IMU 航向算法已切换为 ${ybImuHeadingModeLabel(actualMode)}，已取消当前锁航",
+            )
+        }
+        sendCurrentCommand()
+    }
+
     fun calibrateYbImuHeadingToPhone() {
         val phoneHeading = currentPhoneHeadingDegreesOrNull()
         if (phoneHeading == null) {
@@ -883,7 +905,12 @@ class ControlViewModel(application: Application) : AndroidViewModel(application)
             mutableUiState.update { it.copy(statusMessage = "IMU 校准失败：主控 IMU 航向暂无有效读数") }
             return
         }
-        val result = calibrateYbImuHeadingToPhone(phoneHeading, telemetry)
+        val settings = mutableSettingsState.value
+        val result = calibrateYbImuHeadingToPhone(
+            phoneHeadingDegrees = phoneHeading,
+            telemetry = telemetry,
+            modeId = settings.ybImuHeadingMode,
+        )
         if (result == null) {
             mutableUiState.update {
                 it.copy(
@@ -908,7 +935,7 @@ class ControlViewModel(application: Application) : AndroidViewModel(application)
                 headingLockEnabled = false,
                 selectedGear = ThrottleGear.Neutral,
                 throttleTrimPercent = 0,
-                statusMessage = "IMU 航向已对齐手机：${ybImuHeadingAlgorithmLabel(telemetry)}，偏置 ${result.offsetDegrees.roundToInt()}°，已取消当前锁航",
+                statusMessage = "IMU 航向已对齐手机：${ybImuHeadingAlgorithmLabel(telemetry, settings.ybImuHeadingMode)}，偏置 ${result.offsetDegrees.roundToInt()}°，已取消当前锁航",
             )
         }
         sendCurrentCommand()
@@ -3466,6 +3493,7 @@ class ControlViewModel(application: Application) : AndroidViewModel(application)
         return ybImuHeadingDegrees(
             telemetry = telemetry,
             offsetDegrees = settings.ybImuHeadingOffsetDegrees,
+            modeId = settings.ybImuHeadingMode,
         )
     }
 
@@ -5906,6 +5934,9 @@ class ControlViewModel(application: Application) : AndroidViewModel(application)
                 ),
             ),
             usePhoneHeading = preferences.getBoolean(KEY_USE_PHONE_HEADING, true),
+            ybImuHeadingMode = coerceYbImuHeadingModeId(
+                preferences.getInt(KEY_YB_IMU_HEADING_MODE, YB_IMU_HEADING_MODE_DEFAULT),
+            ),
             ybImuHeadingOffsetDegrees = normalizeCompassDegrees(
                 preferences.getFloat(KEY_YB_IMU_HEADING_OFFSET_CHIP_DOWN_DEGREES, YB_IMU_HEADING_OFFSET_DEFAULT_DEGREES),
             ),
@@ -6001,6 +6032,7 @@ class ControlViewModel(application: Application) : AndroidViewModel(application)
         private const val KEY_LEFT_ESC_REVERSED = "left_esc_reversed"
         private const val KEY_RIGHT_ESC_REVERSED = "right_esc_reversed"
         private const val KEY_USE_PHONE_HEADING = "use_phone_heading"
+        private const val KEY_YB_IMU_HEADING_MODE = "yb_imu_heading_mode"
         private const val KEY_YB_IMU_HEADING_OFFSET_CHIP_DOWN_DEGREES = "yb_imu_heading_offset_chip_down_degrees"
         private const val KEY_REALTIME_VOICE_ENDPOINT = "realtime_voice_endpoint"
         private const val KEY_REALTIME_VOICE_APP_ID = "realtime_voice_app_id"

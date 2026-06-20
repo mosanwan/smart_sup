@@ -123,6 +123,7 @@ fun NavigationScreen(
     state: ControlUiState,
     usePhoneHeading: Boolean,
     ybImuHeadingOffsetDegrees: Float,
+    ybImuHeadingMode: Int,
     modifier: Modifier = Modifier,
     onSyncTrack: () -> Unit,
     onPlaybackIndexChange: (Int) -> Unit,
@@ -156,7 +157,7 @@ fun NavigationScreen(
     var previousSyncing by remember { mutableStateOf(gpsTrack.syncing) }
     var syncNotice by remember { mutableStateOf<String?>(null) }
     val liveLocation = state.telemetry.liveLatLng()
-    val liveHeadingDegrees = state.navigationHeadingDegrees(usePhoneHeading, ybImuHeadingOffsetDegrees)
+    val liveHeadingDegrees = state.navigationHeadingDegrees(usePhoneHeading, ybImuHeadingOffsetDegrees, ybImuHeadingMode)
     val liveHeadingSourceText = if (usePhoneHeading) "手机" else "IMU"
     val liveHeadingText = liveHeadingDegrees?.let { "$liveHeadingSourceText ${it.roundToInt()}°" }
     val gpsSpeedText = state.telemetry.gpsSpeedText()
@@ -452,6 +453,7 @@ fun NavigationScreen(
                 state = state,
                 usePhoneHeading = usePhoneHeading,
                 ybImuHeadingOffsetDegrees = ybImuHeadingOffsetDegrees,
+                ybImuHeadingMode = ybImuHeadingMode,
                 onDismiss = { pendingExecuteRoute = null },
                 onConfirm = {
                     pendingExecuteRoute = null
@@ -1010,13 +1012,14 @@ private fun StartAutoNavigationDialog(
     state: ControlUiState,
     usePhoneHeading: Boolean,
     ybImuHeadingOffsetDegrees: Float,
+    ybImuHeadingMode: Int,
     onDismiss: () -> Unit,
     onConfirm: () -> Unit,
 ) {
     val gpsReady = state.telemetry.statusFields["GPS_FIX"] == "1"
     val satelliteCount = state.telemetry.statusFields["GPS_SAT"]?.toIntOrNull() ?: 0
     val headingSourceText = if (usePhoneHeading) "手机" else "IMU"
-    val headingReady = state.navigationHeadingDegrees(usePhoneHeading, ybImuHeadingOffsetDegrees) != null
+    val headingReady = state.navigationHeadingDegrees(usePhoneHeading, ybImuHeadingOffsetDegrees, ybImuHeadingMode) != null
     val ready = state.connectionState == ConnectionState.Connected &&
         state.armed &&
         gpsReady &&
@@ -1863,13 +1866,20 @@ private fun com.smartsup.controller.model.Telemetry.gpsSpeedText(): String? {
 private fun ControlUiState.navigationHeadingDegrees(
     usePhoneHeading: Boolean,
     ybImuHeadingOffsetDegrees: Float,
+    ybImuHeadingMode: Int,
 ): Float? {
     return if (usePhoneHeading) {
         phoneHeadingDegrees?.takeIf { phoneHeadingAvailable }
     } else {
         telemetry
             .takeIf { it.ybImuAvailable == true }
-            ?.let { ybImuHeadingDegrees(it, ybImuHeadingOffsetDegrees) }
+            ?.let {
+                ybImuHeadingDegrees(
+                    telemetry = it,
+                    offsetDegrees = ybImuHeadingOffsetDegrees,
+                    modeId = ybImuHeadingMode,
+                )
+            }
     }
 }
 

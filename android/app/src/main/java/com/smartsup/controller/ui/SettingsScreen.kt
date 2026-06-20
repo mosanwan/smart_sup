@@ -59,8 +59,11 @@ import com.smartsup.controller.model.ControlUiState
 import com.smartsup.controller.model.SettingsUiState
 import com.smartsup.controller.model.ThrottleGear
 import com.smartsup.controller.model.UpdateUiState
+import com.smartsup.controller.model.YB_IMU_HEADING_MODES
 import com.smartsup.controller.model.ybImuHeadingAlgorithmLabel
+import com.smartsup.controller.model.ybImuHeadingCandidates
 import com.smartsup.controller.model.ybImuHeadingDegrees
+import com.smartsup.controller.model.ybImuHeadingModeLabel
 import kotlin.math.roundToInt
 
 private data class VoiceOption(
@@ -111,6 +114,7 @@ fun SettingsScreen(
     onHeadingLockNeutralPivotMaxDifferenceChange: (Int) -> Unit,
     onAutoNavigationGpsJumpResetChange: (Int) -> Unit,
     onUsePhoneHeadingChange: (Boolean) -> Unit,
+    onYbImuHeadingModeChange: (Int) -> Unit,
     onCalibrateYbImuHeadingToPhone: () -> Unit,
     onRealtimeVoiceEndpointChange: (String) -> Unit,
     onRealtimeVoiceAppIdChange: (String) -> Unit,
@@ -166,6 +170,7 @@ fun SettingsScreen(
             onHeadingLockNeutralPivotMaxDifferenceChange = onHeadingLockNeutralPivotMaxDifferenceChange,
             onAutoNavigationGpsJumpResetChange = onAutoNavigationGpsJumpResetChange,
             onUsePhoneHeadingChange = onUsePhoneHeadingChange,
+            onYbImuHeadingModeChange = onYbImuHeadingModeChange,
             onCalibrateYbImuHeadingToPhone = onCalibrateYbImuHeadingToPhone,
         )
 
@@ -524,6 +529,7 @@ private fun UpdateSettingsCard(
     }
 }
 
+@OptIn(ExperimentalMaterial3Api::class)
 @Composable
 private fun SafetySettingsCard(
     controlState: ControlUiState,
@@ -541,8 +547,10 @@ private fun SafetySettingsCard(
     onHeadingLockNeutralPivotMaxDifferenceChange: (Int) -> Unit,
     onAutoNavigationGpsJumpResetChange: (Int) -> Unit,
     onUsePhoneHeadingChange: (Boolean) -> Unit,
+    onYbImuHeadingModeChange: (Int) -> Unit,
     onCalibrateYbImuHeadingToPhone: () -> Unit,
 ) {
+    var imuModeMenuExpanded by remember { mutableStateOf(false) }
     Card(
         colors = CardDefaults.cardColors(containerColor = MaterialTheme.colorScheme.surface),
         modifier = Modifier.fillMaxWidth(),
@@ -586,6 +594,37 @@ private fun SafetySettingsCard(
                 style = MaterialTheme.typography.bodySmall,
                 color = MaterialTheme.colorScheme.onSurfaceVariant,
             )
+            ExposedDropdownMenuBox(
+                expanded = imuModeMenuExpanded,
+                onExpandedChange = { imuModeMenuExpanded = it },
+                modifier = Modifier.fillMaxWidth(),
+            ) {
+                OutlinedTextField(
+                    value = ybImuHeadingModeLabel(settingsState.ybImuHeadingMode),
+                    onValueChange = {},
+                    readOnly = true,
+                    label = { Text("IMU 航向算法") },
+                    trailingIcon = { ExposedDropdownMenuDefaults.TrailingIcon(expanded = imuModeMenuExpanded) },
+                    colors = ExposedDropdownMenuDefaults.outlinedTextFieldColors(),
+                    modifier = Modifier
+                        .menuAnchor()
+                        .fillMaxWidth(),
+                )
+                ExposedDropdownMenu(
+                    expanded = imuModeMenuExpanded,
+                    onDismissRequest = { imuModeMenuExpanded = false },
+                ) {
+                    YB_IMU_HEADING_MODES.forEach { mode ->
+                        DropdownMenuItem(
+                            text = { Text(mode.label) },
+                            onClick = {
+                                imuModeMenuExpanded = false
+                                onYbImuHeadingModeChange(mode.id)
+                            },
+                        )
+                    }
+                }
+            }
             SettingsRow("IMU 航向偏置", "${settingsState.ybImuHeadingOffsetDegrees.roundToInt()}°")
             SettingsActionButton(
                 text = "对齐手机航向",
@@ -594,7 +633,11 @@ private fun SafetySettingsCard(
                 onClick = onCalibrateYbImuHeadingToPhone,
                 enabled = controlState.phoneHeadingAvailable &&
                     controlState.telemetry.ybImuAvailable == true &&
-                    controlState.telemetry.ybYawDegrees != null,
+                    ybImuHeadingDegrees(
+                        telemetry = controlState.telemetry,
+                        offsetDegrees = settingsState.ybImuHeadingOffsetDegrees,
+                        modeId = settingsState.ybImuHeadingMode,
+                    ) != null,
                 modifier = Modifier.fillMaxWidth(),
             )
             Text("正反向油门限幅：+/-${settingsState.maxThrottlePercent}%")
@@ -774,11 +817,15 @@ private fun PhoneHeadingSettingsCard(
             )
             SettingsRow(
                 "IMU 航向",
-                ybImuHeadingDegrees(controlState.telemetry, settingsState.ybImuHeadingOffsetDegrees)
+                ybImuHeadingDegrees(
+                    telemetry = controlState.telemetry,
+                    offsetDegrees = settingsState.ybImuHeadingOffsetDegrees,
+                    modeId = settingsState.ybImuHeadingMode,
+                )
                     ?.roundToInt()
                     ?.let { "$it°" } ?: "--",
             )
-            SettingsRow("IMU 算法", ybImuHeadingAlgorithmLabel(controlState.telemetry))
+            SettingsRow("IMU 算法", ybImuHeadingAlgorithmLabel(controlState.telemetry, settingsState.ybImuHeadingMode))
             SettingsRow(
                 "手机传感器",
                 controlState.phoneHeadingSensorName.ifBlank {
@@ -812,7 +859,15 @@ private fun Esp32ImuObservationCard(
         null
     }
     val ybRawYaw = controlState.telemetry.ybYawDegrees
-    val ybHeading = ybImuHeadingDegrees(controlState.telemetry, settingsState.ybImuHeadingOffsetDegrees)
+    val ybHeading = ybImuHeadingDegrees(
+        telemetry = controlState.telemetry,
+        offsetDegrees = settingsState.ybImuHeadingOffsetDegrees,
+        modeId = settingsState.ybImuHeadingMode,
+    )
+    val ybCandidates = ybImuHeadingCandidates(
+        telemetry = controlState.telemetry,
+        offsetDegrees = settingsState.ybImuHeadingOffsetDegrees,
+    )
     val imuAvailable = if (isConnected) controlState.telemetry.imuAvailable else null
     val phoneHeading = controlState.phoneHeadingDegrees
 
@@ -846,6 +901,14 @@ private fun Esp32ImuObservationCard(
                 espHeading?.let { "${it.roundToInt()}°" } ?: fields.imuValue("IHDG", "°"),
             )
             SettingsRow("手机 - IMU", headingDeltaText(phoneHeading, ybHeading))
+            SettingsRow("当前算法", ybImuHeadingModeLabel(settingsState.ybImuHeadingMode))
+            HorizontalDivider()
+            ybCandidates.forEach { candidate ->
+                val raw = candidate.rawDegrees?.let { "${it.roundToInt()}°" } ?: "--"
+                val calibrated = candidate.calibratedDegrees?.let { "${it.roundToInt()}°" } ?: "--"
+                SettingsRow(candidate.mode.label, "$calibrated / 裸 $raw")
+            }
+            HorizontalDivider()
             SettingsRow("裸磁航向", fields.imuValue("IMHDG", "°"))
             SettingsRow("Mahony yaw", fields.imuValue("IAHRS", "°"))
             SettingsRow("手机 - 主控", headingDeltaText(phoneHeading, espHeading))

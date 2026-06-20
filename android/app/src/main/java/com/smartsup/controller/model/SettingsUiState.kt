@@ -24,6 +24,7 @@ data class SettingsUiState(
     val headingLockNeutralPivotMaxDifferencePercent: Int = 60,
     val autoNavigationGpsJumpResetMeters: Int = 5,
     val usePhoneHeading: Boolean = true,
+    val ybImuHeadingMode: Int = YB_IMU_HEADING_MODE_DEFAULT,
     val ybImuHeadingOffsetDegrees: Float = 0f,
     val realtimeVoiceEndpoint: String = "wss://openspeech.bytedance.com/api/v3/realtime/dialogue",
     val realtimeVoiceAppId: String = BuildConfig.DOUBAO_APP_ID,
