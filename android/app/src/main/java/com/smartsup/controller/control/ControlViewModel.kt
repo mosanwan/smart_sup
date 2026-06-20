@@ -114,6 +114,8 @@ class ControlViewModel(application: Application) : AndroidViewModel(application)
     private var activeHeadingLockCommand: ControlCommand? = null
     private var appHeadingControlTargetDegrees: Float? = null
     private var appHeadingControlStartedAtMs = 0L
+    private val appHeadingErrorSamples = ArrayDeque<AppHeadingErrorSample>()
+    private var appHeadingAdaptiveBoostPercent = 0
     private var autoNavigationFilteredPoint: NavigationRoutePoint? = null
     private var autoNavigationLastRawPoint: NavigationRoutePoint? = null
     private var voiceTurnRequestCounter = 0
@@ -218,6 +220,11 @@ class ControlViewModel(application: Application) : AndroidViewModel(application)
 
     private val mutableUpdateState = MutableStateFlow(UpdateUiState())
     val updateState: StateFlow<UpdateUiState> = mutableUpdateState.asStateFlow()
+
+    private data class AppHeadingErrorSample(
+        val timeMs: Long,
+        val errorDegrees: Float,
+    )
 
     init {
         refreshGpsTrackState("已加载手机本地轨迹")
@@ -3937,22 +3944,38 @@ class ControlViewModel(application: Application) : AndroidViewModel(application)
 
         val baseLeftPercent = if (isOneShotTurn) 0 else state.leftThrottlePercent
         val baseRightPercent = if (isOneShotTurn) 0 else state.rightThrottlePercent
-        val correction = headingCorrectionPercent(
+        val outputLimitPercent = headingOutputLimitPercent(activeCommand.source, settings)
+        val baseCorrection = headingCorrectionPercent(
             errorDegrees = errorDegrees,
             toleranceDegrees = activeCommand.headingLockToleranceDegrees,
             fullCorrectionDegrees = activeCommand.headingLockFullCorrectionDegrees,
             baseMagnitudePercent = headingBaseMagnitudePercent(baseLeftPercent, baseRightPercent),
+        )
+        val adaptiveBoost = if (isOneShotTurn) {
+            resetAppHeadingAdaptiveBoost()
+            0
+        } else {
+            updateAppHeadingAdaptiveBoost(
+                now = now,
+                errorDegrees = errorDegrees,
+                toleranceDegrees = activeCommand.headingLockToleranceDegrees,
+            )
+        }
+        val correction = (baseCorrection + adaptiveBoost).coerceIn(
+            -outputLimitPercent,
+            outputLimitPercent,
         )
         val rawLeftRight = headingCorrectedThrottle(
             leftBasePercent = baseLeftPercent,
             rightBasePercent = baseRightPercent,
             errorDegrees = errorDegrees,
             correction = correction,
+            adaptiveBoost = adaptiveBoost,
             toleranceDegrees = activeCommand.headingLockToleranceDegrees,
             fullCorrectionDegrees = activeCommand.headingLockFullCorrectionDegrees,
             neutralPivotMinDifferencePercent = activeCommand.headingLockNeutralPivotMinDifferencePercent,
             neutralPivotMaxDifferencePercent = activeCommand.headingLockNeutralPivotMaxDifferencePercent,
-            outputLimitPercent = headingOutputLimitPercent(activeCommand.source, settings),
+            outputLimitPercent = outputLimitPercent,
         )
         val leftPercent = coerceCommandPercentForSource(rawLeftRight.first, activeCommand.source)
         val rightPercent = coerceCommandPercentForSource(rawLeftRight.second, activeCommand.source)
@@ -4021,6 +4044,63 @@ class ControlViewModel(application: Application) : AndroidViewModel(application)
         return maxOf(abs(leftBasePercent), abs(rightBasePercent)).coerceIn(0, 100)
     }
 
+    private fun updateAppHeadingAdaptiveBoost(
+        now: Long,
+        errorDegrees: Float,
+        toleranceDegrees: Int,
+    ): Int {
+        val sign = headingErrorSign(errorDegrees)
+        val absError = abs(errorDegrees)
+        appHeadingErrorSamples.addLast(AppHeadingErrorSample(now, errorDegrees))
+        val historyCutoff = now - HEADING_LOCK_ADAPTIVE_WINDOW_MS - COMMAND_HEARTBEAT_MS
+        while (appHeadingErrorSamples.isNotEmpty() && appHeadingErrorSamples.first().timeMs < historyCutoff) {
+            appHeadingErrorSamples.removeFirst()
+        }
+
+        if (sign == 0 || absError <= toleranceDegrees.toFloat()) {
+            appHeadingAdaptiveBoostPercent = (appHeadingAdaptiveBoostPercent - HEADING_LOCK_ADAPTIVE_DECAY_STEP_PERCENT)
+                .coerceAtLeast(0)
+            return 0
+        }
+
+        val windowStart = now - HEADING_LOCK_ADAPTIVE_WINDOW_MS
+        val windowSamples = appHeadingErrorSamples.filter { it.timeMs >= windowStart }
+        val oldest = windowSamples.firstOrNull()
+        if (oldest == null || now - oldest.timeMs < HEADING_LOCK_ADAPTIVE_MIN_WINDOW_MS) {
+            return appHeadingAdaptiveBoostPercent * sign
+        }
+
+        val sameDirection = windowSamples.all { sample ->
+            headingErrorSign(sample.errorDegrees) == sign &&
+                abs(sample.errorDegrees) > toleranceDegrees.toFloat()
+        }
+        val oldestAbsError = abs(oldest.errorDegrees)
+        val notImproving = absError >= oldestAbsError - HEADING_LOCK_ADAPTIVE_IMPROVEMENT_DEADBAND_DEGREES
+
+        appHeadingAdaptiveBoostPercent = if (sameDirection && notImproving) {
+            (appHeadingAdaptiveBoostPercent + HEADING_LOCK_ADAPTIVE_RISE_STEP_PERCENT)
+                .coerceAtMost(HEADING_LOCK_ADAPTIVE_MAX_BOOST_PERCENT)
+        } else {
+            (appHeadingAdaptiveBoostPercent - HEADING_LOCK_ADAPTIVE_DECAY_STEP_PERCENT)
+                .coerceAtLeast(0)
+        }
+        return appHeadingAdaptiveBoostPercent * sign
+    }
+
+    private fun resetAppHeadingAdaptiveBoost(): Int {
+        appHeadingErrorSamples.clear()
+        appHeadingAdaptiveBoostPercent = 0
+        return 0
+    }
+
+    private fun headingErrorSign(errorDegrees: Float): Int {
+        return when {
+            errorDegrees > 0f -> 1
+            errorDegrees < 0f -> -1
+            else -> 0
+        }
+    }
+
     private fun headingCruiseRatio(baseMagnitudePercent: Int): Float {
         val activeRange = (HEADING_LOCK_CRUISE_GAIN_FULL_PERCENT - HEADING_LOCK_CRUISE_GAIN_START_PERCENT)
             .coerceAtLeast(1)
@@ -4037,6 +4117,7 @@ class ControlViewModel(application: Application) : AndroidViewModel(application)
         rightBasePercent: Int,
         errorDegrees: Float,
         correction: Int,
+        adaptiveBoost: Int,
         toleranceDegrees: Int,
         fullCorrectionDegrees: Int,
         neutralPivotMinDifferencePercent: Int,
@@ -4053,8 +4134,9 @@ class ControlViewModel(application: Application) : AndroidViewModel(application)
                 maxDifferencePercent = neutralPivotMaxDifferencePercent,
                 outputLimitPercent = limit,
             )
+            val boostedDifference = (signedDifference + adaptiveBoost).coerceIn(-limit * 2, limit * 2)
             return neutralPivotThrottle(
-                signedDifferencePercent = signedDifference,
+                signedDifferencePercent = boostedDifference,
                 outputLimitPercent = limit,
             )
         }
@@ -4174,6 +4256,7 @@ class ControlViewModel(application: Application) : AndroidViewModel(application)
         activeHeadingLockCommand = command.asHeadingLockHeartbeat()
         appHeadingControlTargetDegrees = normalizeCompassDegrees(targetHeadingDegrees)
         appHeadingControlStartedAtMs = System.currentTimeMillis()
+        resetAppHeadingAdaptiveBoost()
         mutableUiState.update {
             it.copy(
                 headingLockEnabled = true,
@@ -4192,6 +4275,7 @@ class ControlViewModel(application: Application) : AndroidViewModel(application)
         activeTurnCommand = command
         appHeadingControlTargetDegrees = normalizeCompassDegrees(targetHeadingDegrees)
         appHeadingControlStartedAtMs = System.currentTimeMillis()
+        resetAppHeadingAdaptiveBoost()
         mutableUiState.update {
             it.copy(
                 headingLockEnabled = false,
@@ -4897,6 +4981,7 @@ class ControlViewModel(application: Application) : AndroidViewModel(application)
     private fun clearAppHeadingControlTarget() {
         appHeadingControlTargetDegrees = null
         appHeadingControlStartedAtMs = 0L
+        resetAppHeadingAdaptiveBoost()
         mutableUiState.update {
             it.copy(
                 appHeadingLockTargetDegrees = null,
@@ -5878,6 +5963,12 @@ class ControlViewModel(application: Application) : AndroidViewModel(application)
         private const val HEADING_LOCK_CRUISE_GAIN_START_PERCENT = 10
         private const val HEADING_LOCK_CRUISE_GAIN_FULL_PERCENT = 50
         private const val HEADING_LOCK_LOW_SPEED_FULL_CORRECTION_DEGREES = 45f
+        private const val HEADING_LOCK_ADAPTIVE_WINDOW_MS = 3_000L
+        private const val HEADING_LOCK_ADAPTIVE_MIN_WINDOW_MS = 2_700L
+        private const val HEADING_LOCK_ADAPTIVE_MAX_BOOST_PERCENT = 20
+        private const val HEADING_LOCK_ADAPTIVE_RISE_STEP_PERCENT = 1
+        private const val HEADING_LOCK_ADAPTIVE_DECAY_STEP_PERCENT = 2
+        private const val HEADING_LOCK_ADAPTIVE_IMPROVEMENT_DEADBAND_DEGREES = 1.0f
         private const val HEADING_LOCK_NEUTRAL_PIVOT_MIN_DIFFERENCE_DEFAULT = 10
         private const val HEADING_LOCK_NEUTRAL_PIVOT_MAX_DIFFERENCE_DEFAULT = 60
         private const val AUTO_NAVIGATION_MIN_SATELLITES = 4
