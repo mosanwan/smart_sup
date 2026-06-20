@@ -920,7 +920,6 @@ class ControlViewModel(application: Application) : AndroidViewModel(application)
             }
             return
         }
-
         preferences.edit()
             .putFloat(KEY_YB_IMU_HEADING_OFFSET_CHIP_DOWN_DEGREES, result.offsetDegrees)
             .apply()
@@ -961,6 +960,11 @@ class ControlViewModel(application: Application) : AndroidViewModel(application)
             }
             return
         }
+        val calibratedHeading = ybImuHeadingDegrees(
+            telemetry = telemetry,
+            offsetDegrees = result.offsetDegrees,
+            modeId = settings.ybImuHeadingMode,
+        )
 
         preferences.edit()
             .putFloat(KEY_YB_IMU_HEADING_OFFSET_CHIP_DOWN_DEGREES, result.offsetDegrees)
@@ -977,7 +981,7 @@ class ControlViewModel(application: Application) : AndroidViewModel(application)
                 headingLockEnabled = false,
                 selectedGear = ThrottleGear.Neutral,
                 throttleTrimPercent = 0,
-                statusMessage = "IMU 已设为正北 0°：${ybImuHeadingModeLabel(settings.ybImuHeadingMode)}，偏置 ${result.offsetDegrees.roundToInt()}°，已取消当前锁航",
+                statusMessage = "IMU 已设为正北 0°：${ybImuHeadingModeLabel(settings.ybImuHeadingMode)}，偏置 ${result.offsetDegrees.roundToInt()}°，当前 ${calibratedHeading?.roundToInt() ?: 0}°，已取消当前锁航",
             )
         }
         sendCurrentCommand()

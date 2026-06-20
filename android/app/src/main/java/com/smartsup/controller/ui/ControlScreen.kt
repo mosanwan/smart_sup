@@ -70,6 +70,7 @@ import com.smartsup.controller.model.ControlUiState
 import com.smartsup.controller.model.ThrottleGear
 import com.smartsup.controller.model.VoiceAsrState
 import com.smartsup.controller.model.ybImuHeadingDegrees
+import com.smartsup.controller.model.ybImuUncalibratedHeadingDegrees
 import kotlin.math.abs
 import kotlin.math.asin
 import kotlin.math.cos
@@ -634,6 +635,7 @@ private fun CenterControlPanel(
             ) {
                 CompactInfoRow("主控 IMU", state.ybImuModuleText())
                 CompactInfoRow("IMU 航向", state.ybHeadingText(ybImuHeadingOffsetDegrees, ybImuHeadingMode))
+                CompactInfoRow("IMU 原始/偏置", state.ybHeadingCalibrationText(ybImuHeadingOffsetDegrees, ybImuHeadingMode))
                 CompactInfoRow("横滚 / 俯仰", state.ybRollPitchText())
                 CompactInfoRow("Z 角速度", state.ybGyroZText())
                 CompactInfoRow("加速度", state.ybAccelText())
@@ -1467,6 +1469,11 @@ private fun ControlUiState.ybHeadingText(ybImuHeadingOffsetDegrees: Float, ybImu
         offsetDegrees = ybImuHeadingOffsetDegrees,
         modeId = ybImuHeadingMode,
     ).formatDegrees()
+}
+
+private fun ControlUiState.ybHeadingCalibrationText(ybImuHeadingOffsetDegrees: Float, ybImuHeadingMode: Int): String {
+    val raw = ybImuUncalibratedHeadingDegrees(telemetry, ybImuHeadingMode)?.roundToInt() ?: return "--"
+    return "$raw° / ${ybImuHeadingOffsetDegrees.roundToInt()}°"
 }
 
 private fun ControlUiState.ybRollPitchText(): String {

@@ -64,6 +64,7 @@ import com.smartsup.controller.model.YB_IMU_HEADING_MODE_YBY_INVERTED
 import com.smartsup.controller.model.ybImuHeadingAlgorithmLabel
 import com.smartsup.controller.model.ybImuHeadingDegrees
 import com.smartsup.controller.model.ybImuHeadingModeLabel
+import com.smartsup.controller.model.ybImuUncalibratedHeadingDegrees
 import kotlin.math.roundToInt
 
 private data class VoiceOption(
@@ -861,6 +862,10 @@ private fun Esp32ImuObservationCard(
         null
     }
     val ybRawYaw = controlState.telemetry.ybYawDegrees
+    val ybUncalibratedHeading = ybImuUncalibratedHeadingDegrees(
+        telemetry = controlState.telemetry,
+        modeId = settingsState.ybImuHeadingMode,
+    )
     val ybHeading = ybImuHeadingDegrees(
         telemetry = controlState.telemetry,
         offsetDegrees = settingsState.ybImuHeadingOffsetDegrees,
@@ -893,6 +898,8 @@ private fun Esp32ImuObservationCard(
             SettingsRow("九轴 IMU", if (controlState.telemetry.ybImuAvailable == true) "在线" else fields["YBIMU"] ?: "--")
             SettingsRow("手机航向", phoneHeading?.let { "${it.roundToInt()}°" } ?: "--")
             SettingsRow("IMU 航向", ybHeading?.let { "${it.roundToInt()}°" } ?: "--")
+            SettingsRow("IMU 校准前", ybUncalibratedHeading?.let { "${it.roundToInt()}°" } ?: "--")
+            SettingsRow("IMU 偏置", "${settingsState.ybImuHeadingOffsetDegrees.roundToInt()}°")
             SettingsRow("IMU 原始 YBY", ybRawYaw?.let { "${it.roundToInt()}°" } ?: "--")
             SettingsRow(
                 "主控航向",

@@ -23,8 +23,19 @@ fun ybImuHeadingDegrees(
     offsetDegrees: Float,
     modeId: Int = YB_IMU_HEADING_MODE_DEFAULT,
 ): Float? {
-    val base = ybImuBaseHeadingDegrees(telemetry, modeId) ?: return null
+    val base = ybImuUncalibratedHeadingDegrees(telemetry, modeId) ?: return null
     return normalizeCompassDegrees(base + offsetDegrees)
+}
+
+fun ybImuUncalibratedHeadingDegrees(
+    telemetry: Telemetry,
+    modeId: Int = YB_IMU_HEADING_MODE_DEFAULT,
+): Float? {
+    return when (modeId) {
+        YB_IMU_HEADING_MODE_YBY -> telemetry.ybYawDegrees?.let(::normalizeCompassDegrees)
+        YB_IMU_HEADING_MODE_YBY_INVERTED -> telemetry.ybYawDegrees?.let { normalizeCompassDegrees(-it) }
+        else -> null
+    }
 }
 
 fun calibrateYbImuHeadingToPhone(
@@ -32,7 +43,7 @@ fun calibrateYbImuHeadingToPhone(
     telemetry: Telemetry,
     modeId: Int = YB_IMU_HEADING_MODE_DEFAULT,
 ): YbImuHeadingCalibrationResult? {
-    val base = ybImuBaseHeadingDegrees(telemetry, modeId) ?: return null
+    val base = ybImuUncalibratedHeadingDegrees(telemetry, modeId) ?: return null
     return YbImuHeadingCalibrationResult(
         offsetDegrees = normalizeCompassDegrees(phoneHeadingDegrees - base),
     )
@@ -42,7 +53,7 @@ fun calibrateYbImuHeadingToNorth(
     telemetry: Telemetry,
     modeId: Int = YB_IMU_HEADING_MODE_DEFAULT,
 ): YbImuHeadingCalibrationResult? {
-    val base = ybImuBaseHeadingDegrees(telemetry, modeId) ?: return null
+    val base = ybImuUncalibratedHeadingDegrees(telemetry, modeId) ?: return null
     return YbImuHeadingCalibrationResult(
         offsetDegrees = normalizeCompassDegrees(-base),
     )
@@ -59,7 +70,7 @@ fun ybImuHeadingModeLabel(modeId: Int): String {
 
 fun ybImuHeadingAlgorithmLabel(telemetry: Telemetry, modeId: Int = YB_IMU_HEADING_MODE_DEFAULT): String {
     val label = ybImuHeadingModeLabel(modeId)
-    return if (ybImuBaseHeadingDegrees(telemetry, modeId) != null) {
+    return if (ybImuUncalibratedHeadingDegrees(telemetry, modeId) != null) {
         "$label + 偏置"
     } else {
         "$label 暂无读数"
@@ -79,12 +90,4 @@ fun shortestHeadingDelta(target: Float, current: Float): Float {
         delta += 360f
     }
     return delta
-}
-
-private fun ybImuBaseHeadingDegrees(telemetry: Telemetry, modeId: Int): Float? {
-    return when (modeId) {
-        YB_IMU_HEADING_MODE_YBY -> telemetry.ybYawDegrees?.let(::normalizeCompassDegrees)
-        YB_IMU_HEADING_MODE_YBY_INVERTED -> telemetry.ybYawDegrees?.let { normalizeCompassDegrees(-it) }
-        else -> null
-    }
 }

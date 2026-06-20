@@ -1595,6 +1595,8 @@ private fun drawTrackAnnotations(
     context: Context,
 ) {
     val arrowConfig = trackArrowRenderConfig(map.cameraPosition.zoom)
+    val mapBearing = map.cameraPosition.bearing
+    val mapBearingBucket = mapBearing.bearingBucket()
     val trackSignature = trackPoints.signature()
     if (trackPoints.size >= 2) {
         val polyline = annotations.trackPolyline
@@ -1610,7 +1612,7 @@ private fun drawTrackAnnotations(
             polyline.color = pathColor
             polyline.width = 7f
         }
-        val arrowSignature = "$trackSignature:${arrowConfig.signature}"
+        val arrowSignature = "$trackSignature:${arrowConfig.signature}:map=$mapBearingBucket"
         if (annotations.directionArrowSignature != arrowSignature) {
             updateTrackDirectionArrows(
                 map = map,
@@ -1618,6 +1620,7 @@ private fun drawTrackAnnotations(
                 config = arrowConfig,
                 annotations = annotations,
                 context = context,
+                mapBearing = mapBearing,
             )
             annotations.directionArrowSignature = arrowSignature
         }
@@ -1631,7 +1634,7 @@ private fun drawTrackAnnotations(
     }
 
     if (liveLocation != null) {
-        val bearingBucket = liveHeadingDegrees?.toDouble()?.bearingBucket()
+        val bearingBucket = liveHeadingDegrees?.toDouble()?.screenBearingBucket(mapBearing)
         val title = if (liveHeadingDegrees != null) {
             "实时位置 · $liveHeadingSourceText ${liveHeadingDegrees.roundToInt()}°"
         } else {
@@ -1669,7 +1672,7 @@ private fun drawTrackAnnotations(
 
     if (playbackLocation != null) {
         val marker = annotations.playbackMarker
-        val bearingBucket = playbackBearing?.bearingBucket() ?: 0
+        val bearingBucket = playbackBearing?.screenBearingBucket(mapBearing) ?: 0
         val icon = annotations.iconForBearing(
             context = context,
             bearingBucket = bearingBucket,
@@ -1778,6 +1781,7 @@ private fun updateTrackDirectionArrows(
     config: TrackArrowRenderConfig,
     annotations: TrackMapAnnotations,
     context: Context,
+    mapBearing: Double,
 ) {
     clearTrackDirectionArrows(map, annotations)
     if (config.maxCount <= 0) {
@@ -1786,7 +1790,7 @@ private fun updateTrackDirectionArrows(
     sampledDirectionArrows(trackPoints, config).forEach { arrow ->
         val icon = annotations.iconForBearing(
             context = context,
-            bearingBucket = arrow.bearing.bearingBucket(),
+            bearingBucket = arrow.bearing.screenBearingBucket(mapBearing),
             sizePx = config.iconSizePx,
             color = TRACK_ARROW_COLOR,
         )
@@ -2141,6 +2145,10 @@ private fun distanceMeters(from: LatLng, to: LatLng): Double {
 
 private fun Double.bearingBucket(): Int {
     return ((this / 10.0).roundToInt() * 10).floorMod(360)
+}
+
+private fun Double.screenBearingBucket(mapBearingDegrees: Double): Int {
+    return (this - mapBearingDegrees).bearingBucket()
 }
 
 private fun Int.floorMod(modulus: Int): Int {
