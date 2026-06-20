@@ -4110,12 +4110,16 @@ class ControlViewModel(application: Application) : AndroidViewModel(application)
         val oldestAbsError = abs(oldest.errorDegrees)
         val notImproving = absError >= oldestAbsError - HEADING_LOCK_ADAPTIVE_IMPROVEMENT_DEADBAND_DEGREES
 
-        appHeadingAdaptiveBoostPercent = if (sameDirection && notImproving) {
-            (appHeadingAdaptiveBoostPercent + HEADING_LOCK_ADAPTIVE_RISE_STEP_PERCENT)
-                .coerceAtMost(HEADING_LOCK_ADAPTIVE_MAX_BOOST_PERCENT)
-        } else {
-            (appHeadingAdaptiveBoostPercent - HEADING_LOCK_ADAPTIVE_DECAY_STEP_PERCENT)
-                .coerceAtLeast(0)
+        appHeadingAdaptiveBoostPercent = when {
+            sameDirection && notImproving -> {
+                (appHeadingAdaptiveBoostPercent + HEADING_LOCK_ADAPTIVE_RISE_STEP_PERCENT)
+                    .coerceAtMost(HEADING_LOCK_ADAPTIVE_MAX_BOOST_PERCENT)
+            }
+            sameDirection -> appHeadingAdaptiveBoostPercent
+            else -> {
+                (appHeadingAdaptiveBoostPercent - HEADING_LOCK_ADAPTIVE_DECAY_STEP_PERCENT)
+                    .coerceAtLeast(0)
+            }
         }
         return appHeadingAdaptiveBoostPercent * sign
     }
@@ -6007,8 +6011,9 @@ class ControlViewModel(application: Application) : AndroidViewModel(application)
         private const val HEADING_LOCK_ADAPTIVE_RISE_STEP_PERCENT = 1
         private const val HEADING_LOCK_ADAPTIVE_DECAY_STEP_PERCENT = 2
         private const val HEADING_LOCK_ADAPTIVE_IMPROVEMENT_DEADBAND_DEGREES = 1.0f
-        private const val HEADING_LOCK_NEUTRAL_PIVOT_MIN_DIFFERENCE_DEFAULT = 10
+        private const val HEADING_LOCK_NEUTRAL_PIVOT_MIN_DIFFERENCE_DEFAULT = 20
         private const val HEADING_LOCK_NEUTRAL_PIVOT_MAX_DIFFERENCE_DEFAULT = 60
+        private const val HEADING_LOCK_NEUTRAL_PIVOT_MIN_EFFECTIVE_DIFFERENCE_PERCENT = 20
         private const val AUTO_NAVIGATION_MIN_SATELLITES = 4
         private const val AUTO_NAVIGATION_ARRIVAL_RADIUS_METERS = 8.0
         private const val AUTO_NAVIGATION_BEARING_STABILITY_RADIUS_METERS = 18.0
@@ -6065,11 +6070,16 @@ class ControlViewModel(application: Application) : AndroidViewModel(application)
     }
 
     private fun coerceHeadingLockNeutralPivotMinDifferencePercent(percent: Int, maxDifferencePercent: Int): Int {
-        return percent.coerceIn(0, maxDifferencePercent.coerceIn(0, 100))
+        val minAllowed = HEADING_LOCK_NEUTRAL_PIVOT_MIN_EFFECTIVE_DIFFERENCE_PERCENT
+        val maxAllowed = maxDifferencePercent.coerceIn(minAllowed, 100)
+        return percent.coerceIn(minAllowed, maxAllowed)
     }
 
     private fun coerceHeadingLockNeutralPivotMaxDifferencePercent(percent: Int, minDifferencePercent: Int): Int {
-        return percent.coerceIn(minDifferencePercent.coerceIn(0, 100), 100)
+        return percent.coerceIn(
+            minDifferencePercent.coerceAtLeast(HEADING_LOCK_NEUTRAL_PIVOT_MIN_EFFECTIVE_DIFFERENCE_PERCENT),
+            100,
+        )
     }
 
     private fun lockForDirectionChange(message: String) {

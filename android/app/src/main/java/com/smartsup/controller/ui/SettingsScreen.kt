@@ -633,8 +633,8 @@ private fun SafetySettingsCard(
             PercentSliderRow(
                 label = "空档最小转向差",
                 value = settingsState.headingLockNeutralPivotMinDifferencePercent,
-                valueRange = 0f..100f,
-                steps = 99,
+                valueRange = 20f..100f,
+                steps = 79,
                 onValueChange = onHeadingLockNeutralPivotMinDifferenceChange,
             )
             PercentSliderRow(
@@ -645,7 +645,7 @@ private fun SafetySettingsCard(
                 onValueChange = onHeadingLockNeutralPivotMaxDifferenceChange,
             )
             Text(
-                "仅空档原地掉头时生效：航向误差越大左右差值越大，默认 10%-60%，实际下发会按左右 ESC 反向设置转换。",
+                "仅空档原地掉头时生效：航向误差越大左右差值越大，默认 20%-60%；20% 总差值约等于单侧 10%，用于避开当前电机起转死区。实际下发会按左右 ESC 反向设置转换。",
                 style = MaterialTheme.typography.bodySmall,
                 color = MaterialTheme.colorScheme.onSurfaceVariant,
             )

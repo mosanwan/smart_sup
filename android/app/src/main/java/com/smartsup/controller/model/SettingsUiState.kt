@@ -20,7 +20,7 @@ data class SettingsUiState(
     val rampLimitEnabled: Boolean = true,
     val headingLockToleranceDegrees: Int = 4,
     val headingLockFullCorrectionDegrees: Int = 6,
-    val headingLockNeutralPivotMinDifferencePercent: Int = 10,
+    val headingLockNeutralPivotMinDifferencePercent: Int = 20,
     val headingLockNeutralPivotMaxDifferencePercent: Int = 60,
     val autoNavigationGpsJumpResetMeters: Int = 5,
     val usePhoneHeading: Boolean = true,
