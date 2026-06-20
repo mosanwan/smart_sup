@@ -3424,7 +3424,7 @@ class ControlViewModel(application: Application) : AndroidViewModel(application)
     }
 
     private fun ybYawToCompassHeadingDegrees(rawYawDegrees: Float): Float {
-        return normalizeCompassDegrees(-rawYawDegrees)
+        return normalizeCompassDegrees(-rawYawDegrees + YB_IMU_HEADING_OFFSET_DEGREES)
     }
 
     private fun currentHeadingForLockOrNull(): Float? {
@@ -5954,6 +5954,7 @@ class ControlViewModel(application: Application) : AndroidViewModel(application)
         private const val TRACK_LOG_READ_DELAY_MS = 10L
         private const val PHONE_HEADING_STALE_MS = 1_500L
         private const val YB_IMU_HEADING_STALE_MS = 500L
+        private const val YB_IMU_HEADING_OFFSET_DEGREES = 90f
         private const val APP_TURN_TIMEOUT_MS = 8_000L
         private const val APP_TURN_DONE_DEGREES = 3.0f
         private const val PIVOT_TURN_NEUTRAL_DELAY_MS = 1_000L

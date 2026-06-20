@@ -1862,13 +1862,19 @@ private fun ControlUiState.navigationHeadingDegrees(usePhoneHeading: Boolean): F
     } else {
         telemetry.ybYawDegrees
             ?.takeIf { telemetry.ybImuAvailable == true }
-            ?.let { normalizeCompassDegrees(-it) }
+            ?.let { ybYawToCompassHeadingDegrees(it) }
     }
+}
+
+private fun ybYawToCompassHeadingDegrees(rawYawDegrees: Float): Float {
+    return normalizeCompassDegrees(-rawYawDegrees + YB_IMU_HEADING_OFFSET_DEGREES)
 }
 
 private fun normalizeCompassDegrees(degrees: Float): Float {
     return ((degrees % 360f) + 360f) % 360f
 }
+
+private const val YB_IMU_HEADING_OFFSET_DEGREES = 90f
 
 private fun connectionText(connectionState: ConnectionState): String {
     return when (connectionState) {

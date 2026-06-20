@@ -1455,8 +1455,20 @@ private fun ControlUiState.ybImuModuleText(): String {
 }
 
 private fun ControlUiState.ybHeadingText(): String {
-    return telemetry.ybYawDegrees.formatDegrees()
+    return telemetry.ybYawDegrees
+        ?.let { ybYawToCompassHeadingDegrees(it) }
+        .formatDegrees()
 }
+
+private fun ybYawToCompassHeadingDegrees(rawYawDegrees: Float): Float {
+    return normalizeCompassDegrees(-rawYawDegrees + YB_IMU_HEADING_OFFSET_DEGREES)
+}
+
+private fun normalizeCompassDegrees(degrees: Float): Float {
+    return ((degrees % 360f) + 360f) % 360f
+}
+
+private const val YB_IMU_HEADING_OFFSET_DEGREES = 90f
 
 private fun ControlUiState.ybRollPitchText(): String {
     val roll = telemetry.ybRollDegrees ?: return "--"

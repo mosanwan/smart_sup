@@ -754,7 +754,7 @@ private fun PhoneHeadingSettingsCard(
             SettingsRow(
                 "IMU 航向",
                 controlState.telemetry.ybYawDegrees
-                    ?.let { normalizeCompassDegrees(it).roundToInt() }
+                    ?.let { ybYawToCompassHeadingDegrees(it).roundToInt() }
                     ?.let { "$it°" } ?: "--",
             )
             SettingsRow(
@@ -789,7 +789,7 @@ private fun Esp32ImuObservationCard(
         null
     }
     val ybRawYaw = controlState.telemetry.ybYawDegrees
-    val ybHeading = ybRawYaw?.let { normalizeCompassDegrees(-it) }
+    val ybHeading = ybRawYaw?.let { ybYawToCompassHeadingDegrees(it) }
     val imuAvailable = if (isConnected) controlState.telemetry.imuAvailable else null
     val phoneHeading = controlState.phoneHeadingDegrees
 
@@ -1113,6 +1113,12 @@ private fun headingDeltaText(phoneHeading: Float?, espHeading: Float?): String {
 private fun normalizeCompassDegrees(degrees: Float): Float {
     return ((degrees % 360f) + 360f) % 360f
 }
+
+private fun ybYawToCompassHeadingDegrees(rawYawDegrees: Float): Float {
+    return normalizeCompassDegrees(-rawYawDegrees + YB_IMU_HEADING_OFFSET_DEGREES)
+}
+
+private const val YB_IMU_HEADING_OFFSET_DEGREES = 90f
 
 private fun shortestHeadingDelta(target: Float, current: Float): Float {
     var delta = (target - current) % 360f
