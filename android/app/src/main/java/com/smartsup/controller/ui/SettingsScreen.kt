@@ -59,7 +59,6 @@ import com.smartsup.controller.model.ControlUiState
 import com.smartsup.controller.model.SettingsUiState
 import com.smartsup.controller.model.ThrottleGear
 import com.smartsup.controller.model.UpdateUiState
-import com.smartsup.controller.model.YB_IMU_HEADING_MODES
 import com.smartsup.controller.model.ybImuHeadingAlgorithmLabel
 import com.smartsup.controller.model.ybImuHeadingCandidates
 import com.smartsup.controller.model.ybImuHeadingDegrees
@@ -193,6 +192,7 @@ fun SettingsScreen(
         Esp32ImuObservationCard(
             controlState = controlState,
             settingsState = settingsState,
+            onYbImuHeadingModeChange = onYbImuHeadingModeChange,
         )
 
         GearPercentSettingsCard(
@@ -529,7 +529,6 @@ private fun UpdateSettingsCard(
     }
 }
 
-@OptIn(ExperimentalMaterial3Api::class)
 @Composable
 private fun SafetySettingsCard(
     controlState: ControlUiState,
@@ -550,7 +549,6 @@ private fun SafetySettingsCard(
     onYbImuHeadingModeChange: (Int) -> Unit,
     onCalibrateYbImuHeadingToPhone: () -> Unit,
 ) {
-    var imuModeMenuExpanded by remember { mutableStateOf(false) }
     Card(
         colors = CardDefaults.cardColors(containerColor = MaterialTheme.colorScheme.surface),
         modifier = Modifier.fillMaxWidth(),
@@ -594,37 +592,12 @@ private fun SafetySettingsCard(
                 style = MaterialTheme.typography.bodySmall,
                 color = MaterialTheme.colorScheme.onSurfaceVariant,
             )
-            ExposedDropdownMenuBox(
-                expanded = imuModeMenuExpanded,
-                onExpandedChange = { imuModeMenuExpanded = it },
-                modifier = Modifier.fillMaxWidth(),
-            ) {
-                OutlinedTextField(
-                    value = ybImuHeadingModeLabel(settingsState.ybImuHeadingMode),
-                    onValueChange = {},
-                    readOnly = true,
-                    label = { Text("IMU 航向算法") },
-                    trailingIcon = { ExposedDropdownMenuDefaults.TrailingIcon(expanded = imuModeMenuExpanded) },
-                    colors = ExposedDropdownMenuDefaults.outlinedTextFieldColors(),
-                    modifier = Modifier
-                        .menuAnchor()
-                        .fillMaxWidth(),
-                )
-                ExposedDropdownMenu(
-                    expanded = imuModeMenuExpanded,
-                    onDismissRequest = { imuModeMenuExpanded = false },
-                ) {
-                    YB_IMU_HEADING_MODES.forEach { mode ->
-                        DropdownMenuItem(
-                            text = { Text(mode.label) },
-                            onClick = {
-                                imuModeMenuExpanded = false
-                                onYbImuHeadingModeChange(mode.id)
-                            },
-                        )
-                    }
-                }
-            }
+            SettingsRow("IMU 航向算法", ybImuHeadingModeLabel(settingsState.ybImuHeadingMode))
+            Text(
+                "在下方主控 IMU 观测卡点击候选算法即可切换；切换会取消当前锁航并回空挡。",
+                style = MaterialTheme.typography.bodySmall,
+                color = MaterialTheme.colorScheme.onSurfaceVariant,
+            )
             SettingsRow("IMU 航向偏置", "${settingsState.ybImuHeadingOffsetDegrees.roundToInt()}°")
             SettingsActionButton(
                 text = "对齐手机航向",
@@ -850,6 +823,7 @@ private fun PhoneHeadingSettingsCard(
 private fun Esp32ImuObservationCard(
     controlState: ControlUiState,
     settingsState: SettingsUiState,
+    onYbImuHeadingModeChange: (Int) -> Unit,
 ) {
     val isConnected = controlState.connectionState == ConnectionState.Connected
     val fields = if (isConnected) controlState.telemetry.statusFields else emptyMap()
@@ -906,7 +880,12 @@ private fun Esp32ImuObservationCard(
             ybCandidates.forEach { candidate ->
                 val raw = candidate.rawDegrees?.let { "${it.roundToInt()}°" } ?: "--"
                 val calibrated = candidate.calibratedDegrees?.let { "${it.roundToInt()}°" } ?: "--"
-                SettingsRow(candidate.mode.label, "$calibrated / 裸 $raw")
+                ImuHeadingCandidateRow(
+                    label = candidate.mode.label,
+                    value = "$calibrated / 裸 $raw",
+                    selected = candidate.mode.id == settingsState.ybImuHeadingMode,
+                    onClick = { onYbImuHeadingModeChange(candidate.mode.id) },
+                )
             }
             HorizontalDivider()
             SettingsRow("裸磁航向", fields.imuValue("IMHDG", "°"))
@@ -1117,6 +1096,46 @@ private fun SettingsRow(label: String, value: String) {
             overflow = TextOverflow.Ellipsis,
             modifier = Modifier.weight(1.2f),
         )
+    }
+}
+
+@Composable
+private fun ImuHeadingCandidateRow(
+    label: String,
+    value: String,
+    selected: Boolean,
+    onClick: () -> Unit,
+) {
+    val color = if (selected) Color(0xFF00695C) else MaterialTheme.colorScheme.onSurfaceVariant
+    Surface(
+        onClick = onClick,
+        shape = RoundedCornerShape(8.dp),
+        color = color.copy(alpha = if (selected) 0.16f else 0.06f),
+        modifier = Modifier.fillMaxWidth(),
+    ) {
+        Row(
+            modifier = Modifier.padding(horizontal = 10.dp, vertical = 9.dp),
+            horizontalArrangement = Arrangement.SpaceBetween,
+            verticalAlignment = Alignment.CenterVertically,
+        ) {
+            Text(
+                if (selected) "已选 $label" else label,
+                color = color,
+                fontWeight = if (selected) FontWeight.SemiBold else FontWeight.Normal,
+                maxLines = 2,
+                overflow = TextOverflow.Ellipsis,
+                modifier = Modifier.weight(1f),
+            )
+            Text(
+                value,
+                color = color,
+                fontWeight = FontWeight.Medium,
+                textAlign = TextAlign.End,
+                maxLines = 1,
+                overflow = TextOverflow.Ellipsis,
+                modifier = Modifier.weight(1f),
+            )
+        }
     }
 }
 

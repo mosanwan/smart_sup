@@ -53,8 +53,8 @@ android {
         applicationId = "com.smartsup.controller"
         minSdk = 26
         targetSdk = 36
-        versionCode = 28
-        versionName = "0.2.28"
+        versionCode = 29
+        versionName = "0.2.29"
         buildConfigField("String", "GITHUB_REPOSITORY", "\"mosanwan/smart_sup\"")
         val maptilerApiKey = localConfigValue("MAPTILER_API_KEY")
         buildConfigField("String", "MAPTILER_API_KEY", maptilerApiKey.asBuildConfigString())
