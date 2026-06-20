@@ -142,6 +142,8 @@ fun AppScreen(viewModel: ControlViewModel) {
                 onStopAutoNavigation = viewModel::stopAutoNavigation,
                 onStartTrackLineLock = viewModel::startTrackLineLock,
                 onStopTrackLineLock = viewModel::stopTrackLineLock,
+                onStartStationKeeping = viewModel::startStationKeeping,
+                onStopStationKeeping = viewModel::stopStationKeeping,
             )
             AppTab.Control -> ControlScreen(
                 state = controlState,

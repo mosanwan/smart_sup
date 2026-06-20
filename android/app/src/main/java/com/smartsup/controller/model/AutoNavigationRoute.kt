@@ -31,6 +31,12 @@ data class AutoNavigationUiState(
     val trackLineTargetHeadingDegrees: Float? = null,
     val trackLineCrossTrackErrorMeters: Double? = null,
     val trackLineAlongTrackMeters: Double? = null,
+    val stationKeepingEnabled: Boolean = false,
+    val stationKeepingTarget: NavigationRoutePoint? = null,
+    val stationKeepingTargetHeadingDegrees: Float? = null,
+    val stationKeepingForwardErrorMeters: Double? = null,
+    val stationKeepingLateralErrorMeters: Double? = null,
+    val stationKeepingPositionActive: Boolean = false,
     val leftOutputPercent: Int = 0,
     val rightOutputPercent: Int = 0,
     val message: String = "自动导航未启动",
@@ -42,5 +48,5 @@ data class AutoNavigationUiState(
         get() = executingRouteId != null
 
     val active: Boolean
-        get() = executing || trackLineLockEnabled
+        get() = executing || trackLineLockEnabled || stationKeepingEnabled
 }

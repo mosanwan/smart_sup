@@ -1478,10 +1478,66 @@ class ControlViewModel(application: Application) : AndroidViewModel(application)
         sendCurrentCommand()
     }
 
+    fun startStationKeeping() {
+        val rejectReason = stationKeepingStartRejectReason()
+        if (rejectReason != null) {
+            mutableUiState.update {
+                it.copy(
+                    autoNavigation = it.autoNavigation.copy(message = rejectReason),
+                    statusMessage = rejectReason,
+                )
+            }
+            return
+        }
+        val target = currentGpsPointOrNull() ?: return
+        val targetHeading = currentPhoneHeadingDegreesOrNull() ?: return
+
+        clearAutonomousCommands()
+        autoNavigationFilteredPoint = null
+        autoNavigationLastRawPoint = null
+        mutableUiState.update {
+            it.copy(
+                armed = true,
+                commandSource = CommandSource.App,
+                headingLockEnabled = false,
+                selectedGear = ThrottleGear.Neutral,
+                throttleTrimPercent = 0,
+                autoNavigation = it.autoNavigation.copy(
+                    executingRouteId = null,
+                    targetPointIndex = 0,
+                    gearIndex = 0,
+                    distanceToTargetMeters = 0.0,
+                    headingErrorDegrees = 0f,
+                    trackLineLockEnabled = false,
+                    trackLineOrigin = null,
+                    trackLineBearingDegrees = null,
+                    trackLineTargetHeadingDegrees = null,
+                    trackLineCrossTrackErrorMeters = null,
+                    trackLineAlongTrackMeters = null,
+                    stationKeepingEnabled = true,
+                    stationKeepingTarget = target,
+                    stationKeepingTargetHeadingDegrees = targetHeading,
+                    stationKeepingForwardErrorMeters = 0.0,
+                    stationKeepingLateralErrorMeters = 0.0,
+                    stationKeepingPositionActive = false,
+                    leftOutputPercent = 0,
+                    rightOutputPercent = 0,
+                    message = "定点保持已启动：${targetHeading.roundToInt()}°",
+                ),
+                statusMessage = "定点保持已启动，请保持人工接管准备",
+            )
+        }
+        sendCurrentCommand()
+    }
+
     fun increaseAutoNavigationGear() {
         mutableUiState.update {
             val nextGear = (it.autoNavigation.gearIndex + 1).coerceAtMost(AUTO_NAVIGATION_GEAR_PERCENTS.lastIndex)
-            val modeText = if (it.autoNavigation.trackLineLockEnabled) "航迹线锁定" else "自动导航"
+            val modeText = when {
+                it.autoNavigation.stationKeepingEnabled -> "定点保持"
+                it.autoNavigation.trackLineLockEnabled -> "航迹线锁定"
+                else -> "自动导航"
+            }
             it.copy(
                 autoNavigation = it.autoNavigation.copy(
                     gearIndex = nextGear,
@@ -1494,7 +1550,11 @@ class ControlViewModel(application: Application) : AndroidViewModel(application)
     fun decreaseAutoNavigationGear() {
         mutableUiState.update {
             val nextGear = (it.autoNavigation.gearIndex - 1).coerceAtLeast(0)
-            val modeText = if (it.autoNavigation.trackLineLockEnabled) "航迹线锁定" else "自动导航"
+            val modeText = when {
+                it.autoNavigation.stationKeepingEnabled -> "定点保持"
+                it.autoNavigation.trackLineLockEnabled -> "航迹线锁定"
+                else -> "自动导航"
+            }
             it.copy(
                 autoNavigation = it.autoNavigation.copy(
                     gearIndex = nextGear,
@@ -1516,6 +1576,23 @@ class ControlViewModel(application: Application) : AndroidViewModel(application)
                 selectedGear = ThrottleGear.Neutral,
                 throttleTrimPercent = 0,
                 statusMessage = "航迹线锁定已停止，已锁定并回空挡",
+            )
+        }
+        sendIdle()
+    }
+
+    fun stopStationKeeping() {
+        clearAutoNavigationExecution("定点保持已停止")
+        mutableUiState.update {
+            it.copy(
+                armed = false,
+                leftThrottlePercent = 0,
+                rightThrottlePercent = 0,
+                commandSource = CommandSource.App,
+                headingLockEnabled = false,
+                selectedGear = ThrottleGear.Neutral,
+                throttleTrimPercent = 0,
+                statusMessage = "定点保持已停止，已锁定并回空挡",
             )
         }
         sendIdle()
@@ -3765,6 +3842,9 @@ class ControlViewModel(application: Application) : AndroidViewModel(application)
         }
         val settings = mutableSettingsState.value
         val source = state.commandSource
+        if (state.canSendThrottle && state.autoNavigation.stationKeepingEnabled) {
+            return buildStationKeepingCommand(state, settings)
+        }
         if (state.canSendThrottle && state.autoNavigation.trackLineLockEnabled) {
             return buildTrackLineLockCommand(state, settings)
         }
@@ -3996,6 +4076,131 @@ class ControlViewModel(application: Application) : AndroidViewModel(application)
         return ControlCommand(
             leftThrottlePercent = applyEscDirection(leftPercent, settings.leftEscReversed),
             rightThrottlePercent = applyEscDirection(rightPercent, settings.rightEscReversed),
+            armed = true,
+            source = CommandSource.App,
+            voicePowerLimitPercent = settings.voicePowerLimitPercent,
+        )
+    }
+
+    private fun buildStationKeepingCommand(
+        state: ControlUiState,
+        settings: SettingsUiState,
+    ): ControlCommand {
+        val autoState = state.autoNavigation
+        val targetPoint = autoState.stationKeepingTarget
+        val targetHeading = autoState.stationKeepingTargetHeadingDegrees
+        if (targetPoint == null || targetHeading == null) {
+            failAutoNavigation("定点保持停止：目标点无效")
+            return ControlCommand.Idle
+        }
+        val currentPoint = currentAutoNavigationPointOrNull(settings.autoNavigationGpsJumpResetMeters.toDouble())
+        if (currentPoint == null || gpsSatelliteCount() < AUTO_NAVIGATION_MIN_SATELLITES) {
+            failAutoNavigation("定点保持停止：GPS 定位不足")
+            return ControlCommand.Idle
+        }
+        val currentHeading = currentPhoneHeadingDegreesOrNull()
+        if (currentHeading == null) {
+            failAutoNavigation("定点保持停止：手机指南针暂无有效读数")
+            return ControlCommand.Idle
+        }
+
+        val stationError = stationKeepingError(
+            targetPoint = targetPoint,
+            targetHeadingDegrees = targetHeading,
+            currentPoint = currentPoint,
+        )
+        val positionActive = when {
+            autoState.stationKeepingPositionActive ->
+                stationError.distanceMeters > STATION_KEEPING_HOLD_RADIUS_METERS
+            else ->
+                stationError.distanceMeters >= STATION_KEEPING_REENGAGE_RADIUS_METERS
+        }
+        val headingOffset = if (positionActive) {
+            Math.toDegrees(
+                atan2(stationError.lateralMeters, STATION_KEEPING_LOOKAHEAD_METERS),
+            ).coerceIn(
+                -STATION_KEEPING_MAX_HEADING_OFFSET_DEGREES.toDouble(),
+                STATION_KEEPING_MAX_HEADING_OFFSET_DEGREES.toDouble(),
+            )
+        } else {
+            0.0
+        }
+        val movingReverse = positionActive &&
+            stationError.forwardMeters < -STATION_KEEPING_REVERSE_DEADBAND_METERS
+        val desiredHeading = normalizeCompassDegrees(
+            (targetHeading + if (movingReverse) -headingOffset else headingOffset).toFloat(),
+        )
+        val errorDegrees = shortestCompassError(desiredHeading, currentHeading)
+        val absError = abs(errorDegrees)
+        val outputLimitPercent = minOf(
+            settings.maxThrottlePercent,
+            STATION_KEEPING_MAX_OUTPUT_PERCENT,
+        ).coerceIn(0, 100)
+        val gearIndex = autoState.gearIndex.coerceIn(0, AUTO_NAVIGATION_GEAR_PERCENTS.lastIndex)
+        val requestedBaseMagnitude = if (positionActive && absError <= STATION_KEEPING_STOP_TRANSLATION_DEGREES) {
+            stationKeepingBasePercent(
+                distanceMeters = stationError.distanceMeters,
+                gearPercent = AUTO_NAVIGATION_GEAR_PERCENTS[gearIndex],
+                outputLimitPercent = outputLimitPercent,
+            )
+        } else {
+            0
+        }
+        val basePercent = if (movingReverse) -requestedBaseMagnitude else requestedBaseMagnitude
+        val baseCorrection = headingCorrectionPercent(
+            errorDegrees = errorDegrees,
+            toleranceDegrees = settings.headingLockToleranceDegrees,
+            fullCorrectionDegrees = STATION_KEEPING_FULL_CORRECTION_DEGREES,
+            baseMagnitudePercent = abs(basePercent),
+        )
+        val rawLeftRight = headingCorrectedThrottle(
+            leftBasePercent = basePercent,
+            rightBasePercent = basePercent,
+            errorDegrees = errorDegrees,
+            correction = baseCorrection,
+            adaptiveBoost = 0,
+            toleranceDegrees = settings.headingLockToleranceDegrees,
+            fullCorrectionDegrees = STATION_KEEPING_FULL_CORRECTION_DEGREES,
+            neutralPivotMinDifferencePercent = settings.headingLockNeutralPivotMinDifferencePercent,
+            neutralPivotMaxDifferencePercent = minOf(
+                settings.headingLockNeutralPivotMaxDifferencePercent,
+                STATION_KEEPING_MAX_PIVOT_DIFFERENCE_PERCENT,
+            ),
+            outputLimitPercent = outputLimitPercent,
+        )
+        val leftPercent = rawLeftRight.first.coerceIn(-outputLimitPercent, outputLimitPercent)
+        val rightPercent = rawLeftRight.second.coerceIn(-outputLimitPercent, outputLimitPercent)
+        val leftCommandPercent = applyEscDirection(leftPercent, settings.leftEscReversed)
+        val rightCommandPercent = applyEscDirection(rightPercent, settings.rightEscReversed)
+
+        mutableUiState.update {
+            it.copy(
+                leftThrottlePercent = leftPercent,
+                rightThrottlePercent = rightPercent,
+                commandSource = CommandSource.App,
+                headingLockEnabled = false,
+                autoNavigation = it.autoNavigation.copy(
+                    gearIndex = gearIndex,
+                    distanceToTargetMeters = stationError.distanceMeters,
+                    headingErrorDegrees = errorDegrees,
+                    stationKeepingForwardErrorMeters = stationError.forwardMeters,
+                    stationKeepingLateralErrorMeters = stationError.lateralMeters,
+                    stationKeepingPositionActive = positionActive,
+                    leftOutputPercent = leftPercent,
+                    rightOutputPercent = rightPercent,
+                    message = stationKeepingMessage(
+                        positionActive = positionActive,
+                        movingReverse = movingReverse,
+                        basePercent = basePercent,
+                        absErrorDegrees = absError,
+                    ),
+                ),
+            )
+        }
+
+        return ControlCommand(
+            leftThrottlePercent = leftCommandPercent,
+            rightThrottlePercent = rightCommandPercent,
             armed = true,
             source = CommandSource.App,
             voicePowerLimitPercent = settings.voicePowerLimitPercent,
@@ -4885,6 +5090,12 @@ class ControlViewModel(application: Application) : AndroidViewModel(application)
                         trackLineTargetHeadingDegrees = null,
                         trackLineCrossTrackErrorMeters = null,
                         trackLineAlongTrackMeters = null,
+                        stationKeepingEnabled = false,
+                        stationKeepingTarget = null,
+                        stationKeepingTargetHeadingDegrees = null,
+                        stationKeepingForwardErrorMeters = null,
+                        stationKeepingLateralErrorMeters = null,
+                        stationKeepingPositionActive = false,
                         leftOutputPercent = 0,
                         rightOutputPercent = 0,
                         message = message,
@@ -4932,6 +5143,18 @@ class ControlViewModel(application: Application) : AndroidViewModel(application)
             currentGpsPointOrNull() == null -> "航迹线锁定拒绝：GPS 未定位"
             gpsSatelliteCount() < AUTO_NAVIGATION_MIN_SATELLITES -> "航迹线锁定拒绝：GPS 卫星数不足"
             currentHeadingForLockOrNull() == null -> "航迹线锁定拒绝：${headingSourceUnavailableText()}"
+            else -> null
+        }
+    }
+
+    private fun stationKeepingStartRejectReason(): String? {
+        val state = mutableUiState.value
+        return when {
+            state.connectionState != ConnectionState.Connected -> "定点保持拒绝：未连接主控"
+            !state.armed -> "定点保持拒绝：请先手动解锁"
+            currentGpsPointOrNull() == null -> "定点保持拒绝：GPS 未定位"
+            gpsSatelliteCount() < AUTO_NAVIGATION_MIN_SATELLITES -> "定点保持拒绝：GPS 卫星数不足"
+            currentPhoneHeadingDegreesOrNull() == null -> "定点保持拒绝：手机指南针暂无有效读数"
             else -> null
         }
     }
@@ -5067,6 +5290,12 @@ class ControlViewModel(application: Application) : AndroidViewModel(application)
         val alongTrackMeters: Double,
     )
 
+    private data class StationKeepingError(
+        val distanceMeters: Double,
+        val forwardMeters: Double,
+        val lateralMeters: Double,
+    )
+
     private fun trackLineError(
         origin: NavigationRoutePoint,
         bearingDegrees: Double,
@@ -5086,6 +5315,70 @@ class ControlViewModel(application: Application) : AndroidViewModel(application)
             crossTrackMeters = eastMeters * northUnit - northMeters * eastUnit,
             alongTrackMeters = eastMeters * eastUnit + northMeters * northUnit,
         )
+    }
+
+    private fun stationKeepingError(
+        targetPoint: NavigationRoutePoint,
+        targetHeadingDegrees: Float,
+        currentPoint: NavigationRoutePoint,
+    ): StationKeepingError {
+        val distance = distanceMeters(currentPoint, targetPoint)
+        if (distance <= 0.0) {
+            return StationKeepingError(
+                distanceMeters = 0.0,
+                forwardMeters = 0.0,
+                lateralMeters = 0.0,
+            )
+        }
+        val bearingToTarget = bearingBetween(currentPoint, targetPoint).toFloat()
+        val relativeBearing = Math.toRadians(shortestCompassError(bearingToTarget, targetHeadingDegrees).toDouble())
+        return StationKeepingError(
+            distanceMeters = distance,
+            forwardMeters = distance * cos(relativeBearing),
+            lateralMeters = distance * sin(relativeBearing),
+        )
+    }
+
+    private fun stationKeepingBasePercent(
+        distanceMeters: Double,
+        gearPercent: Int,
+        outputLimitPercent: Int,
+    ): Int {
+        if (outputLimitPercent <= 0) {
+            return 0
+        }
+        val minEffective = minOf(STATION_KEEPING_MIN_EFFECTIVE_OUTPUT_PERCENT, outputLimitPercent)
+        val maxEffective = minOf(gearPercent, outputLimitPercent)
+        if (distanceMeters <= STATION_KEEPING_HOLD_RADIUS_METERS || maxEffective <= 0) {
+            return 0
+        }
+        if (maxEffective <= minEffective) {
+            return maxEffective
+        }
+        val ratio = ((distanceMeters - STATION_KEEPING_HOLD_RADIUS_METERS) /
+            (STATION_KEEPING_FULL_OUTPUT_RADIUS_METERS - STATION_KEEPING_HOLD_RADIUS_METERS))
+            .coerceIn(0.0, 1.0)
+        return (minEffective + (maxEffective - minEffective) * ratio).roundToInt()
+            .coerceIn(minEffective, maxEffective)
+    }
+
+    private fun stationKeepingMessage(
+        positionActive: Boolean,
+        movingReverse: Boolean,
+        basePercent: Int,
+        absErrorDegrees: Float,
+    ): String {
+        if (!positionActive) {
+            return "定点保持中：位置在容差内，保持目标航向"
+        }
+        if (basePercent == 0 && absErrorDegrees > STATION_KEEPING_STOP_TRANSLATION_DEGREES) {
+            return "定点保持中：航向偏差较大，先调头"
+        }
+        return if (movingReverse) {
+            "定点保持中：后退回点"
+        } else {
+            "定点保持中：前进回点"
+        }
     }
 
     private fun interpolatePoint(
@@ -6150,6 +6443,17 @@ class ControlViewModel(application: Application) : AndroidViewModel(application)
         private const val TRACK_LINE_LOOKAHEAD_METERS = 12.0
         private const val TRACK_LINE_MAX_CORRECTION_DEGREES = 25f
         private const val TRACK_LINE_MAX_CROSS_TRACK_METERS = 15.0
+        private const val STATION_KEEPING_HOLD_RADIUS_METERS = 2.0
+        private const val STATION_KEEPING_REENGAGE_RADIUS_METERS = 2.8
+        private const val STATION_KEEPING_FULL_OUTPUT_RADIUS_METERS = 10.0
+        private const val STATION_KEEPING_LOOKAHEAD_METERS = 8.0
+        private const val STATION_KEEPING_REVERSE_DEADBAND_METERS = 1.0
+        private const val STATION_KEEPING_MAX_HEADING_OFFSET_DEGREES = 30.0
+        private const val STATION_KEEPING_STOP_TRANSLATION_DEGREES = 75f
+        private const val STATION_KEEPING_MAX_OUTPUT_PERCENT = 20
+        private const val STATION_KEEPING_MIN_EFFECTIVE_OUTPUT_PERCENT = 10
+        private const val STATION_KEEPING_FULL_CORRECTION_DEGREES = 30
+        private const val STATION_KEEPING_MAX_PIVOT_DIFFERENCE_PERCENT = 40
         private const val MAX_TURN_REQUEST_ID = 65_535
         private const val VOICE_POWER_LIMIT_MIN = 5
         private const val VOICE_POWER_LIMIT_MAX = 100

@@ -144,6 +144,8 @@ fun NavigationScreen(
     onStopAutoNavigation: () -> Unit,
     onStartTrackLineLock: () -> Unit,
     onStopTrackLineLock: () -> Unit,
+    onStartStationKeeping: () -> Unit,
+    onStopStationKeeping: () -> Unit,
 ) {
     val gpsTrack = state.gpsTrack
     val autoNavigation = state.autoNavigation
@@ -200,14 +202,19 @@ fun NavigationScreen(
         ?.points
         ?.getOrNull(autoNavigation.targetPointIndex)
         ?.let { LatLng(it.latitude, it.longitude) }
+    val stationKeepingTarget = autoNavigation.stationKeepingTarget
+        ?.let { LatLng(it.latitude, it.longitude) }
+    val activeTargetPoint = stationKeepingTarget ?: targetRoutePoint
     val cameraTarget = if (showingPlayback) {
         trackPoints.firstOrNull()
     } else if (autoNavigation.editing && routePoints.isNotEmpty()) {
         routePoints.last()
+    } else if (autoNavigation.stationKeepingEnabled) {
+        liveLocation ?: stationKeepingTarget
     } else if (autoNavigation.trackLineLockEnabled) {
         liveLocation ?: routePoints.firstOrNull()
     } else if (autoNavigation.executing) {
-        liveLocation ?: targetRoutePoint
+        liveLocation ?: activeTargetPoint
     } else if (selectedRoute != null && routePoints.isNotEmpty()) {
         routePoints.first()
     } else {
@@ -219,6 +226,8 @@ fun NavigationScreen(
         autoNavigation.editingRouteId?.let { "route-edit:$it:${autoNavigation.editingPoints.size}" }
     } else if (autoNavigation.trackLineLockEnabled) {
         autoNavigation.trackLineOrigin?.let { "track-line:${it.latitude}:${it.longitude}:${autoNavigation.trackLineBearingDegrees}" }
+    } else if (autoNavigation.stationKeepingEnabled) {
+        autoNavigation.stationKeepingTarget?.let { "station:${it.latitude}:${it.longitude}:${autoNavigation.stationKeepingTargetHeadingDegrees}" }
     } else if (autoNavigation.executing) {
         autoNavigation.executingRouteId?.let { "route-exec:$it" }
     } else if (selectedRoute != null) {
@@ -281,7 +290,7 @@ fun NavigationScreen(
                 playbackBearing = if (showingPlayback) playbackBearing else null,
                 routePoints = routePoints,
                 routeEditing = autoNavigation.editing,
-                routeTarget = targetRoutePoint,
+                routeTarget = activeTargetPoint,
                 onRoutePointAdd = { point -> onAddRoutePoint(point.latitude, point.longitude) },
                 followTarget = if (showingPlayback) playbackLocation else null,
                 cameraTarget = cameraTarget,
@@ -328,13 +337,34 @@ fun NavigationScreen(
                         onClick = {
                             playbackControlsVisible = false
                             playbackPlaying = false
+                            if (autoNavigation.stationKeepingEnabled) {
+                                onStopStationKeeping()
+                            } else {
+                                onStartStationKeeping()
+                            }
+                        },
+                        enabled = !gpsTrack.syncing &&
+                            !autoNavigation.editing &&
+                            !autoNavigation.executing &&
+                            !autoNavigation.trackLineLockEnabled,
+                        contentPadding = PaddingValues(horizontal = 8.dp, vertical = 6.dp),
+                    ) {
+                        Text(if (autoNavigation.stationKeepingEnabled) "停点" else "定点")
+                    }
+                    TextButton(
+                        onClick = {
+                            playbackControlsVisible = false
+                            playbackPlaying = false
                             if (autoNavigation.trackLineLockEnabled) {
                                 onStopTrackLineLock()
                             } else {
                                 onStartTrackLineLock()
                             }
                         },
-                        enabled = !gpsTrack.syncing && !autoNavigation.editing && !autoNavigation.executing,
+                        enabled = !gpsTrack.syncing &&
+                            !autoNavigation.editing &&
+                            !autoNavigation.executing &&
+                            !autoNavigation.stationKeepingEnabled,
                         contentPadding = PaddingValues(horizontal = 8.dp, vertical = 6.dp),
                     ) {
                         Text(if (autoNavigation.trackLineLockEnabled) "停锁" else "锁线")
@@ -406,6 +436,16 @@ fun NavigationScreen(
                 onUndo = onUndoRoutePoint,
                 onSave = onSaveRoute,
                 onCancel = onCancelRouteEditing,
+                modifier = Modifier
+                    .align(Alignment.BottomCenter)
+                    .padding(12.dp),
+            )
+        } else if (autoNavigation.stationKeepingEnabled) {
+            StationKeepingControls(
+                state = state,
+                onDecreaseGear = onDecreaseAutoGear,
+                onIncreaseGear = onIncreaseAutoGear,
+                onStop = onStopStationKeeping,
                 modifier = Modifier
                     .align(Alignment.BottomCenter)
                     .padding(12.dp),
@@ -1000,6 +1040,85 @@ private fun TrackLineLockControls(
                 )
                 IconButton(onClick = onIncreaseGear) {
                     Icon(Icons.Outlined.KeyboardArrowUp, contentDescription = "航迹线锁定加档")
+                }
+            }
+        }
+    }
+}
+
+@Composable
+private fun StationKeepingControls(
+    state: ControlUiState,
+    onDecreaseGear: () -> Unit,
+    onIncreaseGear: () -> Unit,
+    onStop: () -> Unit,
+    modifier: Modifier = Modifier,
+) {
+    val autoState = state.autoNavigation
+    Surface(
+        shape = RoundedCornerShape(8.dp),
+        color = MaterialTheme.colorScheme.surface.copy(alpha = 0.96f),
+        tonalElevation = 3.dp,
+        modifier = modifier.fillMaxWidth(),
+    ) {
+        Column(
+            modifier = Modifier.padding(horizontal = 12.dp, vertical = 10.dp),
+            verticalArrangement = Arrangement.spacedBy(8.dp),
+        ) {
+            Row(
+                modifier = Modifier.fillMaxWidth(),
+                horizontalArrangement = Arrangement.SpaceBetween,
+                verticalAlignment = Alignment.CenterVertically,
+            ) {
+                Column(modifier = Modifier.weight(1f)) {
+                    Text("定点保持", style = MaterialTheme.typography.titleSmall, fontWeight = FontWeight.SemiBold)
+                    Text(
+                        autoState.message,
+                        style = MaterialTheme.typography.bodySmall,
+                        color = MaterialTheme.colorScheme.onSurfaceVariant,
+                        maxLines = 1,
+                        overflow = TextOverflow.Ellipsis,
+                    )
+                }
+                OutlinedButton(onClick = onStop, contentPadding = PaddingValues(horizontal = 12.dp, vertical = 8.dp)) {
+                    Icon(Icons.Outlined.Close, contentDescription = null, modifier = Modifier.size(18.dp))
+                    Spacer(Modifier.width(6.dp))
+                    Text("停止")
+                }
+            }
+
+            Row(
+                modifier = Modifier
+                    .fillMaxWidth()
+                    .horizontalScroll(rememberScrollState()),
+                horizontalArrangement = Arrangement.spacedBy(18.dp),
+            ) {
+                CompactMetric("速度", state.telemetry.gpsSpeedText() ?: "-- km/h")
+                CompactMetric("距离", autoState.distanceToTargetMeters?.let { "${it.roundToInt()}m" } ?: "--")
+                CompactMetric("前后", autoState.stationKeepingForwardErrorMeters?.signedMetersText() ?: "--")
+                CompactMetric("左右", autoState.stationKeepingLateralErrorMeters?.signedMetersText() ?: "--")
+                CompactMetric("目标航向", autoState.stationKeepingTargetHeadingDegrees?.let { "${it.roundToInt()}°" } ?: "--")
+                CompactMetric("误差", autoState.headingErrorDegrees?.let { "${it.roundToInt()}°" } ?: "--")
+            }
+
+            Row(
+                modifier = Modifier.fillMaxWidth(),
+                horizontalArrangement = Arrangement.spacedBy(10.dp),
+                verticalAlignment = Alignment.CenterVertically,
+            ) {
+                IconButton(onClick = onDecreaseGear) {
+                    Icon(Icons.Outlined.KeyboardArrowDown, contentDescription = "定点保持减档")
+                }
+                Text(
+                    "档位 ${autoState.gearIndex + 1} · L ${autoState.leftOutputPercent}% / R ${autoState.rightOutputPercent}%",
+                    style = MaterialTheme.typography.bodyMedium,
+                    fontWeight = FontWeight.SemiBold,
+                    modifier = Modifier.weight(1f),
+                    maxLines = 1,
+                    overflow = TextOverflow.Ellipsis,
+                )
+                IconButton(onClick = onIncreaseGear) {
+                    Icon(Icons.Outlined.KeyboardArrowUp, contentDescription = "定点保持加档")
                 }
             }
         }
@@ -2237,6 +2356,14 @@ private fun Double.crossTrackText(): String {
         "${abs(this).roundToInt()}m"
     } else {
         "${abs(this).roundToInt()}m$direction"
+    }
+}
+
+private fun Double.signedMetersText(): String {
+    return when {
+        this > 0.2 -> "+${abs(this).roundToInt()}m"
+        this < -0.2 -> "-${abs(this).roundToInt()}m"
+        else -> "0m"
     }
 }
 
