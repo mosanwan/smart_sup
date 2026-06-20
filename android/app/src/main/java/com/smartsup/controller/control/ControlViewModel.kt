@@ -40,6 +40,9 @@ import com.smartsup.controller.model.ThrottleGear
 import com.smartsup.controller.model.TrackLogEvent
 import com.smartsup.controller.model.UpdateUiState
 import com.smartsup.controller.model.VoiceAsrState
+import com.smartsup.controller.model.calibrateYbImuHeadingToPhone
+import com.smartsup.controller.model.ybImuHeadingDegrees
+import com.smartsup.controller.model.ybImuHeadingAlgorithmLabel
 import com.smartsup.controller.transport.BluetoothClassicTransport
 import com.smartsup.controller.transport.ControlTransport
 import com.smartsup.controller.update.AppUpdateInstaller
@@ -875,15 +878,28 @@ class ControlViewModel(application: Application) : AndroidViewModel(application)
             mutableUiState.update { it.copy(statusMessage = "IMU 校准失败：手机航向暂无有效读数") }
             return
         }
-        val rawYaw = currentYbImuRawYawDegreesOrNull()
-        if (rawYaw == null) {
+        val telemetry = currentYbImuHeadingTelemetryOrNull()
+        if (telemetry == null) {
             mutableUiState.update { it.copy(statusMessage = "IMU 校准失败：主控 IMU 航向暂无有效读数") }
             return
         }
-        val offset = normalizeCompassDegrees(phoneHeading - rawYaw)
-        preferences.edit().putFloat(KEY_YB_IMU_HEADING_OFFSET_CHIP_DOWN_DEGREES, offset).apply()
+        val result = calibrateYbImuHeadingToPhone(phoneHeading, telemetry)
+        if (result == null) {
+            mutableUiState.update {
+                it.copy(
+                    statusMessage = "IMU 校准失败：四元数和 YBY 暂无有效读数",
+                )
+            }
+            return
+        }
+
+        preferences.edit()
+            .putFloat(KEY_YB_IMU_HEADING_OFFSET_CHIP_DOWN_DEGREES, result.offsetDegrees)
+            .apply()
         clearAutonomousCommands()
-        mutableSettingsState.update { it.copy(ybImuHeadingOffsetDegrees = offset) }
+        mutableSettingsState.update {
+            it.copy(ybImuHeadingOffsetDegrees = result.offsetDegrees)
+        }
         mutableUiState.update {
             it.copy(
                 leftThrottlePercent = 0,
@@ -892,7 +908,7 @@ class ControlViewModel(application: Application) : AndroidViewModel(application)
                 headingLockEnabled = false,
                 selectedGear = ThrottleGear.Neutral,
                 throttleTrimPercent = 0,
-                statusMessage = "IMU 航向已对齐手机，偏置 ${offset.roundToInt()}°，已取消当前锁航",
+                statusMessage = "IMU 航向已对齐手机：${ybImuHeadingAlgorithmLabel(telemetry)}，偏置 ${result.offsetDegrees.roundToInt()}°，已取消当前锁航",
             )
         }
         sendCurrentCommand()
@@ -3445,19 +3461,25 @@ class ControlViewModel(application: Application) : AndroidViewModel(application)
     }
 
     private fun currentYbImuHeadingDegreesOrNull(): Float? {
-        val rawYaw = currentYbImuRawYawDegreesOrNull() ?: return null
-        return ybYawToCompassHeadingDegrees(rawYaw)
+        val telemetry = currentYbImuHeadingTelemetryOrNull() ?: return null
+        val settings = mutableSettingsState.value
+        return ybImuHeadingDegrees(
+            telemetry = telemetry,
+            offsetDegrees = settings.ybImuHeadingOffsetDegrees,
+        )
     }
 
-    private fun currentYbImuRawYawDegreesOrNull(): Float? {
+    private fun currentYbImuHeadingTelemetryOrNull(): com.smartsup.controller.model.Telemetry? {
         val state = mutableUiState.value
         val ageMs = System.currentTimeMillis() - ybImuHeadingLastUpdateMs
-        return state.telemetry.ybYawDegrees
-            ?.takeIf { state.telemetry.ybImuAvailable == true && ageMs <= YB_IMU_HEADING_STALE_MS }
-    }
-
-    private fun ybYawToCompassHeadingDegrees(rawYawDegrees: Float): Float {
-        return normalizeCompassDegrees(rawYawDegrees + mutableSettingsState.value.ybImuHeadingOffsetDegrees)
+        return state.telemetry.takeIf {
+            it.ybImuAvailable == true &&
+                (
+                    it.ybYawDegrees != null ||
+                        (it.ybQuatW != null && it.ybQuatX != null && it.ybQuatY != null && it.ybQuatZ != null)
+                    ) &&
+                ageMs <= YB_IMU_HEADING_STALE_MS
+        }
     }
 
     private fun currentHeadingForLockOrNull(): Float? {

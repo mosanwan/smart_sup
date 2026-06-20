@@ -59,6 +59,8 @@ import com.smartsup.controller.model.ControlUiState
 import com.smartsup.controller.model.SettingsUiState
 import com.smartsup.controller.model.ThrottleGear
 import com.smartsup.controller.model.UpdateUiState
+import com.smartsup.controller.model.ybImuHeadingAlgorithmLabel
+import com.smartsup.controller.model.ybImuHeadingDegrees
 import kotlin.math.roundToInt
 
 private data class VoiceOption(
@@ -772,10 +774,11 @@ private fun PhoneHeadingSettingsCard(
             )
             SettingsRow(
                 "IMU 航向",
-                controlState.telemetry.ybYawDegrees
-                    ?.let { ybYawToCompassHeadingDegrees(it, settingsState.ybImuHeadingOffsetDegrees).roundToInt() }
+                ybImuHeadingDegrees(controlState.telemetry, settingsState.ybImuHeadingOffsetDegrees)
+                    ?.roundToInt()
                     ?.let { "$it°" } ?: "--",
             )
+            SettingsRow("IMU 算法", ybImuHeadingAlgorithmLabel(controlState.telemetry))
             SettingsRow(
                 "手机传感器",
                 controlState.phoneHeadingSensorName.ifBlank {
@@ -809,9 +812,7 @@ private fun Esp32ImuObservationCard(
         null
     }
     val ybRawYaw = controlState.telemetry.ybYawDegrees
-    val ybHeading = ybRawYaw?.let {
-        ybYawToCompassHeadingDegrees(it, settingsState.ybImuHeadingOffsetDegrees)
-    }
+    val ybHeading = ybImuHeadingDegrees(controlState.telemetry, settingsState.ybImuHeadingOffsetDegrees)
     val imuAvailable = if (isConnected) controlState.telemetry.imuAvailable else null
     val phoneHeading = controlState.phoneHeadingDegrees
 
@@ -1134,10 +1135,6 @@ private fun headingDeltaText(phoneHeading: Float?, espHeading: Float?): String {
 
 private fun normalizeCompassDegrees(degrees: Float): Float {
     return ((degrees % 360f) + 360f) % 360f
-}
-
-private fun ybYawToCompassHeadingDegrees(rawYawDegrees: Float, offsetDegrees: Float): Float {
-    return normalizeCompassDegrees(rawYawDegrees + offsetDegrees)
 }
 
 private fun shortestHeadingDelta(target: Float, current: Float): Float {

@@ -181,7 +181,7 @@ target_heading = line_bearing + clamp(correction_angle, -max_angle, +max_angle)
 | GPS 最低卫星数 | `4` | 低于该值不执行 |
 | 航向超时 | 手机 `1.5s`，ESP32 IMU 测试模式 `500ms` | 复用现有航向源约束 |
 
-主控九轴 IMU 上报的 `YBY` 是模块原始 yaw。当前模块芯片面朝下安装，第一阶段在 Android App 中按 `heading = normalize(YBY + offset)` 转换为船体航向。`offset` 可在设置页用“对齐手机航向”按当前手机航向重新计算。转换后的航向用于地图箭头、航迹线锁定和航向误差计算；设置页保留原始 `YBY` 读数用于排查。
+主控九轴 IMU 上报的四元数 `YBQW/YBQX/YBQY/YBQZ` 是当前 IMU 航向测试模式的主航向来源。当前模块芯片面朝下安装，Android App 将 IMU 船头方向向量经四元数旋转后投影到水平面，再计算船体指南针航向；`YBY` 仅在四元数无效时兜底。`offset` 可在设置页用“对齐手机航向”按当前手机航向重新计算。转换后的航向用于地图箭头、航迹线锁定和航向误差计算；设置页保留原始 `YBY` 读数用于排查。
 
 安全边界：
 

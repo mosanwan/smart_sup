@@ -73,6 +73,7 @@ import com.smartsup.controller.model.GpsTrackSegment
 import com.smartsup.controller.model.GpsTrackUiState
 import com.smartsup.controller.model.NavigationRoute
 import com.smartsup.controller.model.NavigationRoutePoint
+import com.smartsup.controller.model.ybImuHeadingDegrees
 import kotlinx.coroutines.delay
 import org.maplibre.android.MapLibre
 import org.maplibre.android.annotations.Icon
@@ -1866,18 +1867,10 @@ private fun ControlUiState.navigationHeadingDegrees(
     return if (usePhoneHeading) {
         phoneHeadingDegrees?.takeIf { phoneHeadingAvailable }
     } else {
-        telemetry.ybYawDegrees
-            ?.takeIf { telemetry.ybImuAvailable == true }
-            ?.let { ybYawToCompassHeadingDegrees(it, ybImuHeadingOffsetDegrees) }
+        telemetry
+            .takeIf { it.ybImuAvailable == true }
+            ?.let { ybImuHeadingDegrees(it, ybImuHeadingOffsetDegrees) }
     }
-}
-
-private fun ybYawToCompassHeadingDegrees(rawYawDegrees: Float, offsetDegrees: Float): Float {
-    return normalizeCompassDegrees(rawYawDegrees + offsetDegrees)
-}
-
-private fun normalizeCompassDegrees(degrees: Float): Float {
-    return ((degrees % 360f) + 360f) % 360f
 }
 
 private fun connectionText(connectionState: ConnectionState): String {

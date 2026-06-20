@@ -69,6 +69,7 @@ import com.smartsup.controller.model.ConnectionState
 import com.smartsup.controller.model.ControlUiState
 import com.smartsup.controller.model.ThrottleGear
 import com.smartsup.controller.model.VoiceAsrState
+import com.smartsup.controller.model.ybImuHeadingDegrees
 import kotlin.math.abs
 import kotlin.math.asin
 import kotlin.math.cos
@@ -1458,17 +1459,7 @@ private fun ControlUiState.ybImuModuleText(): String {
 }
 
 private fun ControlUiState.ybHeadingText(ybImuHeadingOffsetDegrees: Float): String {
-    return telemetry.ybYawDegrees
-        ?.let { ybYawToCompassHeadingDegrees(it, ybImuHeadingOffsetDegrees) }
-        .formatDegrees()
-}
-
-private fun ybYawToCompassHeadingDegrees(rawYawDegrees: Float, offsetDegrees: Float): Float {
-    return normalizeCompassDegrees(rawYawDegrees + offsetDegrees)
-}
-
-private fun normalizeCompassDegrees(degrees: Float): Float {
-    return ((degrees % 360f) + 360f) % 360f
+    return ybImuHeadingDegrees(telemetry, ybImuHeadingOffsetDegrees).formatDegrees()
 }
 
 private fun ControlUiState.ybRollPitchText(): String {
