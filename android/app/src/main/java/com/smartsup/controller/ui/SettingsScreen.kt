@@ -1137,7 +1137,7 @@ private fun normalizeCompassDegrees(degrees: Float): Float {
 }
 
 private fun ybYawToCompassHeadingDegrees(rawYawDegrees: Float, offsetDegrees: Float): Float {
-    return normalizeCompassDegrees(-rawYawDegrees + offsetDegrees)
+    return normalizeCompassDegrees(rawYawDegrees + offsetDegrees)
 }
 
 private fun shortestHeadingDelta(target: Float, current: Float): Float {

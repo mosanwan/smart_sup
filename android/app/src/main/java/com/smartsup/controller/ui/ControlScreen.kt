@@ -1464,7 +1464,7 @@ private fun ControlUiState.ybHeadingText(ybImuHeadingOffsetDegrees: Float): Stri
 }
 
 private fun ybYawToCompassHeadingDegrees(rawYawDegrees: Float, offsetDegrees: Float): Float {
-    return normalizeCompassDegrees(-rawYawDegrees + offsetDegrees)
+    return normalizeCompassDegrees(rawYawDegrees + offsetDegrees)
 }
 
 private fun normalizeCompassDegrees(degrees: Float): Float {

@@ -880,8 +880,8 @@ class ControlViewModel(application: Application) : AndroidViewModel(application)
             mutableUiState.update { it.copy(statusMessage = "IMU 校准失败：主控 IMU 航向暂无有效读数") }
             return
         }
-        val offset = normalizeCompassDegrees(phoneHeading + rawYaw)
-        preferences.edit().putFloat(KEY_YB_IMU_HEADING_OFFSET_DEGREES, offset).apply()
+        val offset = normalizeCompassDegrees(phoneHeading - rawYaw)
+        preferences.edit().putFloat(KEY_YB_IMU_HEADING_OFFSET_CHIP_DOWN_DEGREES, offset).apply()
         clearAutonomousCommands()
         mutableSettingsState.update { it.copy(ybImuHeadingOffsetDegrees = offset) }
         mutableUiState.update {
@@ -3457,7 +3457,7 @@ class ControlViewModel(application: Application) : AndroidViewModel(application)
     }
 
     private fun ybYawToCompassHeadingDegrees(rawYawDegrees: Float): Float {
-        return normalizeCompassDegrees(-rawYawDegrees + mutableSettingsState.value.ybImuHeadingOffsetDegrees)
+        return normalizeCompassDegrees(rawYawDegrees + mutableSettingsState.value.ybImuHeadingOffsetDegrees)
     }
 
     private fun currentHeadingForLockOrNull(): Float? {
@@ -5885,7 +5885,7 @@ class ControlViewModel(application: Application) : AndroidViewModel(application)
             ),
             usePhoneHeading = preferences.getBoolean(KEY_USE_PHONE_HEADING, true),
             ybImuHeadingOffsetDegrees = normalizeCompassDegrees(
-                preferences.getFloat(KEY_YB_IMU_HEADING_OFFSET_DEGREES, YB_IMU_HEADING_OFFSET_DEFAULT_DEGREES),
+                preferences.getFloat(KEY_YB_IMU_HEADING_OFFSET_CHIP_DOWN_DEGREES, YB_IMU_HEADING_OFFSET_DEFAULT_DEGREES),
             ),
             realtimeVoiceEndpoint = preferences.getString(KEY_REALTIME_VOICE_ENDPOINT, null)
                 ?.ifBlank { REALTIME_VOICE_ENDPOINT_DEFAULT }
@@ -5979,7 +5979,7 @@ class ControlViewModel(application: Application) : AndroidViewModel(application)
         private const val KEY_LEFT_ESC_REVERSED = "left_esc_reversed"
         private const val KEY_RIGHT_ESC_REVERSED = "right_esc_reversed"
         private const val KEY_USE_PHONE_HEADING = "use_phone_heading"
-        private const val KEY_YB_IMU_HEADING_OFFSET_DEGREES = "yb_imu_heading_offset_degrees"
+        private const val KEY_YB_IMU_HEADING_OFFSET_CHIP_DOWN_DEGREES = "yb_imu_heading_offset_chip_down_degrees"
         private const val KEY_REALTIME_VOICE_ENDPOINT = "realtime_voice_endpoint"
         private const val KEY_REALTIME_VOICE_APP_ID = "realtime_voice_app_id"
         private const val KEY_REALTIME_VOICE_API_KEY = "realtime_voice_api_key"
@@ -5995,7 +5995,7 @@ class ControlViewModel(application: Application) : AndroidViewModel(application)
         private const val TRACK_LOG_READ_DELAY_MS = 10L
         private const val PHONE_HEADING_STALE_MS = 1_500L
         private const val YB_IMU_HEADING_STALE_MS = 500L
-        private const val YB_IMU_HEADING_OFFSET_DEFAULT_DEGREES = 90f
+        private const val YB_IMU_HEADING_OFFSET_DEFAULT_DEGREES = 0f
         private const val APP_TURN_TIMEOUT_MS = 8_000L
         private const val APP_TURN_DONE_DEGREES = 3.0f
         private const val PIVOT_TURN_NEUTRAL_DELAY_MS = 1_000L
