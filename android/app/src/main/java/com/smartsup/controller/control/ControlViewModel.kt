@@ -869,6 +869,35 @@ class ControlViewModel(application: Application) : AndroidViewModel(application)
         sendCurrentCommand()
     }
 
+    fun calibrateYbImuHeadingToPhone() {
+        val phoneHeading = currentPhoneHeadingDegreesOrNull()
+        if (phoneHeading == null) {
+            mutableUiState.update { it.copy(statusMessage = "IMU 校准失败：手机航向暂无有效读数") }
+            return
+        }
+        val rawYaw = currentYbImuRawYawDegreesOrNull()
+        if (rawYaw == null) {
+            mutableUiState.update { it.copy(statusMessage = "IMU 校准失败：主控 IMU 航向暂无有效读数") }
+            return
+        }
+        val offset = normalizeCompassDegrees(phoneHeading + rawYaw)
+        preferences.edit().putFloat(KEY_YB_IMU_HEADING_OFFSET_DEGREES, offset).apply()
+        clearAutonomousCommands()
+        mutableSettingsState.update { it.copy(ybImuHeadingOffsetDegrees = offset) }
+        mutableUiState.update {
+            it.copy(
+                leftThrottlePercent = 0,
+                rightThrottlePercent = 0,
+                commandSource = CommandSource.App,
+                headingLockEnabled = false,
+                selectedGear = ThrottleGear.Neutral,
+                throttleTrimPercent = 0,
+                statusMessage = "IMU 航向已对齐手机，偏置 ${offset.roundToInt()}°，已取消当前锁航",
+            )
+        }
+        sendCurrentCommand()
+    }
+
     fun setRealtimeVoiceEndpoint(value: String) {
         val trimmed = value.trim().ifBlank { REALTIME_VOICE_ENDPOINT_DEFAULT }
         preferences.edit().putString(KEY_REALTIME_VOICE_ENDPOINT, trimmed).apply()
@@ -3416,15 +3445,19 @@ class ControlViewModel(application: Application) : AndroidViewModel(application)
     }
 
     private fun currentYbImuHeadingDegreesOrNull(): Float? {
+        val rawYaw = currentYbImuRawYawDegreesOrNull() ?: return null
+        return ybYawToCompassHeadingDegrees(rawYaw)
+    }
+
+    private fun currentYbImuRawYawDegreesOrNull(): Float? {
         val state = mutableUiState.value
         val ageMs = System.currentTimeMillis() - ybImuHeadingLastUpdateMs
         return state.telemetry.ybYawDegrees
             ?.takeIf { state.telemetry.ybImuAvailable == true && ageMs <= YB_IMU_HEADING_STALE_MS }
-            ?.let { ybYawToCompassHeadingDegrees(it) }
     }
 
     private fun ybYawToCompassHeadingDegrees(rawYawDegrees: Float): Float {
-        return normalizeCompassDegrees(-rawYawDegrees + YB_IMU_HEADING_OFFSET_DEGREES)
+        return normalizeCompassDegrees(-rawYawDegrees + mutableSettingsState.value.ybImuHeadingOffsetDegrees)
     }
 
     private fun currentHeadingForLockOrNull(): Float? {
@@ -5847,6 +5880,9 @@ class ControlViewModel(application: Application) : AndroidViewModel(application)
                 ),
             ),
             usePhoneHeading = preferences.getBoolean(KEY_USE_PHONE_HEADING, true),
+            ybImuHeadingOffsetDegrees = normalizeCompassDegrees(
+                preferences.getFloat(KEY_YB_IMU_HEADING_OFFSET_DEGREES, YB_IMU_HEADING_OFFSET_DEFAULT_DEGREES),
+            ),
             realtimeVoiceEndpoint = preferences.getString(KEY_REALTIME_VOICE_ENDPOINT, null)
                 ?.ifBlank { REALTIME_VOICE_ENDPOINT_DEFAULT }
                 ?: REALTIME_VOICE_ENDPOINT_DEFAULT,
@@ -5939,6 +5975,7 @@ class ControlViewModel(application: Application) : AndroidViewModel(application)
         private const val KEY_LEFT_ESC_REVERSED = "left_esc_reversed"
         private const val KEY_RIGHT_ESC_REVERSED = "right_esc_reversed"
         private const val KEY_USE_PHONE_HEADING = "use_phone_heading"
+        private const val KEY_YB_IMU_HEADING_OFFSET_DEGREES = "yb_imu_heading_offset_degrees"
         private const val KEY_REALTIME_VOICE_ENDPOINT = "realtime_voice_endpoint"
         private const val KEY_REALTIME_VOICE_APP_ID = "realtime_voice_app_id"
         private const val KEY_REALTIME_VOICE_API_KEY = "realtime_voice_api_key"
@@ -5954,7 +5991,7 @@ class ControlViewModel(application: Application) : AndroidViewModel(application)
         private const val TRACK_LOG_READ_DELAY_MS = 10L
         private const val PHONE_HEADING_STALE_MS = 1_500L
         private const val YB_IMU_HEADING_STALE_MS = 500L
-        private const val YB_IMU_HEADING_OFFSET_DEGREES = 90f
+        private const val YB_IMU_HEADING_OFFSET_DEFAULT_DEGREES = 90f
         private const val APP_TURN_TIMEOUT_MS = 8_000L
         private const val APP_TURN_DONE_DEGREES = 3.0f
         private const val PIVOT_TURN_NEUTRAL_DELAY_MS = 1_000L

@@ -120,6 +120,7 @@ fun AppScreen(viewModel: ControlViewModel) {
             AppTab.Navigation -> NavigationScreen(
                 state = controlState,
                 usePhoneHeading = settingsState.usePhoneHeading,
+                ybImuHeadingOffsetDegrees = settingsState.ybImuHeadingOffsetDegrees,
                 modifier = modifier,
                 onSyncTrack = viewModel::requestTrackLogSync,
                 onPlaybackIndexChange = viewModel::setGpsPlaybackIndex,
@@ -148,6 +149,7 @@ fun AppScreen(viewModel: ControlViewModel) {
                 gearPercents = settingsState.gearPercents,
                 leftEscReversed = settingsState.leftEscReversed,
                 rightEscReversed = settingsState.rightEscReversed,
+                ybImuHeadingOffsetDegrees = settingsState.ybImuHeadingOffsetDegrees,
                 modifier = modifier,
                 onArm = { viewModel.setArmed(true) },
                 onDisarm = { viewModel.setArmed(false) },
@@ -207,6 +209,7 @@ fun AppScreen(viewModel: ControlViewModel) {
                     viewModel::setHeadingLockNeutralPivotMaxDifferencePercent,
                 onAutoNavigationGpsJumpResetChange = viewModel::setAutoNavigationGpsJumpResetMeters,
                 onUsePhoneHeadingChange = viewModel::setUsePhoneHeading,
+                onCalibrateYbImuHeadingToPhone = viewModel::calibrateYbImuHeadingToPhone,
                 onRealtimeVoiceEndpointChange = viewModel::setRealtimeVoiceEndpoint,
                 onRealtimeVoiceAppIdChange = viewModel::setRealtimeVoiceAppId,
                 onRealtimeVoiceApiKeyChange = viewModel::setRealtimeVoiceApiKey,

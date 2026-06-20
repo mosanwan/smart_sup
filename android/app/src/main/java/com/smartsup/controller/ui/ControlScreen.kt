@@ -83,6 +83,7 @@ fun ControlScreen(
     gearPercents: Map<ThrottleGear, Int>,
     leftEscReversed: Boolean,
     rightEscReversed: Boolean,
+    ybImuHeadingOffsetDegrees: Float,
     modifier: Modifier = Modifier,
     onArm: () -> Unit,
     onDisarm: () -> Unit,
@@ -177,6 +178,7 @@ fun ControlScreen(
                 state = state,
                 fineTuneStepPercent = fineTuneStepPercent,
                 gearPercents = gearPercents,
+                ybImuHeadingOffsetDegrees = ybImuHeadingOffsetDegrees,
                 modifier = Modifier
                     .weight(1f)
                     .fillMaxHeight(),
@@ -560,6 +562,7 @@ private fun CenterControlPanel(
     state: ControlUiState,
     fineTuneStepPercent: Int,
     gearPercents: Map<ThrottleGear, Int>,
+    ybImuHeadingOffsetDegrees: Float,
     modifier: Modifier = Modifier,
     onArm: () -> Unit,
     onDisarm: () -> Unit,
@@ -626,7 +629,7 @@ private fun CenterControlPanel(
                 verticalArrangement = Arrangement.spacedBy(7.dp),
             ) {
                 CompactInfoRow("主控 IMU", state.ybImuModuleText())
-                CompactInfoRow("IMU 航向", state.ybHeadingText())
+                CompactInfoRow("IMU 航向", state.ybHeadingText(ybImuHeadingOffsetDegrees))
                 CompactInfoRow("横滚 / 俯仰", state.ybRollPitchText())
                 CompactInfoRow("Z 角速度", state.ybGyroZText())
                 CompactInfoRow("加速度", state.ybAccelText())
@@ -1454,21 +1457,19 @@ private fun ControlUiState.ybImuModuleText(): String {
     }
 }
 
-private fun ControlUiState.ybHeadingText(): String {
+private fun ControlUiState.ybHeadingText(ybImuHeadingOffsetDegrees: Float): String {
     return telemetry.ybYawDegrees
-        ?.let { ybYawToCompassHeadingDegrees(it) }
+        ?.let { ybYawToCompassHeadingDegrees(it, ybImuHeadingOffsetDegrees) }
         .formatDegrees()
 }
 
-private fun ybYawToCompassHeadingDegrees(rawYawDegrees: Float): Float {
-    return normalizeCompassDegrees(-rawYawDegrees + YB_IMU_HEADING_OFFSET_DEGREES)
+private fun ybYawToCompassHeadingDegrees(rawYawDegrees: Float, offsetDegrees: Float): Float {
+    return normalizeCompassDegrees(-rawYawDegrees + offsetDegrees)
 }
 
 private fun normalizeCompassDegrees(degrees: Float): Float {
     return ((degrees % 360f) + 360f) % 360f
 }
-
-private const val YB_IMU_HEADING_OFFSET_DEGREES = 90f
 
 private fun ControlUiState.ybRollPitchText(): String {
     val roll = telemetry.ybRollDegrees ?: return "--"

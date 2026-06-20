@@ -109,6 +109,7 @@ fun SettingsScreen(
     onHeadingLockNeutralPivotMaxDifferenceChange: (Int) -> Unit,
     onAutoNavigationGpsJumpResetChange: (Int) -> Unit,
     onUsePhoneHeadingChange: (Boolean) -> Unit,
+    onCalibrateYbImuHeadingToPhone: () -> Unit,
     onRealtimeVoiceEndpointChange: (String) -> Unit,
     onRealtimeVoiceAppIdChange: (String) -> Unit,
     onRealtimeVoiceApiKeyChange: (String) -> Unit,
@@ -148,6 +149,7 @@ fun SettingsScreen(
         )
 
         SafetySettingsCard(
+            controlState = controlState,
             settingsState = settingsState,
             onAutoReconnectChange = onAutoReconnectChange,
             onMaxThrottleChange = onMaxThrottleChange,
@@ -162,6 +164,7 @@ fun SettingsScreen(
             onHeadingLockNeutralPivotMaxDifferenceChange = onHeadingLockNeutralPivotMaxDifferenceChange,
             onAutoNavigationGpsJumpResetChange = onAutoNavigationGpsJumpResetChange,
             onUsePhoneHeadingChange = onUsePhoneHeadingChange,
+            onCalibrateYbImuHeadingToPhone = onCalibrateYbImuHeadingToPhone,
         )
 
         RealtimeVoiceSettingsCard(
@@ -180,7 +183,10 @@ fun SettingsScreen(
             onRefreshMagCalibrationStatus = onRefreshMagCalibrationStatus,
         )
 
-        Esp32ImuObservationCard(controlState = controlState)
+        Esp32ImuObservationCard(
+            controlState = controlState,
+            settingsState = settingsState,
+        )
 
         GearPercentSettingsCard(
             settingsState = settingsState,
@@ -518,6 +524,7 @@ private fun UpdateSettingsCard(
 
 @Composable
 private fun SafetySettingsCard(
+    controlState: ControlUiState,
     settingsState: SettingsUiState,
     onAutoReconnectChange: (Boolean) -> Unit,
     onMaxThrottleChange: (Int) -> Unit,
@@ -532,6 +539,7 @@ private fun SafetySettingsCard(
     onHeadingLockNeutralPivotMaxDifferenceChange: (Int) -> Unit,
     onAutoNavigationGpsJumpResetChange: (Int) -> Unit,
     onUsePhoneHeadingChange: (Boolean) -> Unit,
+    onCalibrateYbImuHeadingToPhone: () -> Unit,
 ) {
     Card(
         colors = CardDefaults.cardColors(containerColor = MaterialTheme.colorScheme.surface),
@@ -572,9 +580,20 @@ private fun SafetySettingsCard(
                 onCheckedChange = { useEsp32Imu -> onUsePhoneHeadingChange(!useEsp32Imu) },
             )
             Text(
-                "测试开关仅影响航向锁定和角度转向；自动导航仍使用手机指南针。切换时会取消当前锁航并回空挡。",
+                "测试开关仅影响航向锁定和角度转向。切换时会取消当前锁航并回空挡。",
                 style = MaterialTheme.typography.bodySmall,
                 color = MaterialTheme.colorScheme.onSurfaceVariant,
+            )
+            SettingsRow("IMU 航向偏置", "${settingsState.ybImuHeadingOffsetDegrees.roundToInt()}°")
+            SettingsActionButton(
+                text = "对齐手机航向",
+                icon = Icons.Outlined.Tune,
+                color = Color(0xFF00695C),
+                onClick = onCalibrateYbImuHeadingToPhone,
+                enabled = controlState.phoneHeadingAvailable &&
+                    controlState.telemetry.ybImuAvailable == true &&
+                    controlState.telemetry.ybYawDegrees != null,
+                modifier = Modifier.fillMaxWidth(),
             )
             Text("正反向油门限幅：+/-${settingsState.maxThrottlePercent}%")
             Slider(
@@ -754,7 +773,7 @@ private fun PhoneHeadingSettingsCard(
             SettingsRow(
                 "IMU 航向",
                 controlState.telemetry.ybYawDegrees
-                    ?.let { ybYawToCompassHeadingDegrees(it).roundToInt() }
+                    ?.let { ybYawToCompassHeadingDegrees(it, settingsState.ybImuHeadingOffsetDegrees).roundToInt() }
                     ?.let { "$it°" } ?: "--",
             )
             SettingsRow(
@@ -780,6 +799,7 @@ private fun PhoneHeadingSettingsCard(
 @Composable
 private fun Esp32ImuObservationCard(
     controlState: ControlUiState,
+    settingsState: SettingsUiState,
 ) {
     val isConnected = controlState.connectionState == ConnectionState.Connected
     val fields = if (isConnected) controlState.telemetry.statusFields else emptyMap()
@@ -789,7 +809,9 @@ private fun Esp32ImuObservationCard(
         null
     }
     val ybRawYaw = controlState.telemetry.ybYawDegrees
-    val ybHeading = ybRawYaw?.let { ybYawToCompassHeadingDegrees(it) }
+    val ybHeading = ybRawYaw?.let {
+        ybYawToCompassHeadingDegrees(it, settingsState.ybImuHeadingOffsetDegrees)
+    }
     val imuAvailable = if (isConnected) controlState.telemetry.imuAvailable else null
     val phoneHeading = controlState.phoneHeadingDegrees
 
@@ -1114,11 +1136,9 @@ private fun normalizeCompassDegrees(degrees: Float): Float {
     return ((degrees % 360f) + 360f) % 360f
 }
 
-private fun ybYawToCompassHeadingDegrees(rawYawDegrees: Float): Float {
-    return normalizeCompassDegrees(-rawYawDegrees + YB_IMU_HEADING_OFFSET_DEGREES)
+private fun ybYawToCompassHeadingDegrees(rawYawDegrees: Float, offsetDegrees: Float): Float {
+    return normalizeCompassDegrees(-rawYawDegrees + offsetDegrees)
 }
-
-private const val YB_IMU_HEADING_OFFSET_DEGREES = 90f
 
 private fun shortestHeadingDelta(target: Float, current: Float): Float {
     var delta = (target - current) % 360f
