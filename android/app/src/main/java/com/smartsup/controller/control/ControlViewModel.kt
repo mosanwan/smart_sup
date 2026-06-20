@@ -5965,7 +5965,7 @@ class ControlViewModel(application: Application) : AndroidViewModel(application)
         private const val HEADING_LOCK_LOW_SPEED_FULL_CORRECTION_DEGREES = 45f
         private const val HEADING_LOCK_ADAPTIVE_WINDOW_MS = 3_000L
         private const val HEADING_LOCK_ADAPTIVE_MIN_WINDOW_MS = 2_700L
-        private const val HEADING_LOCK_ADAPTIVE_MAX_BOOST_PERCENT = 20
+        private const val HEADING_LOCK_ADAPTIVE_MAX_BOOST_PERCENT = 50
         private const val HEADING_LOCK_ADAPTIVE_RISE_STEP_PERCENT = 1
         private const val HEADING_LOCK_ADAPTIVE_DECAY_STEP_PERCENT = 2
         private const val HEADING_LOCK_ADAPTIVE_IMPROVEMENT_DEADBAND_DEGREES = 1.0f
