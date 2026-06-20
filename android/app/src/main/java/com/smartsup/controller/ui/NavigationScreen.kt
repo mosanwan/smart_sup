@@ -448,6 +448,7 @@ fun NavigationScreen(
             StartAutoNavigationDialog(
                 route = route,
                 state = state,
+                usePhoneHeading = usePhoneHeading,
                 onDismiss = { pendingExecuteRoute = null },
                 onConfirm = {
                     pendingExecuteRoute = null
@@ -1004,16 +1005,19 @@ private fun TrackLineLockControls(
 private fun StartAutoNavigationDialog(
     route: NavigationRoute,
     state: ControlUiState,
+    usePhoneHeading: Boolean,
     onDismiss: () -> Unit,
     onConfirm: () -> Unit,
 ) {
     val gpsReady = state.telemetry.statusFields["GPS_FIX"] == "1"
     val satelliteCount = state.telemetry.statusFields["GPS_SAT"]?.toIntOrNull() ?: 0
+    val headingSourceText = if (usePhoneHeading) "手机" else "IMU"
+    val headingReady = state.navigationHeadingDegrees(usePhoneHeading) != null
     val ready = state.connectionState == ConnectionState.Connected &&
         state.armed &&
         gpsReady &&
         satelliteCount >= 4 &&
-        state.phoneHeadingAvailable &&
+        headingReady &&
         route.points.size >= 2
     AlertDialog(
         onDismissRequest = onDismiss,
@@ -1022,9 +1026,9 @@ private fun StartAutoNavigationDialog(
             Column(verticalArrangement = Arrangement.spacedBy(8.dp)) {
                 Text("${route.name} · ${route.points.size} 点 · ${route.distanceText()}")
                 Text("启动后 App 会按路线持续计算左右推进，并每 100ms 发送控制心跳。")
-                Text("请确认：主控已连接并手动解锁，手机固定在板体上，GPS 已定位，人员随时可接管。")
+                Text("请确认：主控已连接并手动解锁，GPS 已定位，航向源有效，人员随时可接管。")
                 Text(
-                    "当前：连接=${connectionText(state.connectionState)}；解锁=${if (state.armed) "是" else "否"}；GPS=${if (gpsReady) "已定位" else "未定位"}；卫星=$satelliteCount；指南针=${if (state.phoneHeadingAvailable) "可用" else "不可用"}",
+                    "当前：连接=${connectionText(state.connectionState)}；解锁=${if (state.armed) "是" else "否"}；GPS=${if (gpsReady) "已定位" else "未定位"}；卫星=$satelliteCount；航向=$headingSourceText ${if (headingReady) "可用" else "不可用"}",
                     color = MaterialTheme.colorScheme.onSurfaceVariant,
                     style = MaterialTheme.typography.bodySmall,
                 )

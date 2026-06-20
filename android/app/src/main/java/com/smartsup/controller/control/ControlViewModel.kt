@@ -1270,6 +1270,10 @@ class ControlViewModel(application: Application) : AndroidViewModel(application)
         clearAutonomousCommands()
         autoNavigationFilteredPoint = null
         autoNavigationLastRawPoint = null
+        val initialTargetIndex = initialAutoNavigationTargetIndex(
+            route = route!!,
+            currentPoint = currentGpsPointOrNull(),
+        )
         mutableUiState.update {
             it.copy(
                 armed = true,
@@ -1280,7 +1284,7 @@ class ControlViewModel(application: Application) : AndroidViewModel(application)
                 autoNavigation = it.autoNavigation.copy(
                     selectedRouteId = routeId,
                     executingRouteId = routeId,
-                    targetPointIndex = 0,
+                    targetPointIndex = initialTargetIndex,
                     gearIndex = 0,
                     distanceToTargetMeters = null,
                     headingErrorDegrees = null,
@@ -1292,7 +1296,7 @@ class ControlViewModel(application: Application) : AndroidViewModel(application)
                     trackLineAlongTrackMeters = null,
                     leftOutputPercent = 0,
                     rightOutputPercent = 0,
-                    message = "自动导航已启动：${route!!.name}",
+                    message = "自动导航已启动：${route.name}",
                 ),
                 statusMessage = "自动导航已启动，请保持人工接管准备",
             )
@@ -3679,13 +3683,17 @@ class ControlViewModel(application: Application) : AndroidViewModel(application)
             failAutoNavigation("自动导航停止：GPS 定位不足")
             return ControlCommand.Idle
         }
-        val currentHeading = currentPhoneHeadingDegreesOrNull()
+        val currentHeading = currentHeadingForLockOrNull()
         if (currentHeading == null) {
-            failAutoNavigation("自动导航停止：手机指南针超时")
+            failAutoNavigation("自动导航停止：${headingSourceUnavailableText()}")
             return ControlCommand.Idle
         }
 
-        var targetIndex = autoState.targetPointIndex.coerceIn(0, route.points.lastIndex)
+        val progressTargetIndex = initialAutoNavigationTargetIndex(route, currentPoint)
+        var targetIndex = maxOf(
+            autoState.targetPointIndex.coerceIn(0, route.points.lastIndex),
+            progressTargetIndex,
+        )
         var targetPoint = route.points[targetIndex]
         var distanceMeters = distanceMeters(currentPoint, targetPoint)
         while (distanceMeters <= AUTO_NAVIGATION_ARRIVAL_RADIUS_METERS && targetIndex < route.points.lastIndex) {
@@ -4694,7 +4702,7 @@ class ControlViewModel(application: Application) : AndroidViewModel(application)
             !state.armed -> "自动导航拒绝：请先手动解锁"
             currentGpsPointOrNull() == null -> "自动导航拒绝：GPS 未定位"
             gpsSatelliteCount() < AUTO_NAVIGATION_MIN_SATELLITES -> "自动导航拒绝：GPS 卫星数不足"
-            currentPhoneHeadingDegreesOrNull() == null -> "自动导航拒绝：手机指南针暂无有效读数"
+            currentHeadingForLockOrNull() == null -> "自动导航拒绝：${headingSourceUnavailableText()}"
             else -> null
         }
     }
@@ -4773,6 +4781,68 @@ class ControlViewModel(application: Application) : AndroidViewModel(application)
             return bearingBetween(route.points[targetIndex - 1], targetPoint)
         }
         return bearingBetween(currentPoint, targetPoint)
+    }
+
+    private data class RouteSegmentProjection(
+        val segmentIndex: Int,
+        val fraction: Double,
+        val distanceSquaredMeters: Double,
+    )
+
+    private fun initialAutoNavigationTargetIndex(
+        route: NavigationRoute,
+        currentPoint: NavigationRoutePoint?,
+    ): Int {
+        if (currentPoint == null || route.points.size < 2) {
+            return 0
+        }
+        val projection = route.points
+            .zipWithNext()
+            .mapIndexed { index, (from, to) ->
+                projectPointToRouteSegment(
+                    segmentIndex = index,
+                    from = from,
+                    to = to,
+                    point = currentPoint,
+                )
+            }
+            .minByOrNull { it.distanceSquaredMeters }
+            ?: return 0
+        return (projection.segmentIndex + 1).coerceAtMost(route.points.lastIndex)
+    }
+
+    private fun projectPointToRouteSegment(
+        segmentIndex: Int,
+        from: NavigationRoutePoint,
+        to: NavigationRoutePoint,
+        point: NavigationRoutePoint,
+    ): RouteSegmentProjection {
+        val earthRadiusMeters = 6_371_000.0
+        val referenceLat = Math.toRadians((from.latitude + to.latitude + point.latitude) / 3.0)
+        val segmentEast = Math.toRadians(to.longitude - from.longitude) *
+            cos(referenceLat) *
+            earthRadiusMeters
+        val segmentNorth = Math.toRadians(to.latitude - from.latitude) * earthRadiusMeters
+        val pointEast = Math.toRadians(point.longitude - from.longitude) *
+            cos(referenceLat) *
+            earthRadiusMeters
+        val pointNorth = Math.toRadians(point.latitude - from.latitude) * earthRadiusMeters
+        val segmentLengthSquared = segmentEast * segmentEast + segmentNorth * segmentNorth
+        val fraction = if (segmentLengthSquared <= 0.0) {
+            0.0
+        } else {
+            ((pointEast * segmentEast + pointNorth * segmentNorth) / segmentLengthSquared)
+                .coerceIn(0.0, 1.0)
+        }
+        val closestEast = segmentEast * fraction
+        val closestNorth = segmentNorth * fraction
+        val distanceEast = pointEast - closestEast
+        val distanceNorth = pointNorth - closestNorth
+        return RouteSegmentProjection(
+            segmentIndex = segmentIndex,
+            fraction = fraction,
+            distanceSquaredMeters = distanceEast * distanceEast + distanceNorth * distanceNorth,
+        )
     }
 
     private data class TrackLineError(
