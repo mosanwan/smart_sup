@@ -14,48 +14,72 @@ class GpsTrackStore(context: Context) {
     init {
         trackDir.mkdirs()
         if (!pointFile.exists()) {
-            pointFile.writeText("session_id,seq,utc,lat_e7,lon_e7\n")
+            pointFile.writeText(TRACK_HEADER)
         }
         readAllPoints().forEach { point ->
             knownKeys += point.key()
         }
     }
 
+    @Synchronized
     fun appendIfNew(point: GpsTrackPoint): Boolean {
-        rememberSyncedSequence(point.sequence)
-        val key = point.key()
-        if (key in knownKeys) {
-            return false
+        return appendAllIfNew(listOf(point)) == 1
+    }
+
+    @Synchronized
+    fun appendAllIfNew(points: List<GpsTrackPoint>): Int {
+        if (points.isEmpty()) {
+            return 0
         }
-        pointFile.appendText(
-            "${point.sessionId},${point.sequence},${point.utcSeconds},${point.latitudeE7},${point.longitudeE7}\n",
-        )
-        knownKeys += key
-        return true
+        rememberSyncedSequence(points.maxOf { it.sequence })
+        val pendingLines = StringBuilder()
+        var savedCount = 0
+        points.forEach { point ->
+            val key = point.key()
+            if (key !in knownKeys) {
+                pendingLines.append(point.csvLine())
+                knownKeys += key
+                savedCount += 1
+            }
+        }
+        if (pendingLines.isNotEmpty()) {
+            pointFile.appendText(pendingLines.toString())
+        }
+        return savedCount
     }
 
+    @Synchronized
     fun lastSyncedSequence(): Int {
-        return maxOf(readAllPoints().maxOfOrNull { it.sequence } ?: 0, readRememberedSyncedSequence())
+        val points = readAllPoints()
+        if (points.isEmpty()) {
+            return 0
+        }
+        return maxOf(points.maxOf { it.sequence }, readRememberedSyncedSequence())
     }
 
+    @Synchronized
     fun hasAnyPoint(): Boolean {
         return pointCount() > 0
     }
 
+    @Synchronized
     fun readPoints(limit: Int = TRACK_POINT_LOAD_LIMIT): List<GpsTrackPoint> {
         return readAllPoints().takeLast(limit)
     }
 
+    @Synchronized
     fun readTracks(): List<GpsTrackSegment> {
         return buildTrackGroups(readAllPoints()).map { it.segment }
     }
 
+    @Synchronized
     fun readTrackPoints(trackId: String?, limit: Int = TRACK_POINT_LOAD_LIMIT): List<GpsTrackPoint> {
         val groups = buildTrackGroups(readAllPoints())
         val selected = trackId?.let { id -> groups.firstOrNull { it.segment.id == id } } ?: groups.lastOrNull()
         return selected?.points.orEmpty().takeLast(limit)
     }
 
+    @Synchronized
     fun deleteTrack(trackId: String): Boolean {
         val points = readAllPoints()
         val groups = buildTrackGroups(points)
@@ -69,9 +93,20 @@ class GpsTrackStore(context: Context) {
         remaining.forEach { point ->
             pointFile.appendText(point.csvLine())
         }
+        writeRememberedSyncedSequence(remaining.maxOfOrNull { it.sequence } ?: 0)
         knownKeys.clear()
         remaining.forEach { knownKeys += it.key() }
         return true
+    }
+
+    @Synchronized
+    fun pointCount(): Int {
+        if (!pointFile.exists()) {
+            return 0
+        }
+        return pointFile.useLines { lines ->
+            lines.drop(1).count()
+        }
     }
 
     private fun readAllPoints(): List<GpsTrackPoint> {
@@ -83,15 +118,6 @@ class GpsTrackStore(context: Context) {
                 .mapNotNull(::parsePointLine)
                 .sortedWith(compareBy<GpsTrackPoint> { it.utcSeconds }.thenBy { it.sequence })
                 .toList()
-        }
-    }
-
-    fun pointCount(): Int {
-        if (!pointFile.exists()) {
-            return 0
-        }
-        return pointFile.useLines { lines ->
-            lines.drop(1).count()
         }
     }
 
@@ -120,6 +146,14 @@ class GpsTrackStore(context: Context) {
     private fun rememberSyncedSequence(sequence: Int) {
         if (sequence > readRememberedSyncedSequence()) {
             syncedSequenceFile.writeText(sequence.toString())
+        }
+    }
+
+    private fun writeRememberedSyncedSequence(sequence: Int) {
+        if (sequence > 0) {
+            syncedSequenceFile.writeText(sequence.toString())
+        } else {
+            syncedSequenceFile.delete()
         }
     }
 

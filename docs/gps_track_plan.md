@@ -106,7 +106,7 @@ LOG_INFO;REC=16;CAP=61440;COUNT=1200;OLDEST=1;NEWEST=1200;SESSION=12;RATE=1
 读取轨迹点：
 
 ```text
-LOG_READ;FROM=1001;LIMIT=32
+LOG_READ;FROM=1001;LIMIT=256
 ```
 
 响应为多行：
@@ -118,7 +118,7 @@ LOG_POINT;SEQ=1001;SID=12;T=1781510400;LAT=221234567;LON=1131234567
 LOG_END;NEXT=1033
 ```
 
-`FROM` 是 `seq`。`LIMIT` 第一版建议限制在 `1..64`，避免单次输出过长影响控制心跳。Android 应小批量重复读取，直到 `NEXT > NEWEST`。
+`FROM` 是 `seq`。`LIMIT` 调试加速阶段允许 `1..256`，Android 默认用 `256` 批量拉取历史轨迹。这个值会让单次蓝牙输出更长，历史大批量同步建议在主控锁定或低风险状态下执行；如后续实测影响控制心跳，应回退到 `64` 或改为更高效的二进制/压缩同步。Android 应小批量重复读取，直到 `NEXT > NEWEST`。固件读取时应从 `FROM` 对应的环形缓冲偏移附近开始顺序输出，不能每批都从最旧记录线性扫描到 `FROM`；否则大批量同步会随着 `FROM` 增大逐批变慢。若固件为了避免预扫描而无法提前知道本批实际点数，`LOG_BEGIN;COUNT=0` 可表示本批数量未知，Android 以实际收到的 `LOG_POINT` 和 `LOG_END;NEXT` 为准。
 
 ## Android 功能
 

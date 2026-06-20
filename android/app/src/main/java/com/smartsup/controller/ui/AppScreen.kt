@@ -119,6 +119,7 @@ fun AppScreen(viewModel: ControlViewModel) {
         when (selectedTab) {
             AppTab.Navigation -> NavigationScreen(
                 state = controlState,
+                usePhoneHeading = settingsState.usePhoneHeading,
                 modifier = modifier,
                 onSyncTrack = viewModel::requestTrackLogSync,
                 onPlaybackIndexChange = viewModel::setGpsPlaybackIndex,
@@ -137,6 +138,8 @@ fun AppScreen(viewModel: ControlViewModel) {
                 onIncreaseAutoGear = viewModel::increaseAutoNavigationGear,
                 onDecreaseAutoGear = viewModel::decreaseAutoNavigationGear,
                 onStopAutoNavigation = viewModel::stopAutoNavigation,
+                onStartTrackLineLock = viewModel::startTrackLineLock,
+                onStopTrackLineLock = viewModel::stopTrackLineLock,
             )
             AppTab.Control -> ControlScreen(
                 state = controlState,

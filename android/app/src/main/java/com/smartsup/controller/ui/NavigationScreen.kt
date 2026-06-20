@@ -26,9 +26,11 @@ import androidx.compose.foundation.lazy.items
 import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.outlined.Add
+import androidx.compose.material.icons.outlined.CheckCircle
 import androidx.compose.material.icons.outlined.Delete
 import androidx.compose.material.icons.outlined.Close
 import androidx.compose.material.icons.outlined.Edit
+import androidx.compose.material.icons.outlined.ErrorOutline
 import androidx.compose.material.icons.outlined.KeyboardArrowDown
 import androidx.compose.material.icons.outlined.KeyboardArrowUp
 import androidx.compose.material.icons.outlined.Pause
@@ -39,6 +41,7 @@ import androidx.compose.material3.CardDefaults
 import androidx.compose.material3.FilledTonalIconButton
 import androidx.compose.material3.Icon
 import androidx.compose.material3.IconButton
+import androidx.compose.material3.LinearProgressIndicator
 import androidx.compose.material3.MaterialTheme
 import androidx.compose.material3.OutlinedButton
 import androidx.compose.material3.Slider
@@ -67,6 +70,7 @@ import com.smartsup.controller.model.ConnectionState
 import com.smartsup.controller.model.ControlUiState
 import com.smartsup.controller.model.GpsTrackPoint
 import com.smartsup.controller.model.GpsTrackSegment
+import com.smartsup.controller.model.GpsTrackUiState
 import com.smartsup.controller.model.NavigationRoute
 import com.smartsup.controller.model.NavigationRoutePoint
 import kotlinx.coroutines.delay
@@ -89,6 +93,7 @@ import java.time.Instant
 import java.time.ZoneId
 import java.time.format.DateTimeFormatter
 import java.util.Locale
+import kotlin.math.abs
 import kotlin.math.atan2
 import kotlin.math.ceil
 import kotlin.math.cos
@@ -105,13 +110,17 @@ private const val TRACK_ARROW_FAR_ZOOM_MAX = 10.0
 private const val TRACK_ARROW_MID_ZOOM_MAX = 13.0
 private const val TRACK_ARROW_NEAR_ZOOM_MAX = 15.0
 private const val PLAYBACK_ARROW_ICON_SIZE_PX = 58
+private const val LIVE_HEADING_ARROW_ICON_SIZE_PX = 64
+private const val TRACK_LINE_DISPLAY_LENGTH_METERS = 3_000.0
 private val TRACK_ARROW_COLOR = Color.rgb(0, 180, 255)
 private val PLAYBACK_ARROW_COLOR = Color.rgb(220, 40, 40)
+private val LIVE_HEADING_ARROW_COLOR = Color.rgb(40, 120, 255)
 private val PLAYBACK_SPEED_OPTIONS = listOf(1, 5, 15, 30, 60, 120)
 
 @Composable
 fun NavigationScreen(
     state: ControlUiState,
+    usePhoneHeading: Boolean,
     modifier: Modifier = Modifier,
     onSyncTrack: () -> Unit,
     onPlaybackIndexChange: (Int) -> Unit,
@@ -130,6 +139,8 @@ fun NavigationScreen(
     onIncreaseAutoGear: () -> Unit,
     onDecreaseAutoGear: () -> Unit,
     onStopAutoNavigation: () -> Unit,
+    onStartTrackLineLock: () -> Unit,
+    onStopTrackLineLock: () -> Unit,
 ) {
     val gpsTrack = state.gpsTrack
     val autoNavigation = state.autoNavigation
@@ -140,13 +151,22 @@ fun NavigationScreen(
     var playbackControlsVisible by rememberSaveable { mutableStateOf(false) }
     var playbackPosition by rememberSaveable { mutableStateOf(0f) }
     var playbackSpeedMultiplier by rememberSaveable { mutableStateOf(30) }
+    var previousSyncing by remember { mutableStateOf(gpsTrack.syncing) }
+    var syncNotice by remember { mutableStateOf<String?>(null) }
     val liveLocation = state.telemetry.liveLatLng()
+    val liveHeadingDegrees = state.navigationHeadingDegrees(usePhoneHeading)
+    val liveHeadingSourceText = if (usePhoneHeading) "手机" else "IMU"
+    val liveHeadingText = liveHeadingDegrees?.let { "$liveHeadingSourceText ${it.roundToInt()}°" }
     val gpsSpeedText = state.telemetry.gpsSpeedText()
     val rawTrackPoints = remember(gpsTrack.recentPoints) {
         gpsTrack.recentPoints.map { LatLng(it.latitude, it.longitude) }
     }
     val trackPoints = remember(rawTrackPoints) {
         smoothTrackPoints(rawTrackPoints)
+    }
+    val lastKnownGpsLocation = rawTrackPoints.lastOrNull()
+    val lastKnownGpsKey = gpsTrack.recentPoints.lastOrNull()?.let { point ->
+        "last-gps:${point.sessionId}:${point.sequence}:${point.latitudeE7}:${point.longitudeE7}"
     }
     val playbackLocation = remember(gpsTrack.recentPoints, playbackPosition) {
         smoothedTrackLocation(gpsTrack.recentPoints, playbackPosition)
@@ -162,10 +182,12 @@ fun NavigationScreen(
     }
     val showingPlayback = playbackControlsVisible && gpsTrack.recentPoints.isNotEmpty()
     val selectedRoutePoints = autoNavigation.routePointsForMap()
+    val trackLinePoints = autoNavigation.trackLinePointsForMap()
     val selectedRoute = autoNavigation.selectedRouteId
         ?.let { routeId -> autoNavigation.routes.firstOrNull { it.id == routeId } }
     val routePoints = when {
         autoNavigation.editing -> autoNavigation.editingPoints.map { LatLng(it.latitude, it.longitude) }
+        autoNavigation.trackLineLockEnabled -> trackLinePoints
         autoNavigation.executing -> selectedRoutePoints
         selectedRoute != null -> selectedRoutePoints
         else -> emptyList()
@@ -179,23 +201,27 @@ fun NavigationScreen(
         trackPoints.firstOrNull()
     } else if (autoNavigation.editing && routePoints.isNotEmpty()) {
         routePoints.last()
+    } else if (autoNavigation.trackLineLockEnabled) {
+        liveLocation ?: routePoints.firstOrNull()
     } else if (autoNavigation.executing) {
         liveLocation ?: targetRoutePoint
     } else if (selectedRoute != null && routePoints.isNotEmpty()) {
         routePoints.first()
     } else {
-        liveLocation
+        liveLocation ?: lastKnownGpsLocation
     }
     val cameraTargetKey = if (showingPlayback) {
         gpsTrack.selectedTrackId?.let { "track:$it" }
     } else if (autoNavigation.editing) {
         autoNavigation.editingRouteId?.let { "route-edit:$it:${autoNavigation.editingPoints.size}" }
+    } else if (autoNavigation.trackLineLockEnabled) {
+        autoNavigation.trackLineOrigin?.let { "track-line:${it.latitude}:${it.longitude}:${autoNavigation.trackLineBearingDegrees}" }
     } else if (autoNavigation.executing) {
         autoNavigation.executingRouteId?.let { "route-exec:$it" }
     } else if (selectedRoute != null) {
         "route-selected:${selectedRoute.id}"
     } else {
-        liveLocation?.let { "live:${it.latitude}:${it.longitude}" }
+        liveLocation?.let { "live:${it.latitude}:${it.longitude}" } ?: lastKnownGpsKey
     }
 
     LaunchedEffect(gpsTrack.selectedTrackId, gpsTrack.recentPoints.size) {
@@ -223,12 +249,30 @@ fun NavigationScreen(
         }
     }
 
+    LaunchedEffect(gpsTrack.syncing, gpsTrack.syncMessage) {
+        if (gpsTrack.syncing) {
+            syncNotice = null
+        } else if (previousSyncing) {
+            syncNotice = gpsTrack.syncMessage.ifBlank { "轨迹同步完成" }
+        }
+        previousSyncing = gpsTrack.syncing
+    }
+
+    LaunchedEffect(syncNotice) {
+        if (syncNotice != null) {
+            delay(4200)
+            syncNotice = null
+        }
+    }
+
     Box(
         modifier = modifier.fillMaxSize(),
     ) {
         if (BuildConfig.MAPTILER_API_KEY_CONFIGURED) {
             MapLibreTrackMap(
                 liveLocation = liveLocation,
+                liveHeadingDegrees = liveHeadingDegrees,
+                liveHeadingSourceText = liveHeadingSourceText,
                 trackPoints = if (showingPlayback) trackPoints else emptyList(),
                 playbackLocation = if (showingPlayback) playbackLocation else null,
                 playbackBearing = if (showingPlayback) playbackBearing else null,
@@ -245,45 +289,72 @@ fun NavigationScreen(
             MapUnavailableLayer(modifier = Modifier.fillMaxSize())
         }
 
-        Surface(
+        Column(
             modifier = Modifier
                 .align(Alignment.TopCenter)
                 .fillMaxWidth()
                 .padding(12.dp),
-            shape = RoundedCornerShape(8.dp),
-            color = MaterialTheme.colorScheme.surface.copy(alpha = 0.98f),
-            tonalElevation = 3.dp,
+            verticalArrangement = Arrangement.spacedBy(8.dp),
         ) {
-            Row(
-                modifier = Modifier
-                    .fillMaxWidth()
-                    .padding(horizontal = 12.dp, vertical = 8.dp),
-                horizontalArrangement = Arrangement.spacedBy(4.dp),
-                verticalAlignment = Alignment.CenterVertically,
+            Surface(
+                shape = RoundedCornerShape(8.dp),
+                color = MaterialTheme.colorScheme.surface.copy(alpha = 0.98f),
+                tonalElevation = 3.dp,
             ) {
-                GpsStatusChip(
-                    text = "GPS ${state.telemetry.gpsFixText()}",
-                    speedText = gpsSpeedText,
-                    modifier = Modifier.weight(1f),
-                )
-                TextButton(
-                    onClick = onSyncTrack,
-                    enabled = !gpsTrack.syncing,
-                    contentPadding = PaddingValues(horizontal = 8.dp, vertical = 6.dp),
+                Row(
+                    modifier = Modifier
+                        .fillMaxWidth()
+                        .padding(horizontal = 12.dp, vertical = 8.dp),
+                    horizontalArrangement = Arrangement.spacedBy(4.dp),
+                    verticalAlignment = Alignment.CenterVertically,
                 ) {
-                    Text(if (gpsTrack.syncing) "同步中" else "同步")
+                    GpsStatusChip(
+                        text = "GPS ${state.telemetry.gpsFixText()}",
+                        speedText = gpsSpeedText,
+                        headingText = liveHeadingText,
+                        modifier = Modifier.weight(1f),
+                    )
+                    TextButton(
+                        onClick = onSyncTrack,
+                        enabled = !gpsTrack.syncing,
+                        contentPadding = PaddingValues(horizontal = 8.dp, vertical = 6.dp),
+                    ) {
+                        Text(if (gpsTrack.syncing) "同步中" else "同步")
+                    }
+                    TextButton(
+                        onClick = {
+                            playbackControlsVisible = false
+                            playbackPlaying = false
+                            if (autoNavigation.trackLineLockEnabled) {
+                                onStopTrackLineLock()
+                            } else {
+                                onStartTrackLineLock()
+                            }
+                        },
+                        enabled = !gpsTrack.syncing && !autoNavigation.editing && !autoNavigation.executing,
+                        contentPadding = PaddingValues(horizontal = 8.dp, vertical = 6.dp),
+                    ) {
+                        Text(if (autoNavigation.trackLineLockEnabled) "停锁" else "锁线")
+                    }
+                    TextButton(
+                        onClick = { trackDialogVisible = true },
+                        contentPadding = PaddingValues(horizontal = 8.dp, vertical = 6.dp),
+                    ) {
+                        Text("轨迹")
+                    }
+                    TextButton(
+                        onClick = { routeDialogVisible = true },
+                        contentPadding = PaddingValues(horizontal = 8.dp, vertical = 6.dp),
+                    ) {
+                        Text("路线")
+                    }
                 }
-                TextButton(
-                    onClick = { trackDialogVisible = true },
-                    contentPadding = PaddingValues(horizontal = 8.dp, vertical = 6.dp),
-                ) {
-                    Text("轨迹")
-                }
-                TextButton(
-                    onClick = { routeDialogVisible = true },
-                    contentPadding = PaddingValues(horizontal = 8.dp, vertical = 6.dp),
-                ) {
-                    Text("路线")
+            }
+            if (gpsTrack.syncing) {
+                TrackSyncProgressPanel(gpsTrack = gpsTrack)
+            } else {
+                syncNotice?.let { notice ->
+                    TrackSyncNotice(message = notice)
                 }
             }
         }
@@ -332,6 +403,16 @@ fun NavigationScreen(
                 onUndo = onUndoRoutePoint,
                 onSave = onSaveRoute,
                 onCancel = onCancelRouteEditing,
+                modifier = Modifier
+                    .align(Alignment.BottomCenter)
+                    .padding(12.dp),
+            )
+        } else if (autoNavigation.trackLineLockEnabled) {
+            TrackLineLockControls(
+                state = state,
+                onDecreaseGear = onDecreaseAutoGear,
+                onIncreaseGear = onIncreaseAutoGear,
+                onStop = onStopTrackLineLock,
                 modifier = Modifier
                     .align(Alignment.BottomCenter)
                     .padding(12.dp),
@@ -427,6 +508,7 @@ fun NavigationScreen(
 private fun GpsStatusChip(
     text: String,
     speedText: String? = null,
+    headingText: String? = null,
     modifier: Modifier = Modifier,
 ) {
     Column(
@@ -449,7 +531,172 @@ private fun GpsStatusChip(
                 overflow = TextOverflow.Ellipsis,
             )
         }
+        if (headingText != null) {
+            Text(
+                text = "当前航向 $headingText",
+                style = MaterialTheme.typography.labelLarge,
+                fontWeight = FontWeight.SemiBold,
+                color = MaterialTheme.colorScheme.primary,
+                maxLines = 1,
+                overflow = TextOverflow.Ellipsis,
+            )
+        }
     }
+}
+
+@Composable
+private fun TrackSyncProgressPanel(
+    gpsTrack: GpsTrackUiState,
+    modifier: Modifier = Modifier,
+) {
+    val progress = gpsTrack.syncProgressUi()
+    Surface(
+        shape = RoundedCornerShape(8.dp),
+        color = MaterialTheme.colorScheme.surface.copy(alpha = 0.97f),
+        tonalElevation = 3.dp,
+        modifier = modifier.fillMaxWidth(),
+    ) {
+        Column(
+            modifier = Modifier.padding(horizontal = 12.dp, vertical = 10.dp),
+            verticalArrangement = Arrangement.spacedBy(7.dp),
+        ) {
+            Row(
+                modifier = Modifier.fillMaxWidth(),
+                horizontalArrangement = Arrangement.SpaceBetween,
+                verticalAlignment = Alignment.CenterVertically,
+            ) {
+                Text(
+                    "轨迹同步",
+                    style = MaterialTheme.typography.titleSmall,
+                    fontWeight = FontWeight.SemiBold,
+                )
+                Text(
+                    progress.percentText ?: "查询中",
+                    style = MaterialTheme.typography.labelLarge,
+                    fontWeight = FontWeight.SemiBold,
+                    color = MaterialTheme.colorScheme.primary,
+                )
+            }
+            Text(
+                progress.message,
+                style = MaterialTheme.typography.bodySmall,
+                color = MaterialTheme.colorScheme.onSurfaceVariant,
+                maxLines = 2,
+                overflow = TextOverflow.Ellipsis,
+            )
+            if (progress.fraction != null) {
+                LinearProgressIndicator(
+                    progress = { progress.fraction },
+                    modifier = Modifier.fillMaxWidth(),
+                )
+            } else {
+                LinearProgressIndicator(modifier = Modifier.fillMaxWidth())
+            }
+            Text(
+                progress.detailText,
+                style = MaterialTheme.typography.labelMedium,
+                color = MaterialTheme.colorScheme.onSurfaceVariant,
+                maxLines = 1,
+                overflow = TextOverflow.Ellipsis,
+            )
+        }
+    }
+}
+
+@Composable
+private fun TrackSyncNotice(
+    message: String,
+    modifier: Modifier = Modifier,
+) {
+    val warning = message.isTrackSyncWarning()
+    val containerColor = if (warning) {
+        MaterialTheme.colorScheme.errorContainer
+    } else {
+        MaterialTheme.colorScheme.primaryContainer
+    }
+    val contentColor = if (warning) {
+        MaterialTheme.colorScheme.onErrorContainer
+    } else {
+        MaterialTheme.colorScheme.onPrimaryContainer
+    }
+    Surface(
+        shape = RoundedCornerShape(8.dp),
+        color = containerColor,
+        contentColor = contentColor,
+        tonalElevation = 3.dp,
+        modifier = modifier.fillMaxWidth(),
+    ) {
+        Row(
+            modifier = Modifier.padding(horizontal = 12.dp, vertical = 10.dp),
+            horizontalArrangement = Arrangement.spacedBy(10.dp),
+            verticalAlignment = Alignment.CenterVertically,
+        ) {
+            Icon(
+                imageVector = if (warning) Icons.Outlined.ErrorOutline else Icons.Outlined.CheckCircle,
+                contentDescription = null,
+                modifier = Modifier.size(20.dp),
+            )
+            Column(modifier = Modifier.weight(1f)) {
+                Text(
+                    if (warning) "同步未完成" else "同步完成",
+                    style = MaterialTheme.typography.labelLarge,
+                    fontWeight = FontWeight.SemiBold,
+                )
+                Text(
+                    message,
+                    style = MaterialTheme.typography.bodySmall,
+                    maxLines = 2,
+                    overflow = TextOverflow.Ellipsis,
+                )
+            }
+        }
+    }
+}
+
+private data class TrackSyncProgressUi(
+    val fraction: Float?,
+    val percentText: String?,
+    val message: String,
+    val detailText: String,
+)
+
+private fun GpsTrackUiState.syncProgressUi(): TrackSyncProgressUi {
+    val start = syncStartSequence
+    val target = syncTargetSequence
+    val current = syncCurrentSequence
+    if (start != null && target != null && current != null) {
+        val total = (target - start + 1).coerceAtLeast(1)
+        val done = (current - start + 1).coerceIn(0, total)
+        val fraction = done.toFloat() / total.toFloat()
+        val sequenceText = if (current >= start) {
+            "当前 seq $current"
+        } else {
+            "等待首个轨迹点"
+        }
+        return TrackSyncProgressUi(
+            fraction = fraction,
+            percentText = "${(fraction * 100).roundToInt()}%",
+            message = syncMessage,
+            detailText = "$done/$total 点 · $sequenceText · 本地 ${storedPointCount} 点",
+        )
+    }
+
+    val info = latestInfo
+    return TrackSyncProgressUi(
+        fraction = null,
+        percentText = null,
+        message = syncMessage,
+        detailText = if (info != null) {
+            "主控缓存 ${info.count}/${info.capacity} 点 · 本地 ${storedPointCount} 点"
+        } else {
+            "等待主控返回轨迹缓存信息 · 本地 ${storedPointCount} 点"
+        },
+    )
+}
+
+private fun String.isTrackSyncWarning(): Boolean {
+    val warningWords = listOf("错误", "失败", "无法", "未连接", "暂不")
+    return warningWords.any { contains(it) }
 }
 
 @Composable
@@ -640,8 +887,10 @@ private fun AutoNavigationControls(
             }
 
             Row(
-                modifier = Modifier.fillMaxWidth(),
-                horizontalArrangement = Arrangement.SpaceBetween,
+                modifier = Modifier
+                    .fillMaxWidth()
+                    .horizontalScroll(rememberScrollState()),
+                horizontalArrangement = Arrangement.spacedBy(18.dp),
             ) {
                 CompactMetric("速度", state.telemetry.gpsSpeedText() ?: "-- km/h")
                 CompactMetric("目标", "${autoState.targetPointIndex + 1}")
@@ -667,6 +916,84 @@ private fun AutoNavigationControls(
                 )
                 IconButton(onClick = onIncreaseGear) {
                     Icon(Icons.Outlined.KeyboardArrowUp, contentDescription = "自动导航加档")
+                }
+            }
+        }
+    }
+}
+
+@Composable
+private fun TrackLineLockControls(
+    state: ControlUiState,
+    onDecreaseGear: () -> Unit,
+    onIncreaseGear: () -> Unit,
+    onStop: () -> Unit,
+    modifier: Modifier = Modifier,
+) {
+    val autoState = state.autoNavigation
+    Surface(
+        shape = RoundedCornerShape(8.dp),
+        color = MaterialTheme.colorScheme.surface.copy(alpha = 0.96f),
+        tonalElevation = 3.dp,
+        modifier = modifier.fillMaxWidth(),
+    ) {
+        Column(
+            modifier = Modifier.padding(horizontal = 12.dp, vertical = 10.dp),
+            verticalArrangement = Arrangement.spacedBy(8.dp),
+        ) {
+            Row(
+                modifier = Modifier.fillMaxWidth(),
+                horizontalArrangement = Arrangement.SpaceBetween,
+                verticalAlignment = Alignment.CenterVertically,
+            ) {
+                Column(modifier = Modifier.weight(1f)) {
+                    Text("航迹线锁定", style = MaterialTheme.typography.titleSmall, fontWeight = FontWeight.SemiBold)
+                    Text(
+                        autoState.message,
+                        style = MaterialTheme.typography.bodySmall,
+                        color = MaterialTheme.colorScheme.onSurfaceVariant,
+                        maxLines = 1,
+                        overflow = TextOverflow.Ellipsis,
+                    )
+                }
+                OutlinedButton(onClick = onStop, contentPadding = PaddingValues(horizontal = 12.dp, vertical = 8.dp)) {
+                    Icon(Icons.Outlined.Close, contentDescription = null, modifier = Modifier.size(18.dp))
+                    Spacer(Modifier.width(6.dp))
+                    Text("停止")
+                }
+            }
+
+            Row(
+                modifier = Modifier
+                    .fillMaxWidth()
+                    .horizontalScroll(rememberScrollState()),
+                horizontalArrangement = Arrangement.spacedBy(18.dp),
+            ) {
+                CompactMetric("速度", state.telemetry.gpsSpeedText() ?: "-- km/h")
+                CompactMetric("偏离", autoState.trackLineCrossTrackErrorMeters?.crossTrackText() ?: "--")
+                CompactMetric("线向", autoState.trackLineBearingDegrees?.let { "${it.roundToInt()}°" } ?: "--")
+                CompactMetric("目标", autoState.trackLineTargetHeadingDegrees?.let { "${it.roundToInt()}°" } ?: "--")
+                CompactMetric("误差", autoState.headingErrorDegrees?.let { "${it.roundToInt()}°" } ?: "--")
+            }
+
+            Row(
+                modifier = Modifier.fillMaxWidth(),
+                horizontalArrangement = Arrangement.spacedBy(10.dp),
+                verticalAlignment = Alignment.CenterVertically,
+            ) {
+                IconButton(onClick = onDecreaseGear) {
+                    Icon(Icons.Outlined.KeyboardArrowDown, contentDescription = "航迹线锁定减档")
+                }
+                Text(
+                    "档位 ${autoState.gearIndex + 1} · L ${autoState.leftOutputPercent}% / R ${autoState.rightOutputPercent}%",
+                    style = MaterialTheme.typography.bodyMedium,
+                    fontWeight = FontWeight.SemiBold,
+                    modifier = Modifier.weight(1f),
+                    maxLines = 1,
+                    overflow = TextOverflow.Ellipsis,
+                )
+                IconButton(onClick = onIncreaseGear) {
+                    Icon(Icons.Outlined.KeyboardArrowUp, contentDescription = "航迹线锁定加档")
                 }
             }
         }
@@ -1056,6 +1383,8 @@ private fun MapUnavailableLayer(modifier: Modifier = Modifier) {
 @Composable
 private fun MapLibreTrackMap(
     liveLocation: LatLng?,
+    liveHeadingDegrees: Float?,
+    liveHeadingSourceText: String,
     trackPoints: List<LatLng>,
     playbackLocation: LatLng?,
     playbackBearing: Double?,
@@ -1109,12 +1438,14 @@ private fun MapLibreTrackMap(
         }
     }
 
-    LaunchedEffect(liveLocation, trackPoints, playbackLocation, routePoints, routeTarget, pathColor, routeColor, styleUrl) {
+    LaunchedEffect(liveLocation, liveHeadingDegrees, liveHeadingSourceText, trackPoints, playbackLocation, routePoints, routeTarget, pathColor, routeColor, styleUrl) {
         mapView.getMapAsync { map ->
             renderTrackMap(
                 map = map,
                 styleUrl = styleUrl,
                 liveLocation = liveLocation,
+                liveHeadingDegrees = liveHeadingDegrees,
+                liveHeadingSourceText = liveHeadingSourceText,
                 trackPoints = trackPoints,
                 playbackLocation = playbackLocation,
                 playbackBearing = playbackBearing,
@@ -1128,7 +1459,7 @@ private fun MapLibreTrackMap(
         }
     }
 
-    DisposableEffect(mapView, liveLocation, trackPoints, playbackLocation, routePoints, routeTarget, pathColor, routeColor, styleUrl) {
+    DisposableEffect(mapView, liveLocation, liveHeadingDegrees, liveHeadingSourceText, trackPoints, playbackLocation, routePoints, routeTarget, pathColor, routeColor, styleUrl) {
         var mapRef: MapLibreMap? = null
         val listener = MapLibreMap.OnCameraIdleListener {
             mapRef?.let { map ->
@@ -1136,6 +1467,8 @@ private fun MapLibreTrackMap(
                     map = map,
                     styleUrl = styleUrl,
                     liveLocation = liveLocation,
+                    liveHeadingDegrees = liveHeadingDegrees,
+                    liveHeadingSourceText = liveHeadingSourceText,
                     trackPoints = trackPoints,
                     playbackLocation = playbackLocation,
                     playbackBearing = playbackBearing,
@@ -1183,6 +1516,8 @@ private fun renderTrackMap(
     map: MapLibreMap,
     styleUrl: String,
     liveLocation: LatLng?,
+    liveHeadingDegrees: Float?,
+    liveHeadingSourceText: String,
     trackPoints: List<LatLng>,
     playbackLocation: LatLng?,
     playbackBearing: Double?,
@@ -1201,6 +1536,8 @@ private fun renderTrackMap(
             drawTrackAnnotations(
                 map = map,
                 liveLocation = liveLocation,
+                liveHeadingDegrees = liveHeadingDegrees,
+                liveHeadingSourceText = liveHeadingSourceText,
                 trackPoints = trackPoints,
                 playbackLocation = playbackLocation,
                 playbackBearing = playbackBearing,
@@ -1217,6 +1554,8 @@ private fun renderTrackMap(
     drawTrackAnnotations(
         map = map,
         liveLocation = liveLocation,
+        liveHeadingDegrees = liveHeadingDegrees,
+        liveHeadingSourceText = liveHeadingSourceText,
         trackPoints = trackPoints,
         playbackLocation = playbackLocation,
         playbackBearing = playbackBearing,
@@ -1232,6 +1571,8 @@ private fun renderTrackMap(
 private fun drawTrackAnnotations(
     map: MapLibreMap,
     liveLocation: LatLng?,
+    liveHeadingDegrees: Float?,
+    liveHeadingSourceText: String,
     trackPoints: List<LatLng>,
     playbackLocation: LatLng?,
     playbackBearing: Double?,
@@ -1279,19 +1620,40 @@ private fun drawTrackAnnotations(
     }
 
     if (liveLocation != null) {
+        val bearingBucket = liveHeadingDegrees?.toDouble()?.bearingBucket()
+        val title = if (liveHeadingDegrees != null) {
+            "实时位置 · $liveHeadingSourceText ${liveHeadingDegrees.roundToInt()}°"
+        } else {
+            "实时位置"
+        }
         val marker = annotations.liveMarker
-        if (marker == null) {
+        if (marker == null || annotations.liveHeadingBearingBucket != bearingBucket) {
+            marker?.let(map::removeMarker)
+            val options = MarkerOptions()
+                .position(liveLocation)
+                .title(title)
+            if (bearingBucket != null) {
+                options.icon(
+                    annotations.iconForBearing(
+                        context = context,
+                        bearingBucket = bearingBucket,
+                        sizePx = LIVE_HEADING_ARROW_ICON_SIZE_PX,
+                        color = LIVE_HEADING_ARROW_COLOR,
+                    ),
+                )
+            }
             annotations.liveMarker = map.addMarker(
-                MarkerOptions()
-                    .position(liveLocation)
-                    .title("实时位置"),
+                options,
             )
+            annotations.liveHeadingBearingBucket = bearingBucket
         } else {
             marker.position = liveLocation
+            marker.title = title
         }
     } else {
         annotations.liveMarker?.let(map::removeMarker)
         annotations.liveMarker = null
+        annotations.liveHeadingBearingBucket = null
     }
 
     if (playbackLocation != null) {
@@ -1377,6 +1739,7 @@ private class TrackMapAnnotations {
     var liveMarker: Marker? = null
     var playbackMarker: Marker? = null
     var routeTargetMarker: Marker? = null
+    var liveHeadingBearingBucket: Int? = null
     var playbackBearingBucket: Int? = null
     var trackSignature: String? = null
     var directionArrowSignature: String? = null
@@ -1487,6 +1850,20 @@ private fun com.smartsup.controller.model.Telemetry.gpsSpeedText(): String? {
         ?: statusFields["SPD_KMH"]?.toDoubleOrNull()
         ?: return "-- km/h"
     return String.format(Locale.US, "%.1f km/h", speedKmh.coerceAtLeast(0.0))
+}
+
+private fun ControlUiState.navigationHeadingDegrees(usePhoneHeading: Boolean): Float? {
+    return if (usePhoneHeading) {
+        phoneHeadingDegrees?.takeIf { phoneHeadingAvailable }
+    } else {
+        telemetry.ybYawDegrees
+            ?.takeIf { telemetry.ybImuAvailable == true }
+            ?.let { normalizeCompassDegrees(-it) }
+    }
+}
+
+private fun normalizeCompassDegrees(degrees: Float): Float {
+    return ((degrees % 360f) + 360f) % 360f
 }
 
 private fun connectionText(connectionState: ConnectionState): String {
@@ -1798,6 +2175,44 @@ private fun com.smartsup.controller.model.AutoNavigationUiState.routePointsForMa
         ?.points
         ?.map { LatLng(it.latitude, it.longitude) }
         .orEmpty()
+}
+
+private fun com.smartsup.controller.model.AutoNavigationUiState.trackLinePointsForMap(): List<LatLng> {
+    val origin = trackLineOrigin ?: return emptyList()
+    val bearing = trackLineBearingDegrees ?: return emptyList()
+    val start = LatLng(origin.latitude, origin.longitude)
+    val end = projectPoint(start, bearing.toDouble(), TRACK_LINE_DISPLAY_LENGTH_METERS)
+    return listOf(start, end)
+}
+
+private fun projectPoint(from: LatLng, bearingDegrees: Double, distanceMeters: Double): LatLng {
+    val earthRadiusMeters = 6_371_000.0
+    val angularDistance = distanceMeters / earthRadiusMeters
+    val bearingRadians = Math.toRadians(bearingDegrees)
+    val lat1 = Math.toRadians(from.latitude)
+    val lon1 = Math.toRadians(from.longitude)
+    val lat2 = kotlin.math.asin(
+        sin(lat1) * cos(angularDistance) +
+            cos(lat1) * sin(angularDistance) * cos(bearingRadians),
+    )
+    val lon2 = lon1 + atan2(
+        sin(bearingRadians) * sin(angularDistance) * cos(lat1),
+        cos(angularDistance) - sin(lat1) * sin(lat2),
+    )
+    return LatLng(Math.toDegrees(lat2), Math.toDegrees(lon2))
+}
+
+private fun Double.crossTrackText(): String {
+    val direction = when {
+        this > 0.2 -> "右"
+        this < -0.2 -> "左"
+        else -> "中"
+    }
+    return if (direction == "中") {
+        "${abs(this).roundToInt()}m"
+    } else {
+        "${abs(this).roundToInt()}m$direction"
+    }
 }
 
 private fun NavigationRoute.distanceText(): String {

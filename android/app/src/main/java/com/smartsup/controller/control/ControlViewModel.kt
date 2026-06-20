@@ -29,6 +29,7 @@ import com.smartsup.controller.model.ControlCommand
 import com.smartsup.controller.model.ControlCommandMode
 import com.smartsup.controller.model.ControlUiState
 import com.smartsup.controller.model.FirmwareReleaseManifest
+import com.smartsup.controller.model.GpsTrackPoint
 import com.smartsup.controller.model.NavigationRoute
 import com.smartsup.controller.model.NavigationRoutePoint
 import com.smartsup.controller.model.ReleaseInfo
@@ -78,6 +79,7 @@ class ControlViewModel(application: Application) : AndroidViewModel(application)
     private var telemetryJob: Job? = null
     private var trackLogJob: Job? = null
     private var trackLogSyncJob: Job? = null
+    private val trackLogBatchPoints = mutableListOf<GpsTrackPoint>()
     private var commandHeartbeatJob: Job? = null
     private var bluetoothConnectJob: Job? = null
     private var otaReconnectJob: Job? = null
@@ -1012,6 +1014,7 @@ class ControlViewModel(application: Application) : AndroidViewModel(application)
         }
         viewModelScope.launch {
             runCatching {
+                trackLogBatchPoints.clear()
                 mutableUiState.update {
                     it.copy(
                         gpsTrack = it.gpsTrack.copy(
@@ -1281,6 +1284,12 @@ class ControlViewModel(application: Application) : AndroidViewModel(application)
                     gearIndex = 0,
                     distanceToTargetMeters = null,
                     headingErrorDegrees = null,
+                    trackLineLockEnabled = false,
+                    trackLineOrigin = null,
+                    trackLineBearingDegrees = null,
+                    trackLineTargetHeadingDegrees = null,
+                    trackLineCrossTrackErrorMeters = null,
+                    trackLineAlongTrackMeters = null,
                     leftOutputPercent = 0,
                     rightOutputPercent = 0,
                     message = "自动导航已启动：${route!!.name}",
@@ -1291,13 +1300,60 @@ class ControlViewModel(application: Application) : AndroidViewModel(application)
         sendCurrentCommand()
     }
 
+    fun startTrackLineLock() {
+        val rejectReason = trackLineLockStartRejectReason()
+        if (rejectReason != null) {
+            mutableUiState.update {
+                it.copy(
+                    autoNavigation = it.autoNavigation.copy(message = rejectReason),
+                    statusMessage = rejectReason,
+                )
+            }
+            return
+        }
+        val origin = currentGpsPointOrNull() ?: return
+        val bearing = currentHeadingForLockOrNull() ?: return
+
+        clearAutonomousCommands()
+        autoNavigationFilteredPoint = null
+        autoNavigationLastRawPoint = null
+        mutableUiState.update {
+            it.copy(
+                armed = true,
+                commandSource = CommandSource.App,
+                headingLockEnabled = false,
+                selectedGear = ThrottleGear.Neutral,
+                throttleTrimPercent = 0,
+                autoNavigation = it.autoNavigation.copy(
+                    executingRouteId = null,
+                    targetPointIndex = 0,
+                    gearIndex = 0,
+                    distanceToTargetMeters = null,
+                    headingErrorDegrees = null,
+                    trackLineLockEnabled = true,
+                    trackLineOrigin = origin,
+                    trackLineBearingDegrees = bearing,
+                    trackLineTargetHeadingDegrees = bearing,
+                    trackLineCrossTrackErrorMeters = 0.0,
+                    trackLineAlongTrackMeters = 0.0,
+                    leftOutputPercent = 0,
+                    rightOutputPercent = 0,
+                    message = "航迹线锁定已启动：${bearing.roundToInt()}°",
+                ),
+                statusMessage = "航迹线锁定已启动，请保持人工接管准备",
+            )
+        }
+        sendCurrentCommand()
+    }
+
     fun increaseAutoNavigationGear() {
         mutableUiState.update {
             val nextGear = (it.autoNavigation.gearIndex + 1).coerceAtMost(AUTO_NAVIGATION_GEAR_PERCENTS.lastIndex)
+            val modeText = if (it.autoNavigation.trackLineLockEnabled) "航迹线锁定" else "自动导航"
             it.copy(
                 autoNavigation = it.autoNavigation.copy(
                     gearIndex = nextGear,
-                    message = "自动导航档位 ${nextGear + 1}",
+                    message = "$modeText 档位 ${nextGear + 1}",
                 ),
             )
         }
@@ -1306,13 +1362,31 @@ class ControlViewModel(application: Application) : AndroidViewModel(application)
     fun decreaseAutoNavigationGear() {
         mutableUiState.update {
             val nextGear = (it.autoNavigation.gearIndex - 1).coerceAtLeast(0)
+            val modeText = if (it.autoNavigation.trackLineLockEnabled) "航迹线锁定" else "自动导航"
             it.copy(
                 autoNavigation = it.autoNavigation.copy(
                     gearIndex = nextGear,
-                    message = "自动导航档位 ${nextGear + 1}",
+                    message = "$modeText 档位 ${nextGear + 1}",
                 ),
             )
         }
+    }
+
+    fun stopTrackLineLock() {
+        clearAutoNavigationExecution("航迹线锁定已停止")
+        mutableUiState.update {
+            it.copy(
+                armed = false,
+                leftThrottlePercent = 0,
+                rightThrottlePercent = 0,
+                commandSource = CommandSource.App,
+                headingLockEnabled = false,
+                selectedGear = ThrottleGear.Neutral,
+                throttleTrimPercent = 0,
+                statusMessage = "航迹线锁定已停止，已锁定并回空挡",
+            )
+        }
+        sendIdle()
     }
 
     fun stopAutoNavigation() {
@@ -3335,7 +3409,11 @@ class ControlViewModel(application: Application) : AndroidViewModel(application)
         val ageMs = System.currentTimeMillis() - ybImuHeadingLastUpdateMs
         return state.telemetry.ybYawDegrees
             ?.takeIf { state.telemetry.ybImuAvailable == true && ageMs <= YB_IMU_HEADING_STALE_MS }
-            ?.let { normalizeCompassDegrees(it) }
+            ?.let { ybYawToCompassHeadingDegrees(it) }
+    }
+
+    private fun ybYawToCompassHeadingDegrees(rawYawDegrees: Float): Float {
+        return normalizeCompassDegrees(-rawYawDegrees)
     }
 
     private fun currentHeadingForLockOrNull(): Float? {
@@ -3547,6 +3625,9 @@ class ControlViewModel(application: Application) : AndroidViewModel(application)
         }
         val settings = mutableSettingsState.value
         val source = state.commandSource
+        if (state.canSendThrottle && state.autoNavigation.trackLineLockEnabled) {
+            return buildTrackLineLockCommand(state, settings)
+        }
         if (state.canSendThrottle && state.autoNavigation.executing) {
             return buildAutoNavigationCommand(state, settings)
         }
@@ -3671,6 +3752,98 @@ class ControlViewModel(application: Application) : AndroidViewModel(application)
                         "目标偏差过大，自动导航暂停推进"
                     } else {
                         "自动导航执行中"
+                    },
+                ),
+            )
+        }
+
+        return ControlCommand(
+            leftThrottlePercent = applyEscDirection(leftPercent, settings.leftEscReversed),
+            rightThrottlePercent = applyEscDirection(rightPercent, settings.rightEscReversed),
+            armed = true,
+            source = CommandSource.App,
+            voicePowerLimitPercent = settings.voicePowerLimitPercent,
+        )
+    }
+
+    private fun buildTrackLineLockCommand(
+        state: ControlUiState,
+        settings: SettingsUiState,
+    ): ControlCommand {
+        val autoState = state.autoNavigation
+        val origin = autoState.trackLineOrigin
+        val lineBearing = autoState.trackLineBearingDegrees
+        if (origin == null || lineBearing == null) {
+            failAutoNavigation("航迹线锁定停止：目标线无效")
+            return ControlCommand.Idle
+        }
+        val currentPoint = currentAutoNavigationPointOrNull(settings.autoNavigationGpsJumpResetMeters.toDouble())
+        if (currentPoint == null || gpsSatelliteCount() < AUTO_NAVIGATION_MIN_SATELLITES) {
+            failAutoNavigation("航迹线锁定停止：GPS 定位不足")
+            return ControlCommand.Idle
+        }
+        val currentHeading = currentHeadingForLockOrNull()
+        if (currentHeading == null) {
+            failAutoNavigation("航迹线锁定停止：${headingSourceUnavailableText()}")
+            return ControlCommand.Idle
+        }
+
+        val lineError = trackLineError(
+            origin = origin,
+            bearingDegrees = lineBearing.toDouble(),
+            point = currentPoint,
+        )
+        val crossTrackAbs = abs(lineError.crossTrackMeters)
+        if (crossTrackAbs > TRACK_LINE_MAX_CROSS_TRACK_METERS) {
+            failAutoNavigation("航迹线锁定停止：偏离航迹 ${crossTrackAbs.roundToInt()}m")
+            return ControlCommand.Idle
+        }
+
+        val targetCorrectionDegrees = Math.toDegrees(
+            atan2(-lineError.crossTrackMeters, TRACK_LINE_LOOKAHEAD_METERS),
+        ).coerceIn(
+            -TRACK_LINE_MAX_CORRECTION_DEGREES.toDouble(),
+            TRACK_LINE_MAX_CORRECTION_DEGREES.toDouble(),
+        )
+        val targetHeading = normalizeCompassDegrees((lineBearing + targetCorrectionDegrees).toFloat())
+        val errorDegrees = shortestCompassError(targetHeading, currentHeading)
+        val absError = abs(errorDegrees)
+        val gearIndex = autoState.gearIndex.coerceIn(0, AUTO_NAVIGATION_GEAR_PERCENTS.lastIndex)
+        val basePercent = if (absError > AUTO_NAVIGATION_STOP_TURN_DEGREES) {
+            0
+        } else {
+            AUTO_NAVIGATION_GEAR_PERCENTS[gearIndex].coerceAtMost(settings.maxThrottlePercent)
+        }
+        val correction = if (basePercent == 0) {
+            0
+        } else {
+            (errorDegrees / AUTO_NAVIGATION_FULL_CORRECTION_DEGREES)
+                .coerceIn(-1f, 1f)
+                .let { it * AUTO_NAVIGATION_MAX_CORRECTION_PERCENT }
+                .roundToInt()
+        }
+        val leftPercent = (basePercent + correction).coerceIn(0, settings.maxThrottlePercent)
+        val rightPercent = (basePercent - correction).coerceIn(0, settings.maxThrottlePercent)
+
+        mutableUiState.update {
+            it.copy(
+                leftThrottlePercent = leftPercent,
+                rightThrottlePercent = rightPercent,
+                commandSource = CommandSource.App,
+                headingLockEnabled = false,
+                autoNavigation = it.autoNavigation.copy(
+                    gearIndex = gearIndex,
+                    distanceToTargetMeters = crossTrackAbs,
+                    headingErrorDegrees = errorDegrees,
+                    trackLineTargetHeadingDegrees = targetHeading,
+                    trackLineCrossTrackErrorMeters = lineError.crossTrackMeters,
+                    trackLineAlongTrackMeters = lineError.alongTrackMeters,
+                    leftOutputPercent = leftPercent,
+                    rightOutputPercent = rightPercent,
+                    message = if (basePercent == 0) {
+                        "目标航向偏差过大，航迹线锁定暂停推进"
+                    } else {
+                        "航迹线锁定执行中"
                     },
                 ),
             )
@@ -4472,7 +4645,7 @@ class ControlViewModel(application: Application) : AndroidViewModel(application)
         autoNavigationFilteredPoint = null
         autoNavigationLastRawPoint = null
         mutableUiState.update {
-            if (!it.autoNavigation.executing && it.autoNavigation.leftOutputPercent == 0 && it.autoNavigation.rightOutputPercent == 0) {
+            if (!it.autoNavigation.active && it.autoNavigation.leftOutputPercent == 0 && it.autoNavigation.rightOutputPercent == 0) {
                 it
             } else {
                 it.copy(
@@ -4481,6 +4654,12 @@ class ControlViewModel(application: Application) : AndroidViewModel(application)
                         targetPointIndex = 0,
                         distanceToTargetMeters = null,
                         headingErrorDegrees = null,
+                        trackLineLockEnabled = false,
+                        trackLineOrigin = null,
+                        trackLineBearingDegrees = null,
+                        trackLineTargetHeadingDegrees = null,
+                        trackLineCrossTrackErrorMeters = null,
+                        trackLineAlongTrackMeters = null,
                         leftOutputPercent = 0,
                         rightOutputPercent = 0,
                         message = message,
@@ -4516,6 +4695,18 @@ class ControlViewModel(application: Application) : AndroidViewModel(application)
             currentGpsPointOrNull() == null -> "自动导航拒绝：GPS 未定位"
             gpsSatelliteCount() < AUTO_NAVIGATION_MIN_SATELLITES -> "自动导航拒绝：GPS 卫星数不足"
             currentPhoneHeadingDegreesOrNull() == null -> "自动导航拒绝：手机指南针暂无有效读数"
+            else -> null
+        }
+    }
+
+    private fun trackLineLockStartRejectReason(): String? {
+        val state = mutableUiState.value
+        return when {
+            state.connectionState != ConnectionState.Connected -> "航迹线锁定拒绝：未连接主控"
+            !state.armed -> "航迹线锁定拒绝：请先手动解锁"
+            currentGpsPointOrNull() == null -> "航迹线锁定拒绝：GPS 未定位"
+            gpsSatelliteCount() < AUTO_NAVIGATION_MIN_SATELLITES -> "航迹线锁定拒绝：GPS 卫星数不足"
+            currentHeadingForLockOrNull() == null -> "航迹线锁定拒绝：${headingSourceUnavailableText()}"
             else -> null
         }
     }
@@ -4582,6 +4773,32 @@ class ControlViewModel(application: Application) : AndroidViewModel(application)
             return bearingBetween(route.points[targetIndex - 1], targetPoint)
         }
         return bearingBetween(currentPoint, targetPoint)
+    }
+
+    private data class TrackLineError(
+        val crossTrackMeters: Double,
+        val alongTrackMeters: Double,
+    )
+
+    private fun trackLineError(
+        origin: NavigationRoutePoint,
+        bearingDegrees: Double,
+        point: NavigationRoutePoint,
+    ): TrackLineError {
+        val earthRadiusMeters = 6_371_000.0
+        val originLat = Math.toRadians(origin.latitude)
+        val pointLat = Math.toRadians(point.latitude)
+        val eastMeters = Math.toRadians(point.longitude - origin.longitude) *
+            cos((originLat + pointLat) / 2.0) *
+            earthRadiusMeters
+        val northMeters = Math.toRadians(point.latitude - origin.latitude) * earthRadiusMeters
+        val bearingRadians = Math.toRadians(bearingDegrees)
+        val eastUnit = sin(bearingRadians)
+        val northUnit = cos(bearingRadians)
+        return TrackLineError(
+            crossTrackMeters = eastMeters * northUnit - northMeters * eastUnit,
+            alongTrackMeters = eastMeters * eastUnit + northMeters * northUnit,
+        )
     }
 
     private fun interpolatePoint(
@@ -5200,10 +5417,11 @@ class ControlViewModel(application: Application) : AndroidViewModel(application)
         }
     }
 
-    private fun handleTrackLogEvent(event: TrackLogEvent) {
+    private suspend fun handleTrackLogEvent(event: TrackLogEvent) {
         when (event) {
             is TrackLogEvent.Info -> handleTrackLogInfo(event.info.oldestSequence, event.info.newestSequence, event.info)
             is TrackLogEvent.Begin -> {
+                trackLogBatchPoints.clear()
                 mutableUiState.update {
                     val start = it.gpsTrack.syncStartSequence
                     val target = it.gpsTrack.syncTargetSequence
@@ -5223,40 +5441,12 @@ class ControlViewModel(application: Application) : AndroidViewModel(application)
                     )
                 }
             }
-            is TrackLogEvent.Point -> handleTrackLogPoint(event.point)
+            is TrackLogEvent.Point -> trackLogBatchPoints += event.point
             is TrackLogEvent.End -> handleTrackLogEnd(event.nextSequence)
-            is TrackLogEvent.Error -> refreshGpsTrackState("轨迹同步错误：${event.message}")
-        }
-    }
-
-    private fun handleTrackLogPoint(point: com.smartsup.controller.model.GpsTrackPoint) {
-        val saved = gpsTrackStore.appendIfNew(point)
-        mutableUiState.update {
-            val start = it.gpsTrack.syncStartSequence
-            val target = it.gpsTrack.syncTargetSequence
-            val total = if (start != null && target != null) {
-                (target - start + 1).coerceAtLeast(1)
-            } else {
-                null
+            is TrackLogEvent.Error -> {
+                trackLogBatchPoints.clear()
+                refreshGpsTrackState("轨迹同步错误：${event.message}")
             }
-            val done = if (start != null && total != null) {
-                (point.sequence - start + 1).coerceIn(0, total)
-            } else {
-                null
-            }
-            it.copy(
-                gpsTrack = it.gpsTrack.copy(
-                    syncing = true,
-                    syncCurrentSequence = point.sequence,
-                    storedPointCount = if (saved) it.gpsTrack.storedPointCount + 1 else it.gpsTrack.storedPointCount,
-                    lastSyncedSequence = maxOf(it.gpsTrack.lastSyncedSequence, point.sequence),
-                    syncMessage = if (done != null && total != null) {
-                        "同步中 $done/$total，seq ${point.sequence}"
-                    } else {
-                        "已同步到 seq ${point.sequence}"
-                    },
-                ),
-            )
         }
     }
 
@@ -5308,14 +5498,61 @@ class ControlViewModel(application: Application) : AndroidViewModel(application)
         return "主控暂无新轨迹点，缓存 $trackCount/${info.capacity}"
     }
 
-    private fun handleTrackLogEnd(nextSequence: Int) {
+    private suspend fun handleTrackLogEnd(nextSequence: Int) {
+        flushTrackLogBatch()
         val info = mutableUiState.value.gpsTrack.latestInfo
         val nextTransport = transport
         if (info != null && nextTransport != null && nextSequence in 1..info.newestSequence) {
-            refreshGpsTrackState("继续同步 seq $nextSequence..${info.newestSequence}", syncing = true)
+            mutableUiState.update {
+                it.copy(
+                    gpsTrack = it.gpsTrack.copy(
+                        syncing = true,
+                        syncMessage = "继续同步 seq $nextSequence..${info.newestSequence}",
+                    ),
+                )
+            }
             sendTrackLogRead(nextTransport, nextSequence)
         } else {
             refreshGpsTrackState("轨迹同步完成")
+        }
+    }
+
+    private suspend fun flushTrackLogBatch() {
+        if (trackLogBatchPoints.isEmpty()) {
+            return
+        }
+        val points = trackLogBatchPoints.toList()
+        trackLogBatchPoints.clear()
+        val savedCount = withContext(Dispatchers.IO) {
+            gpsTrackStore.appendAllIfNew(points)
+        }
+        val lastSequence = points.maxOf { it.sequence }
+        mutableUiState.update {
+            val start = it.gpsTrack.syncStartSequence
+            val target = it.gpsTrack.syncTargetSequence
+            val total = if (start != null && target != null) {
+                (target - start + 1).coerceAtLeast(1)
+            } else {
+                null
+            }
+            val done = if (start != null && total != null) {
+                (lastSequence - start + 1).coerceIn(0, total)
+            } else {
+                null
+            }
+            it.copy(
+                gpsTrack = it.gpsTrack.copy(
+                    syncing = true,
+                    syncCurrentSequence = lastSequence,
+                    storedPointCount = it.gpsTrack.storedPointCount + savedCount,
+                    lastSyncedSequence = maxOf(it.gpsTrack.lastSyncedSequence, lastSequence),
+                    syncMessage = if (done != null && total != null) {
+                        "同步中 $done/$total，seq $lastSequence"
+                    } else {
+                        "已同步到 seq $lastSequence"
+                    },
+                ),
+            )
         }
     }
 
@@ -5326,9 +5563,9 @@ class ControlViewModel(application: Application) : AndroidViewModel(application)
         }
         trackLogSyncJob?.cancel()
         trackLogSyncJob = viewModelScope.launch {
-            delay(120)
+            delay(TRACK_LOG_READ_DELAY_MS)
             runCatching {
-                nextTransport.sendRawLine("LOG_READ;FROM=$fromSequence;LIMIT=32")
+                nextTransport.sendRawLine("LOG_READ;FROM=$fromSequence;LIMIT=$TRACK_LOG_READ_LIMIT")
             }.onFailure { error ->
                 refreshGpsTrackState("轨迹读取失败：${error.message ?: "未知错误"}")
             }
@@ -5558,6 +5795,8 @@ class ControlViewModel(application: Application) : AndroidViewModel(application)
         private const val KEY_GEAR_PREFIX = "gear_percent_"
         private const val COMMAND_HEARTBEAT_MS = 100L
         private const val OTA_RECONNECT_INTERVAL_MS = 3_000L
+        private const val TRACK_LOG_READ_LIMIT = 256
+        private const val TRACK_LOG_READ_DELAY_MS = 10L
         private const val PHONE_HEADING_STALE_MS = 1_500L
         private const val YB_IMU_HEADING_STALE_MS = 500L
         private const val APP_TURN_TIMEOUT_MS = 8_000L
@@ -5581,6 +5820,9 @@ class ControlViewModel(application: Application) : AndroidViewModel(application)
         private const val AUTO_NAVIGATION_MAX_CORRECTION_PERCENT = 25
         private const val AUTO_NAVIGATION_FULL_CORRECTION_DEGREES = 45f
         private const val AUTO_NAVIGATION_STOP_TURN_DEGREES = 120f
+        private const val TRACK_LINE_LOOKAHEAD_METERS = 12.0
+        private const val TRACK_LINE_MAX_CORRECTION_DEGREES = 25f
+        private const val TRACK_LINE_MAX_CROSS_TRACK_METERS = 15.0
         private const val MAX_TURN_REQUEST_ID = 65_535
         private const val VOICE_POWER_LIMIT_MIN = 5
         private const val VOICE_POWER_LIMIT_MAX = 100

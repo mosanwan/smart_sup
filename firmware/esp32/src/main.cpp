@@ -3290,25 +3290,6 @@ void printTrackLogInfo(Print& output) {
   output.println(trackLogSanitizeCount);
 }
 
-uint16_t countTrackLogReadRecords(uint32_t fromSeq, uint16_t limit) {
-  if (!trackLogReady || trackLogCount == 0) {
-    return 0;
-  }
-
-  uint16_t count = 0;
-  TrackLogRecord record = {};
-  for (size_t offset = 0; offset < trackLogCapacityRecords && count < limit; ++offset) {
-    const size_t index = (trackLogOldestIndex + offset) % trackLogCapacityRecords;
-    if (!readTrackLogRecord(index, record) || !isValidTrackRecord(record)) {
-      continue;
-    }
-    if (unpackTrackSeq24(record) >= fromSeq) {
-      count += 1;
-    }
-  }
-  return count;
-}
-
 void printTrackLogRead(Print& output, uint32_t fromSeq, uint16_t limit) {
   if (!trackLogReady) {
     output.println("LOG_BEGIN;ERR=NO_TRACKLOG");
@@ -3316,7 +3297,23 @@ void printTrackLogRead(Print& output, uint32_t fromSeq, uint16_t limit) {
     return;
   }
 
-  const uint16_t count = countTrackLogReadRecords(fromSeq, limit);
+  uint32_t startSeq = fromSeq;
+  size_t startOffset = 0;
+  uint16_t count = 0;
+  if (trackLogCount > 0) {
+    if (startSeq < trackLogOldestSeq) {
+      startSeq = trackLogOldestSeq;
+    }
+    if (startSeq <= trackLogNewestSeq) {
+      const uint32_t available = trackLogNewestSeq - startSeq + 1;
+      count = static_cast<uint16_t>(available < limit ? available : limit);
+      startOffset = static_cast<size_t>(startSeq - trackLogOldestSeq);
+      if (startOffset >= trackLogCount) {
+        count = 0;
+      }
+    }
+  }
+
   output.print("LOG_BEGIN;FROM=");
   output.print(fromSeq);
   output.print(";COUNT=");
@@ -3325,14 +3322,14 @@ void printTrackLogRead(Print& output, uint32_t fromSeq, uint16_t limit) {
   uint16_t emitted = 0;
   uint32_t nextSeq = fromSeq;
   TrackLogRecord record = {};
-  for (size_t offset = 0; offset < trackLogCapacityRecords && emitted < count; ++offset) {
+  for (size_t offset = startOffset; offset < trackLogCount && emitted < count; ++offset) {
     const size_t index = (trackLogOldestIndex + offset) % trackLogCapacityRecords;
     if (!readTrackLogRecord(index, record) || !isValidTrackRecord(record)) {
       continue;
     }
 
     const uint32_t seq = unpackTrackSeq24(record);
-    if (seq < fromSeq) {
+    if (seq < startSeq) {
       continue;
     }
 
@@ -3378,7 +3375,7 @@ bool applyTrackLogLine(char* line, Print& response) {
       // Header marker.
     } else if (parseUint32Token(token, "FROM=", 1, TRACKLOG_MAX_SEQ24, fromSeq)) {
       sawFrom = true;
-    } else if (parseUnsignedToken(token, "LIMIT=", 1, 64, limit)) {
+    } else if (parseUnsignedToken(token, "LIMIT=", 1, 256, limit)) {
       // Optional read size.
     } else {
       badToken = true;

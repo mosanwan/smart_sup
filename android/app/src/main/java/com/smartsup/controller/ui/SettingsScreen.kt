@@ -788,7 +788,8 @@ private fun Esp32ImuObservationCard(
     } else {
         null
     }
-    val ybHeading = controlState.telemetry.ybYawDegrees?.let { normalizeCompassDegrees(it) }
+    val ybRawYaw = controlState.telemetry.ybYawDegrees
+    val ybHeading = ybRawYaw?.let { normalizeCompassDegrees(-it) }
     val imuAvailable = if (isConnected) controlState.telemetry.imuAvailable else null
     val phoneHeading = controlState.phoneHeadingDegrees
 
@@ -815,7 +816,8 @@ private fun Esp32ImuObservationCard(
             SettingsRow("融合质量", fields["IQUAL"] ?: "--")
             SettingsRow("九轴 IMU", if (controlState.telemetry.ybImuAvailable == true) "在线" else fields["YBIMU"] ?: "--")
             SettingsRow("手机航向", phoneHeading?.let { "${it.roundToInt()}°" } ?: "--")
-            SettingsRow("IMU 航向 YBY", ybHeading?.let { "${it.roundToInt()}°" } ?: "--")
+            SettingsRow("IMU 航向", ybHeading?.let { "${it.roundToInt()}°" } ?: "--")
+            SettingsRow("IMU 原始 YBY", ybRawYaw?.let { "${it.roundToInt()}°" } ?: "--")
             SettingsRow(
                 "主控航向",
                 espHeading?.let { "${it.roundToInt()}°" } ?: fields.imuValue("IHDG", "°"),
