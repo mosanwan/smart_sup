@@ -212,6 +212,7 @@ fun AppScreen(viewModel: ControlViewModel) {
                 onAutoNavigationGpsJumpResetChange = viewModel::setAutoNavigationGpsJumpResetMeters,
                 onUsePhoneHeadingChange = viewModel::setUsePhoneHeading,
                 onYbImuHeadingModeChange = viewModel::setYbImuHeadingMode,
+                onCalibrateYbImuHeadingToNorth = viewModel::calibrateYbImuHeadingToNorth,
                 onCalibrateYbImuHeadingToPhone = viewModel::calibrateYbImuHeadingToPhone,
                 onRealtimeVoiceEndpointChange = viewModel::setRealtimeVoiceEndpoint,
                 onRealtimeVoiceAppIdChange = viewModel::setRealtimeVoiceAppId,

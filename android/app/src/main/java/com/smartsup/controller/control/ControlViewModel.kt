@@ -41,6 +41,7 @@ import com.smartsup.controller.model.TrackLogEvent
 import com.smartsup.controller.model.UpdateUiState
 import com.smartsup.controller.model.VoiceAsrState
 import com.smartsup.controller.model.YB_IMU_HEADING_MODE_DEFAULT
+import com.smartsup.controller.model.calibrateYbImuHeadingToNorth
 import com.smartsup.controller.model.calibrateYbImuHeadingToPhone
 import com.smartsup.controller.model.coerceYbImuHeadingModeId
 import com.smartsup.controller.model.ybImuHeadingAlgorithmLabel
@@ -914,7 +915,7 @@ class ControlViewModel(application: Application) : AndroidViewModel(application)
         if (result == null) {
             mutableUiState.update {
                 it.copy(
-                    statusMessage = "IMU 校准失败：四元数和 YBY 暂无有效读数",
+                    statusMessage = "IMU 校准失败：YBY 暂无有效读数",
                 )
             }
             return
@@ -936,6 +937,47 @@ class ControlViewModel(application: Application) : AndroidViewModel(application)
                 selectedGear = ThrottleGear.Neutral,
                 throttleTrimPercent = 0,
                 statusMessage = "IMU 航向已对齐手机：${ybImuHeadingAlgorithmLabel(telemetry, settings.ybImuHeadingMode)}，偏置 ${result.offsetDegrees.roundToInt()}°，已取消当前锁航",
+            )
+        }
+        sendCurrentCommand()
+    }
+
+    fun calibrateYbImuHeadingToNorth() {
+        val telemetry = currentYbImuHeadingTelemetryOrNull()
+        if (telemetry == null) {
+            mutableUiState.update { it.copy(statusMessage = "IMU 北向校准失败：主控 IMU YBY 暂无有效读数") }
+            return
+        }
+        val settings = mutableSettingsState.value
+        val result = calibrateYbImuHeadingToNorth(
+            telemetry = telemetry,
+            modeId = settings.ybImuHeadingMode,
+        )
+        if (result == null) {
+            mutableUiState.update {
+                it.copy(
+                    statusMessage = "IMU 北向校准失败：YBY 暂无有效读数",
+                )
+            }
+            return
+        }
+
+        preferences.edit()
+            .putFloat(KEY_YB_IMU_HEADING_OFFSET_CHIP_DOWN_DEGREES, result.offsetDegrees)
+            .apply()
+        clearAutonomousCommands()
+        mutableSettingsState.update {
+            it.copy(ybImuHeadingOffsetDegrees = result.offsetDegrees)
+        }
+        mutableUiState.update {
+            it.copy(
+                leftThrottlePercent = 0,
+                rightThrottlePercent = 0,
+                commandSource = CommandSource.App,
+                headingLockEnabled = false,
+                selectedGear = ThrottleGear.Neutral,
+                throttleTrimPercent = 0,
+                statusMessage = "IMU 已设为正北 0°：${ybImuHeadingModeLabel(settings.ybImuHeadingMode)}，偏置 ${result.offsetDegrees.roundToInt()}°，已取消当前锁航",
             )
         }
         sendCurrentCommand()
@@ -3502,10 +3544,7 @@ class ControlViewModel(application: Application) : AndroidViewModel(application)
         val ageMs = System.currentTimeMillis() - ybImuHeadingLastUpdateMs
         return state.telemetry.takeIf {
             it.ybImuAvailable == true &&
-                (
-                    it.ybYawDegrees != null ||
-                        (it.ybQuatW != null && it.ybQuatX != null && it.ybQuatY != null && it.ybQuatZ != null)
-                    ) &&
+                it.ybYawDegrees != null &&
                 ageMs <= YB_IMU_HEADING_STALE_MS
         }
     }

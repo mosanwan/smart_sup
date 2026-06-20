@@ -59,8 +59,9 @@ import com.smartsup.controller.model.ControlUiState
 import com.smartsup.controller.model.SettingsUiState
 import com.smartsup.controller.model.ThrottleGear
 import com.smartsup.controller.model.UpdateUiState
+import com.smartsup.controller.model.YB_IMU_HEADING_MODE_YBY
+import com.smartsup.controller.model.YB_IMU_HEADING_MODE_YBY_INVERTED
 import com.smartsup.controller.model.ybImuHeadingAlgorithmLabel
-import com.smartsup.controller.model.ybImuHeadingCandidates
 import com.smartsup.controller.model.ybImuHeadingDegrees
 import com.smartsup.controller.model.ybImuHeadingModeLabel
 import kotlin.math.roundToInt
@@ -114,6 +115,7 @@ fun SettingsScreen(
     onAutoNavigationGpsJumpResetChange: (Int) -> Unit,
     onUsePhoneHeadingChange: (Boolean) -> Unit,
     onYbImuHeadingModeChange: (Int) -> Unit,
+    onCalibrateYbImuHeadingToNorth: () -> Unit,
     onCalibrateYbImuHeadingToPhone: () -> Unit,
     onRealtimeVoiceEndpointChange: (String) -> Unit,
     onRealtimeVoiceAppIdChange: (String) -> Unit,
@@ -170,6 +172,7 @@ fun SettingsScreen(
             onAutoNavigationGpsJumpResetChange = onAutoNavigationGpsJumpResetChange,
             onUsePhoneHeadingChange = onUsePhoneHeadingChange,
             onYbImuHeadingModeChange = onYbImuHeadingModeChange,
+            onCalibrateYbImuHeadingToNorth = onCalibrateYbImuHeadingToNorth,
             onCalibrateYbImuHeadingToPhone = onCalibrateYbImuHeadingToPhone,
         )
 
@@ -192,7 +195,6 @@ fun SettingsScreen(
         Esp32ImuObservationCard(
             controlState = controlState,
             settingsState = settingsState,
-            onYbImuHeadingModeChange = onYbImuHeadingModeChange,
         )
 
         GearPercentSettingsCard(
@@ -547,6 +549,7 @@ private fun SafetySettingsCard(
     onAutoNavigationGpsJumpResetChange: (Int) -> Unit,
     onUsePhoneHeadingChange: (Boolean) -> Unit,
     onYbImuHeadingModeChange: (Int) -> Unit,
+    onCalibrateYbImuHeadingToNorth: () -> Unit,
     onCalibrateYbImuHeadingToPhone: () -> Unit,
 ) {
     Card(
@@ -593,12 +596,38 @@ private fun SafetySettingsCard(
                 color = MaterialTheme.colorScheme.onSurfaceVariant,
             )
             SettingsRow("IMU 航向算法", ybImuHeadingModeLabel(settingsState.ybImuHeadingMode))
+            Row(
+                horizontalArrangement = Arrangement.spacedBy(8.dp),
+                modifier = Modifier.fillMaxWidth(),
+            ) {
+                ImuModeButton(
+                    text = "YBY 原始",
+                    selected = settingsState.ybImuHeadingMode == YB_IMU_HEADING_MODE_YBY,
+                    onClick = { onYbImuHeadingModeChange(YB_IMU_HEADING_MODE_YBY) },
+                    modifier = Modifier.weight(1f),
+                )
+                ImuModeButton(
+                    text = "YBY 反向",
+                    selected = settingsState.ybImuHeadingMode == YB_IMU_HEADING_MODE_YBY_INVERTED,
+                    onClick = { onYbImuHeadingModeChange(YB_IMU_HEADING_MODE_YBY_INVERTED) },
+                    modifier = Modifier.weight(1f),
+                )
+            }
             Text(
-                "在下方主控 IMU 观测卡点击候选算法即可切换；切换会取消当前锁航并回空挡。",
+                "如果转动方向相反，切换原始/反向；如果只是整体偏角，使用正北或手机校准。",
                 style = MaterialTheme.typography.bodySmall,
                 color = MaterialTheme.colorScheme.onSurfaceVariant,
             )
             SettingsRow("IMU 航向偏置", "${settingsState.ybImuHeadingOffsetDegrees.roundToInt()}°")
+            SettingsActionButton(
+                text = "设为正北 0°",
+                icon = Icons.Outlined.Tune,
+                color = Color(0xFF1565C0),
+                onClick = onCalibrateYbImuHeadingToNorth,
+                enabled = controlState.telemetry.ybImuAvailable == true &&
+                    controlState.telemetry.ybYawDegrees != null,
+                modifier = Modifier.fillMaxWidth(),
+            )
             SettingsActionButton(
                 text = "对齐手机航向",
                 icon = Icons.Outlined.Tune,
@@ -823,7 +852,6 @@ private fun PhoneHeadingSettingsCard(
 private fun Esp32ImuObservationCard(
     controlState: ControlUiState,
     settingsState: SettingsUiState,
-    onYbImuHeadingModeChange: (Int) -> Unit,
 ) {
     val isConnected = controlState.connectionState == ConnectionState.Connected
     val fields = if (isConnected) controlState.telemetry.statusFields else emptyMap()
@@ -837,10 +865,6 @@ private fun Esp32ImuObservationCard(
         telemetry = controlState.telemetry,
         offsetDegrees = settingsState.ybImuHeadingOffsetDegrees,
         modeId = settingsState.ybImuHeadingMode,
-    )
-    val ybCandidates = ybImuHeadingCandidates(
-        telemetry = controlState.telemetry,
-        offsetDegrees = settingsState.ybImuHeadingOffsetDegrees,
     )
     val imuAvailable = if (isConnected) controlState.telemetry.imuAvailable else null
     val phoneHeading = controlState.phoneHeadingDegrees
@@ -877,17 +901,6 @@ private fun Esp32ImuObservationCard(
             SettingsRow("手机 - IMU", headingDeltaText(phoneHeading, ybHeading))
             SettingsRow("当前算法", ybImuHeadingModeLabel(settingsState.ybImuHeadingMode))
             HorizontalDivider()
-            ybCandidates.forEach { candidate ->
-                val raw = candidate.rawDegrees?.let { "${it.roundToInt()}°" } ?: "--"
-                val calibrated = candidate.calibratedDegrees?.let { "${it.roundToInt()}°" } ?: "--"
-                ImuHeadingCandidateRow(
-                    label = candidate.mode.label,
-                    value = "$calibrated / 裸 $raw",
-                    selected = candidate.mode.id == settingsState.ybImuHeadingMode,
-                    onClick = { onYbImuHeadingModeChange(candidate.mode.id) },
-                )
-            }
-            HorizontalDivider()
             SettingsRow("裸磁航向", fields.imuValue("IMHDG", "°"))
             SettingsRow("Mahony yaw", fields.imuValue("IAHRS", "°"))
             SettingsRow("手机 - 主控", headingDeltaText(phoneHeading, espHeading))
@@ -909,15 +922,6 @@ private fun Esp32ImuObservationCard(
                 ).joinToString(" ").ifBlank { "--" },
             )
             SettingsRow("YB Z 陀螺", controlState.telemetry.ybGyroZRadS?.let { "%.3f rad/s".format(it) } ?: "--")
-            SettingsRow(
-                "YB 四元数",
-                listOfNotNull(
-                    controlState.telemetry.ybQuatW?.let { "w=${"%.3f".format(it)}" },
-                    controlState.telemetry.ybQuatX?.let { "x=${"%.3f".format(it)}" },
-                    controlState.telemetry.ybQuatY?.let { "y=${"%.3f".format(it)}" },
-                    controlState.telemetry.ybQuatZ?.let { "z=${"%.3f".format(it)}" },
-                ).joinToString(" ").ifBlank { "--" },
-            )
             HorizontalDivider()
             SettingsRow("Mahony 姿态", fields.imuTriplet("IROLL", "IPITCH", "IHDG", "°"))
             SettingsRow("加速度", fields.imuTriplet("IAX", "IAY", "IAZ", "g"))
@@ -1100,42 +1104,30 @@ private fun SettingsRow(label: String, value: String) {
 }
 
 @Composable
-private fun ImuHeadingCandidateRow(
-    label: String,
-    value: String,
+private fun ImuModeButton(
+    text: String,
     selected: Boolean,
     onClick: () -> Unit,
+    modifier: Modifier = Modifier,
 ) {
     val color = if (selected) Color(0xFF00695C) else MaterialTheme.colorScheme.onSurfaceVariant
     Surface(
         onClick = onClick,
         shape = RoundedCornerShape(8.dp),
         color = color.copy(alpha = if (selected) 0.16f else 0.06f),
-        modifier = Modifier.fillMaxWidth(),
+        modifier = modifier,
     ) {
-        Row(
-            modifier = Modifier.padding(horizontal = 10.dp, vertical = 9.dp),
-            horizontalArrangement = Arrangement.SpaceBetween,
-            verticalAlignment = Alignment.CenterVertically,
-        ) {
-            Text(
-                if (selected) "已选 $label" else label,
-                color = color,
-                fontWeight = if (selected) FontWeight.SemiBold else FontWeight.Normal,
-                maxLines = 2,
-                overflow = TextOverflow.Ellipsis,
-                modifier = Modifier.weight(1f),
-            )
-            Text(
-                value,
-                color = color,
-                fontWeight = FontWeight.Medium,
-                textAlign = TextAlign.End,
-                maxLines = 1,
-                overflow = TextOverflow.Ellipsis,
-                modifier = Modifier.weight(1f),
-            )
-        }
+        Text(
+            if (selected) "已选 $text" else text,
+            color = color,
+            fontWeight = FontWeight.SemiBold,
+            textAlign = TextAlign.Center,
+            maxLines = 1,
+            overflow = TextOverflow.Ellipsis,
+            modifier = Modifier
+                .fillMaxWidth()
+                .padding(horizontal = 10.dp, vertical = 10.dp),
+        )
     }
 }
 
