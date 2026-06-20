@@ -12,7 +12,7 @@ data class ControlCommand(
     val headingLockEnabled: Boolean = false,
     val headingLockRequestId: Int? = null,
     val headingLockBaseThrottlePercent: Int = 0,
-    val headingLockToleranceDegrees: Int = 4,
+    val headingLockToleranceDegrees: Int = 2,
     val headingLockFullCorrectionDegrees: Int = 6,
     val headingLockNeutralPivotMinDifferencePercent: Int = 10,
     val headingLockNeutralPivotMaxDifferencePercent: Int = 60,

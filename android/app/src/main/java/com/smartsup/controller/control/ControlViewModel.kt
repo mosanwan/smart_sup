@@ -781,7 +781,10 @@ class ControlViewModel(application: Application) : AndroidViewModel(application)
     fun setHeadingLockToleranceDegrees(degrees: Int) {
         val currentFull = mutableSettingsState.value.headingLockFullCorrectionDegrees
         val constrained = coerceHeadingLockToleranceDegrees(degrees, currentFull)
-        preferences.edit().putInt(KEY_HEADING_LOCK_TOLERANCE_DEGREES, constrained).apply()
+        preferences.edit()
+            .putInt(KEY_HEADING_LOCK_TOLERANCE_DEGREES, constrained)
+            .putBoolean(KEY_HEADING_LOCK_TOLERANCE_2_DEGREES_MIGRATED, true)
+            .apply()
         clearAutonomousCommands()
         mutableSettingsState.update { it.copy(headingLockToleranceDegrees = constrained) }
         mutableUiState.update {
@@ -5938,6 +5941,11 @@ class ControlViewModel(application: Application) : AndroidViewModel(application)
             ),
             neutralPivotMinDifference,
         )
+        val headingLockFullCorrection = preferences.getInt(
+            KEY_HEADING_LOCK_FULL_CORRECTION_DEGREES,
+            HEADING_LOCK_FULL_CORRECTION_DEFAULT,
+        )
+        val headingLockTolerance = loadHeadingLockToleranceDegrees(headingLockFullCorrection)
         return SettingsUiState(
             bluetoothAvailable = BluetoothClassicTransport.isBluetoothAvailable(),
             bluetoothEnabled = BluetoothClassicTransport.isBluetoothEnabled(),
@@ -5960,13 +5968,10 @@ class ControlViewModel(application: Application) : AndroidViewModel(application)
             leftEscReversed = preferences.getBoolean(KEY_LEFT_ESC_REVERSED, false),
             rightEscReversed = preferences.getBoolean(KEY_RIGHT_ESC_REVERSED, false),
             rampLimitEnabled = preferences.getBoolean(KEY_RAMP_LIMIT, true),
-            headingLockToleranceDegrees = coerceHeadingLockToleranceDegrees(
-                degrees = preferences.getInt(KEY_HEADING_LOCK_TOLERANCE_DEGREES, 4),
-                fullCorrectionDegrees = preferences.getInt(KEY_HEADING_LOCK_FULL_CORRECTION_DEGREES, 6),
-            ),
+            headingLockToleranceDegrees = headingLockTolerance,
             headingLockFullCorrectionDegrees = coerceHeadingLockFullCorrectionDegrees(
-                degrees = preferences.getInt(KEY_HEADING_LOCK_FULL_CORRECTION_DEGREES, 6),
-                toleranceDegrees = preferences.getInt(KEY_HEADING_LOCK_TOLERANCE_DEGREES, 4).coerceIn(1, 20),
+                degrees = headingLockFullCorrection,
+                toleranceDegrees = headingLockTolerance,
             ),
             headingLockNeutralPivotMinDifferencePercent = neutralPivotMinDifference,
             headingLockNeutralPivotMaxDifferencePercent = neutralPivotMaxDifference,
@@ -6018,6 +6023,23 @@ class ControlViewModel(application: Application) : AndroidViewModel(application)
         }
     }
 
+    private fun loadHeadingLockToleranceDegrees(fullCorrectionDegrees: Int): Int {
+        val migrated = preferences.getBoolean(KEY_HEADING_LOCK_TOLERANCE_2_DEGREES_MIGRATED, false)
+        val degrees = if (migrated) {
+            preferences.getInt(KEY_HEADING_LOCK_TOLERANCE_DEGREES, HEADING_LOCK_TOLERANCE_DEFAULT)
+        } else {
+            HEADING_LOCK_TOLERANCE_DEFAULT
+        }
+        val constrained = coerceHeadingLockToleranceDegrees(degrees, fullCorrectionDegrees)
+        if (!migrated) {
+            preferences.edit()
+                .putInt(KEY_HEADING_LOCK_TOLERANCE_DEGREES, constrained)
+                .putBoolean(KEY_HEADING_LOCK_TOLERANCE_2_DEGREES_MIGRATED, true)
+                .apply()
+        }
+        return constrained
+    }
+
     private fun normalizeRealtimeVoiceVoice(value: String): String {
         val trimmed = value.trim()
         return when (trimmed) {
@@ -6066,6 +6088,8 @@ class ControlViewModel(application: Application) : AndroidViewModel(application)
         private const val KEY_FINE_TUNE_STEP_PERCENT = "fine_tune_step_percent"
         private const val KEY_RAMP_LIMIT = "ramp_limit"
         private const val KEY_HEADING_LOCK_TOLERANCE_DEGREES = "heading_lock_tolerance_degrees"
+        private const val KEY_HEADING_LOCK_TOLERANCE_2_DEGREES_MIGRATED =
+            "heading_lock_tolerance_2_degrees_migrated"
         private const val KEY_HEADING_LOCK_FULL_CORRECTION_DEGREES = "heading_lock_full_correction_degrees"
         private const val KEY_HEADING_LOCK_NEUTRAL_PIVOT_MIN_DIFFERENCE_PERCENT =
             "heading_lock_neutral_pivot_min_difference_percent"
@@ -6108,6 +6132,8 @@ class ControlViewModel(application: Application) : AndroidViewModel(application)
         private const val HEADING_LOCK_ADAPTIVE_RISE_STEP_PERCENT = 1
         private const val HEADING_LOCK_ADAPTIVE_DECAY_STEP_PERCENT = 2
         private const val HEADING_LOCK_ADAPTIVE_IMPROVEMENT_DEADBAND_DEGREES = 1.0f
+        private const val HEADING_LOCK_TOLERANCE_DEFAULT = 2
+        private const val HEADING_LOCK_FULL_CORRECTION_DEFAULT = 6
         private const val HEADING_LOCK_NEUTRAL_PIVOT_MIN_DIFFERENCE_DEFAULT = 20
         private const val HEADING_LOCK_NEUTRAL_PIVOT_MAX_DIFFERENCE_DEFAULT = 60
         private const val HEADING_LOCK_NEUTRAL_PIVOT_MIN_EFFECTIVE_DIFFERENCE_PERCENT = 20

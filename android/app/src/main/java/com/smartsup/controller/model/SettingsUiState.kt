@@ -18,7 +18,7 @@ data class SettingsUiState(
     val leftEscReversed: Boolean = false,
     val rightEscReversed: Boolean = false,
     val rampLimitEnabled: Boolean = true,
-    val headingLockToleranceDegrees: Int = 4,
+    val headingLockToleranceDegrees: Int = 2,
     val headingLockFullCorrectionDegrees: Int = 6,
     val headingLockNeutralPivotMinDifferencePercent: Int = 20,
     val headingLockNeutralPivotMaxDifferencePercent: Int = 60,
