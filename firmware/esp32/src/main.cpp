@@ -53,6 +53,7 @@ constexpr uint8_t ESC_PWM_RESOLUTION_BITS = 16;
 constexpr uint16_t ESC_REVERSE_US = 1000;
 constexpr uint16_t ESC_NEUTRAL_US = 1500;
 constexpr uint16_t ESC_FORWARD_US = 2000;
+constexpr int8_t ESC_MIN_EFFECTIVE_THROTTLE_PERCENT = 9;
 constexpr uint16_t THROTTLE_RAMP_US_PER_TICK = 5;
 constexpr uint32_t CONTROL_TICK_MS = 20;
 constexpr uint32_t ESC_BOOT_NEUTRAL_HOLD_MS = 3000;
@@ -484,6 +485,9 @@ void holdEscNeutralDuringBoot() {
 
 uint16_t signedPercentToPulseUs(int8_t percent) {
   const int constrainedPercent = constrain(static_cast<int>(percent), -100, 100);
+  if (abs(constrainedPercent) < ESC_MIN_EFFECTIVE_THROTTLE_PERCENT) {
+    return ESC_NEUTRAL_US;
+  }
   if (constrainedPercent >= 0) {
     const uint32_t span = ESC_FORWARD_US - ESC_NEUTRAL_US;
     return ESC_NEUTRAL_US + (span * constrainedPercent) / 100;
