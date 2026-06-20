@@ -24,6 +24,8 @@ data class ControlUiState(
     val appHeadingRightCommandPercent: Int? = null,
     val imuTelemetryLogPath: String = "",
     val imuTelemetryLogSampleCount: Int = 0,
+    val stationKeepingLogPath: String = "",
+    val stationKeepingLogSampleCount: Int = 0,
     val voiceInputText: String = "",
     val voiceResultMessage: String = "声控已关闭",
     val voiceCandidatePreview: String = "无候选",

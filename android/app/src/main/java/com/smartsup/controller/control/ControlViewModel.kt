@@ -100,6 +100,7 @@ class ControlViewModel(application: Application) : AndroidViewModel(application)
     }
     private val gpsTrackStore = GpsTrackStore(application)
     private val imuTelemetryLogStore by lazy { ImuTelemetryLogStore(application) }
+    private val stationKeepingLogStore by lazy { StationKeepingLogStore(application) }
     private val autoNavigationRouteStore = AutoNavigationRouteStore(application)
     private val appUpdateInstaller = AppUpdateInstaller(application)
     private val sensorManager = application.getSystemService(SensorManager::class.java)
@@ -1495,6 +1496,7 @@ class ControlViewModel(application: Application) : AndroidViewModel(application)
         clearAutonomousCommands()
         autoNavigationFilteredPoint = null
         autoNavigationLastRawPoint = null
+        val logSnapshot = stationKeepingLogStore.startSession()
         mutableUiState.update {
             it.copy(
                 armed = true,
@@ -1524,6 +1526,8 @@ class ControlViewModel(application: Application) : AndroidViewModel(application)
                     rightOutputPercent = 0,
                     message = "定点保持已启动：${targetHeading.roundToInt()}°",
                 ),
+                stationKeepingLogPath = logSnapshot.filePath,
+                stationKeepingLogSampleCount = logSnapshot.sampleCount,
                 statusMessage = "定点保持已启动，请保持人工接管准备",
             )
         }
@@ -4109,27 +4113,18 @@ class ControlViewModel(application: Application) : AndroidViewModel(application)
             targetHeadingDegrees = targetHeading,
             currentPoint = currentPoint,
         )
+        val bearingToTarget = bearingBetween(currentPoint, targetPoint).toFloat()
         val positionActive = when {
             autoState.stationKeepingPositionActive ->
                 stationError.distanceMeters > STATION_KEEPING_HOLD_RADIUS_METERS
             else ->
                 stationError.distanceMeters >= STATION_KEEPING_REENGAGE_RADIUS_METERS
         }
-        val headingOffset = if (positionActive) {
-            Math.toDegrees(
-                atan2(stationError.lateralMeters, STATION_KEEPING_LOOKAHEAD_METERS),
-            ).coerceIn(
-                -STATION_KEEPING_MAX_HEADING_OFFSET_DEGREES.toDouble(),
-                STATION_KEEPING_MAX_HEADING_OFFSET_DEGREES.toDouble(),
-            )
+        val desiredHeading = if (positionActive) {
+            bearingToTarget
         } else {
-            0.0
+            targetHeading
         }
-        val movingReverse = positionActive &&
-            stationError.forwardMeters < -STATION_KEEPING_REVERSE_DEADBAND_METERS
-        val desiredHeading = normalizeCompassDegrees(
-            (targetHeading + if (movingReverse) -headingOffset else headingOffset).toFloat(),
-        )
         val errorDegrees = shortestCompassError(desiredHeading, currentHeading)
         val absError = abs(errorDegrees)
         val outputLimitPercent = minOf(
@@ -4137,7 +4132,7 @@ class ControlViewModel(application: Application) : AndroidViewModel(application)
             STATION_KEEPING_MAX_OUTPUT_PERCENT,
         ).coerceIn(0, 100)
         val gearIndex = autoState.gearIndex.coerceIn(0, AUTO_NAVIGATION_GEAR_PERCENTS.lastIndex)
-        val requestedBaseMagnitude = if (positionActive && absError <= STATION_KEEPING_STOP_TRANSLATION_DEGREES) {
+        val requestedBaseMagnitude = if (positionActive && absError <= STATION_KEEPING_GO_HEADING_ERROR_DEGREES) {
             stationKeepingBasePercent(
                 distanceMeters = stationError.distanceMeters,
                 gearPercent = AUTO_NAVIGATION_GEAR_PERCENTS[gearIndex],
@@ -4146,7 +4141,7 @@ class ControlViewModel(application: Application) : AndroidViewModel(application)
         } else {
             0
         }
-        val basePercent = if (movingReverse) -requestedBaseMagnitude else requestedBaseMagnitude
+        val basePercent = requestedBaseMagnitude
         val baseCorrection = headingCorrectionPercent(
             errorDegrees = errorDegrees,
             toleranceDegrees = settings.headingLockToleranceDegrees,
@@ -4172,6 +4167,50 @@ class ControlViewModel(application: Application) : AndroidViewModel(application)
         val rightPercent = rawLeftRight.second.coerceIn(-outputLimitPercent, outputLimitPercent)
         val leftCommandPercent = applyEscDirection(leftPercent, settings.leftEscReversed)
         val rightCommandPercent = applyEscDirection(rightPercent, settings.rightEscReversed)
+        val decisionMessage = stationKeepingMessage(
+            positionActive = positionActive,
+            basePercent = basePercent,
+            absErrorDegrees = absError,
+        )
+        val statusFields = state.telemetry.statusFields
+        val logSnapshot = stationKeepingLogStore.append(
+            StationKeepingLogEntry(
+                phoneTimeMs = System.currentTimeMillis(),
+                reason = decisionMessage,
+                gpsFix = statusFields["GPS_FIX"].orEmpty(),
+                gpsSat = gpsSatelliteCount(),
+                gpsSpeedKmh = statusFields["GPS_SPD_KMH"].orEmpty(),
+                currentLatitude = currentPoint.latitude,
+                currentLongitude = currentPoint.longitude,
+                targetLatitude = targetPoint.latitude,
+                targetLongitude = targetPoint.longitude,
+                targetHeadingDegrees = targetHeading,
+                currentHeadingDegrees = currentHeading,
+                desiredHeadingDegrees = desiredHeading,
+                headingOffsetDegrees = shortestCompassError(desiredHeading, targetHeading).toDouble(),
+                headingErrorDegrees = errorDegrees,
+                distanceMeters = stationError.distanceMeters,
+                forwardErrorMeters = stationError.forwardMeters,
+                lateralErrorMeters = stationError.lateralMeters,
+                positionActive = positionActive,
+                movingReverse = false,
+                gearIndex = gearIndex,
+                outputLimitPercent = outputLimitPercent,
+                requestedBasePercent = requestedBaseMagnitude,
+                basePercent = basePercent,
+                baseCorrectionPercent = baseCorrection,
+                leftOutputPercent = leftPercent,
+                rightOutputPercent = rightPercent,
+                leftCommandPercent = leftCommandPercent,
+                rightCommandPercent = rightCommandPercent,
+                statusArmed = statusFields["ARMED"].orEmpty(),
+                statusLeft = statusFields["L"].orEmpty(),
+                statusRight = statusFields["R"].orEmpty(),
+                statusLeftPwm = statusFields["LPWM"].orEmpty(),
+                statusRightPwm = statusFields["RPWM"].orEmpty(),
+                rawStatus = state.telemetry.lastReceivedStatus,
+            ),
+        )
 
         mutableUiState.update {
             it.copy(
@@ -4188,13 +4227,10 @@ class ControlViewModel(application: Application) : AndroidViewModel(application)
                     stationKeepingPositionActive = positionActive,
                     leftOutputPercent = leftPercent,
                     rightOutputPercent = rightPercent,
-                    message = stationKeepingMessage(
-                        positionActive = positionActive,
-                        movingReverse = movingReverse,
-                        basePercent = basePercent,
-                        absErrorDegrees = absError,
-                    ),
+                    message = decisionMessage,
                 ),
+                stationKeepingLogPath = logSnapshot.filePath,
+                stationKeepingLogSampleCount = logSnapshot.sampleCount,
             )
         }
 
@@ -5364,21 +5400,16 @@ class ControlViewModel(application: Application) : AndroidViewModel(application)
 
     private fun stationKeepingMessage(
         positionActive: Boolean,
-        movingReverse: Boolean,
         basePercent: Int,
         absErrorDegrees: Float,
     ): String {
         if (!positionActive) {
-            return "定点保持中：位置在容差内，保持目标航向"
+            return "定点保持中：到点，调整目标航向"
         }
-        if (basePercent == 0 && absErrorDegrees > STATION_KEEPING_STOP_TRANSLATION_DEGREES) {
-            return "定点保持中：航向偏差较大，先调头"
+        if (basePercent == 0 && absErrorDegrees > STATION_KEEPING_GO_HEADING_ERROR_DEGREES) {
+            return "定点保持中：先转向目标点"
         }
-        return if (movingReverse) {
-            "定点保持中：后退回点"
-        } else {
-            "定点保持中：前进回点"
-        }
+        return "定点保持中：直线推进到目标点"
     }
 
     private fun interpolatePoint(
@@ -6445,16 +6476,13 @@ class ControlViewModel(application: Application) : AndroidViewModel(application)
         private const val TRACK_LINE_MAX_CROSS_TRACK_METERS = 15.0
         private const val STATION_KEEPING_HOLD_RADIUS_METERS = 2.0
         private const val STATION_KEEPING_REENGAGE_RADIUS_METERS = 2.8
-        private const val STATION_KEEPING_FULL_OUTPUT_RADIUS_METERS = 4.0
-        private const val STATION_KEEPING_LOOKAHEAD_METERS = 8.0
-        private const val STATION_KEEPING_REVERSE_DEADBAND_METERS = 1.0
-        private const val STATION_KEEPING_MAX_HEADING_OFFSET_DEGREES = 30.0
-        private const val STATION_KEEPING_STOP_TRANSLATION_DEGREES = 85f
-        private const val STATION_KEEPING_MAX_OUTPUT_PERCENT = 40
-        private const val STATION_KEEPING_MIN_EFFECTIVE_OUTPUT_PERCENT = 18
+        private const val STATION_KEEPING_FULL_OUTPUT_RADIUS_METERS = 6.0
+        private const val STATION_KEEPING_GO_HEADING_ERROR_DEGREES = 20f
+        private const val STATION_KEEPING_MAX_OUTPUT_PERCENT = 30
+        private const val STATION_KEEPING_MIN_EFFECTIVE_OUTPUT_PERCENT = 12
         private const val STATION_KEEPING_FULL_CORRECTION_DEGREES = 30
         private const val STATION_KEEPING_MAX_PIVOT_DIFFERENCE_PERCENT = 50
-        private const val STATION_KEEPING_DEFAULT_GEAR_INDEX = 2
+        private const val STATION_KEEPING_DEFAULT_GEAR_INDEX = 1
         private const val MAX_TURN_REQUEST_ID = 65_535
         private const val VOICE_POWER_LIMIT_MIN = 5
         private const val VOICE_POWER_LIMIT_MAX = 100

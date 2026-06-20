@@ -1121,6 +1121,13 @@ private fun StationKeepingControls(
                     Icon(Icons.Outlined.KeyboardArrowUp, contentDescription = "定点保持加档")
                 }
             }
+            Text(
+                "日志 ${state.stationKeepingLogSampleCount} 条 · ${state.stationKeepingLogPath.ifBlank { "--" }}",
+                style = MaterialTheme.typography.labelSmall,
+                color = MaterialTheme.colorScheme.onSurfaceVariant,
+                maxLines = 2,
+                overflow = TextOverflow.Ellipsis,
+            )
         }
     }
 }
