@@ -4120,7 +4120,14 @@ class ControlViewModel(application: Application) : AndroidViewModel(application)
             else ->
                 stationError.distanceMeters >= STATION_KEEPING_REENGAGE_RADIUS_METERS
         }
-        val desiredHeading = if (positionActive) {
+        val reverseBearingToTarget = normalizeCompassDegrees(bearingToTarget + 180f)
+        val forwardHeadingError = abs(shortestCompassError(bearingToTarget, currentHeading))
+        val reverseHeadingError = abs(shortestCompassError(reverseBearingToTarget, currentHeading))
+        val movingReverse = positionActive &&
+            reverseHeadingError + STATION_KEEPING_REVERSE_SELECTION_DEADBAND_DEGREES < forwardHeadingError
+        val desiredHeading = if (positionActive && movingReverse) {
+            reverseBearingToTarget
+        } else if (positionActive) {
             bearingToTarget
         } else {
             targetHeading
@@ -4141,7 +4148,7 @@ class ControlViewModel(application: Application) : AndroidViewModel(application)
         } else {
             0
         }
-        val basePercent = requestedBaseMagnitude
+        val basePercent = if (movingReverse) -requestedBaseMagnitude else requestedBaseMagnitude
         val baseCorrection = headingCorrectionPercent(
             errorDegrees = errorDegrees,
             toleranceDegrees = settings.headingLockToleranceDegrees,
@@ -4169,6 +4176,7 @@ class ControlViewModel(application: Application) : AndroidViewModel(application)
         val rightCommandPercent = applyEscDirection(rightPercent, settings.rightEscReversed)
         val decisionMessage = stationKeepingMessage(
             positionActive = positionActive,
+            movingReverse = movingReverse,
             basePercent = basePercent,
             absErrorDegrees = absError,
         )
@@ -4193,7 +4201,7 @@ class ControlViewModel(application: Application) : AndroidViewModel(application)
                 forwardErrorMeters = stationError.forwardMeters,
                 lateralErrorMeters = stationError.lateralMeters,
                 positionActive = positionActive,
-                movingReverse = false,
+                movingReverse = movingReverse,
                 gearIndex = gearIndex,
                 outputLimitPercent = outputLimitPercent,
                 requestedBasePercent = requestedBaseMagnitude,
@@ -5400,6 +5408,7 @@ class ControlViewModel(application: Application) : AndroidViewModel(application)
 
     private fun stationKeepingMessage(
         positionActive: Boolean,
+        movingReverse: Boolean,
         basePercent: Int,
         absErrorDegrees: Float,
     ): String {
@@ -5407,9 +5416,17 @@ class ControlViewModel(application: Application) : AndroidViewModel(application)
             return "定点保持中：到点，调整目标航向"
         }
         if (basePercent == 0 && absErrorDegrees > STATION_KEEPING_GO_HEADING_ERROR_DEGREES) {
-            return "定点保持中：先转向目标点"
+            return if (movingReverse) {
+                "定点保持中：先转向倒车回点方向"
+            } else {
+                "定点保持中：先转向目标点"
+            }
         }
-        return "定点保持中：直线推进到目标点"
+        return if (movingReverse) {
+            "定点保持中：倒车回点"
+        } else {
+            "定点保持中：直线推进到目标点"
+        }
     }
 
     private fun interpolatePoint(
@@ -6483,6 +6500,7 @@ class ControlViewModel(application: Application) : AndroidViewModel(application)
         private const val STATION_KEEPING_FULL_CORRECTION_DEGREES = 30
         private const val STATION_KEEPING_MAX_PIVOT_DIFFERENCE_PERCENT = 50
         private const val STATION_KEEPING_DEFAULT_GEAR_INDEX = 1
+        private const val STATION_KEEPING_REVERSE_SELECTION_DEADBAND_DEGREES = 15f
         private const val MAX_TURN_REQUEST_ID = 65_535
         private const val VOICE_POWER_LIMIT_MIN = 5
         private const val VOICE_POWER_LIMIT_MAX = 100
