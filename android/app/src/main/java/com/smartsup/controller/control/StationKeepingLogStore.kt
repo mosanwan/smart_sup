@@ -45,6 +45,19 @@ class StationKeepingLogStore(context: Context) {
                 "gps_speed_kmh" -> entry.gpsSpeedKmh
                 "current_lat" -> entry.currentLatitude.toString()
                 "current_lon" -> entry.currentLongitude.toString()
+                "raw_gps_lat" -> entry.rawGpsLatitude?.toString().orEmpty()
+                "raw_gps_lon" -> entry.rawGpsLongitude?.toString().orEmpty()
+                "filtered_gps_lat" -> entry.filteredGpsLatitude.toString()
+                "filtered_gps_lon" -> entry.filteredGpsLongitude.toString()
+                "gps_jump_m" -> entry.gpsJumpMeters?.toString().orEmpty()
+                "gps_weight" -> entry.gpsWeight.toString()
+                "gps_filter_alpha" -> entry.gpsFilterAlpha.toString()
+                "gps_fusion_reason" -> entry.gpsFusionReason
+                "imu_accel_x_g" -> entry.imuAccelXG?.toString().orEmpty()
+                "imu_accel_y_g" -> entry.imuAccelYG?.toString().orEmpty()
+                "imu_accel_z_g" -> entry.imuAccelZG?.toString().orEmpty()
+                "imu_accel_norm_g" -> entry.imuAccelNormG?.toString().orEmpty()
+                "imu_motion_g" -> entry.imuMotionG?.toString().orEmpty()
                 "target_lat" -> entry.targetLatitude.toString()
                 "target_lon" -> entry.targetLongitude.toString()
                 "target_heading_deg" -> entry.targetHeadingDegrees.toString()
@@ -103,6 +116,19 @@ class StationKeepingLogStore(context: Context) {
             "gps_speed_kmh",
             "current_lat",
             "current_lon",
+            "raw_gps_lat",
+            "raw_gps_lon",
+            "filtered_gps_lat",
+            "filtered_gps_lon",
+            "gps_jump_m",
+            "gps_weight",
+            "gps_filter_alpha",
+            "gps_fusion_reason",
+            "imu_accel_x_g",
+            "imu_accel_y_g",
+            "imu_accel_z_g",
+            "imu_accel_norm_g",
+            "imu_motion_g",
             "target_lat",
             "target_lon",
             "target_heading_deg",
@@ -142,6 +168,19 @@ data class StationKeepingLogEntry(
     val gpsSpeedKmh: String,
     val currentLatitude: Double,
     val currentLongitude: Double,
+    val rawGpsLatitude: Double?,
+    val rawGpsLongitude: Double?,
+    val filteredGpsLatitude: Double,
+    val filteredGpsLongitude: Double,
+    val gpsJumpMeters: Double?,
+    val gpsWeight: Double,
+    val gpsFilterAlpha: Double,
+    val gpsFusionReason: String,
+    val imuAccelXG: Double?,
+    val imuAccelYG: Double?,
+    val imuAccelZG: Double?,
+    val imuAccelNormG: Double?,
+    val imuMotionG: Double?,
     val targetLatitude: Double,
     val targetLongitude: Double,
     val targetHeadingDegrees: Float,

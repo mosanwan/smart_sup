@@ -37,6 +37,7 @@ data class AutoNavigationUiState(
     val stationKeepingForwardErrorMeters: Double? = null,
     val stationKeepingLateralErrorMeters: Double? = null,
     val stationKeepingPositionActive: Boolean = false,
+    val stationKeepingMovingReverse: Boolean = false,
     val leftOutputPercent: Int = 0,
     val rightOutputPercent: Int = 0,
     val message: String = "自动导航未启动",

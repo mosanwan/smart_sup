@@ -11,11 +11,12 @@ data class YbImuHeadingMode(
 
 const val YB_IMU_HEADING_MODE_YBY = 0
 const val YB_IMU_HEADING_MODE_YBY_INVERTED = 1
-const val YB_IMU_HEADING_MODE_DEFAULT = YB_IMU_HEADING_MODE_YBY
+const val YB_IMU_HEADING_MODE_DEFAULT = YB_IMU_HEADING_MODE_YBY_INVERTED
+private const val YB_IMU_HEADING_FORWARD_OFFSET_DEGREES = 180f
 
 val YB_IMU_HEADING_MODES = listOf(
     YbImuHeadingMode(YB_IMU_HEADING_MODE_YBY, "YBY 原始"),
-    YbImuHeadingMode(YB_IMU_HEADING_MODE_YBY_INVERTED, "YBY 反向"),
+    YbImuHeadingMode(YB_IMU_HEADING_MODE_YBY_INVERTED, "YBY + 180°"),
 )
 
 fun ybImuHeadingDegrees(
@@ -33,7 +34,9 @@ fun ybImuUncalibratedHeadingDegrees(
 ): Float? {
     return when (modeId) {
         YB_IMU_HEADING_MODE_YBY -> telemetry.ybYawDegrees?.let(::normalizeCompassDegrees)
-        YB_IMU_HEADING_MODE_YBY_INVERTED -> telemetry.ybYawDegrees?.let { normalizeCompassDegrees(-it) }
+        YB_IMU_HEADING_MODE_YBY_INVERTED -> telemetry.ybYawDegrees?.let {
+            normalizeCompassDegrees(it + YB_IMU_HEADING_FORWARD_OFFSET_DEGREES)
+        }
         else -> null
     }
 }

@@ -23,6 +23,7 @@ import androidx.compose.foundation.layout.size
 import androidx.compose.foundation.layout.width
 import androidx.compose.foundation.lazy.LazyColumn
 import androidx.compose.foundation.lazy.items
+import androidx.compose.foundation.shape.CircleShape
 import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.outlined.Add
@@ -35,6 +36,7 @@ import androidx.compose.material.icons.outlined.KeyboardArrowDown
 import androidx.compose.material.icons.outlined.KeyboardArrowUp
 import androidx.compose.material.icons.outlined.Pause
 import androidx.compose.material.icons.outlined.PlayArrow
+import androidx.compose.material.icons.outlined.Refresh
 import androidx.compose.material3.AlertDialog
 import androidx.compose.material3.Card
 import androidx.compose.material3.CardDefaults
@@ -44,6 +46,7 @@ import androidx.compose.material3.IconButton
 import androidx.compose.material3.LinearProgressIndicator
 import androidx.compose.material3.MaterialTheme
 import androidx.compose.material3.OutlinedButton
+import androidx.compose.material3.OutlinedTextField
 import androidx.compose.material3.Slider
 import androidx.compose.material3.Surface
 import androidx.compose.material3.Text
@@ -71,8 +74,11 @@ import com.smartsup.controller.model.ControlUiState
 import com.smartsup.controller.model.GpsTrackPoint
 import com.smartsup.controller.model.GpsTrackSegment
 import com.smartsup.controller.model.GpsTrackUiState
+import com.smartsup.controller.model.NavigationGpsSource
 import com.smartsup.controller.model.NavigationRoute
 import com.smartsup.controller.model.NavigationRoutePoint
+import com.smartsup.controller.model.PhoneGpsState
+import com.smartsup.controller.model.YB_IMU_HEADING_MODE_YBY_INVERTED
 import com.smartsup.controller.model.ybImuHeadingDegrees
 import kotlinx.coroutines.delay
 import org.maplibre.android.MapLibre
@@ -121,7 +127,9 @@ private val PLAYBACK_SPEED_OPTIONS = listOf(1, 5, 15, 30, 60, 120)
 @Composable
 fun NavigationScreen(
     state: ControlUiState,
+    navigationGpsSource: NavigationGpsSource,
     usePhoneHeading: Boolean,
+    phoneHeadingOffsetDegrees: Float,
     ybImuHeadingOffsetDegrees: Float,
     ybImuHeadingMode: Int,
     modifier: Modifier = Modifier,
@@ -134,11 +142,15 @@ fun NavigationScreen(
     onClearSelectedRoute: () -> Unit,
     onEditRoute: (String) -> Unit,
     onAddRoutePoint: (Double, Double) -> Unit,
+    onUpdateRoutePoint: (Int, Double, Double) -> Unit,
+    onDeleteRoutePoint: (Int) -> Unit,
+    onMoveRoutePoint: (Int, Int) -> Unit,
     onUndoRoutePoint: () -> Unit,
     onSaveRoute: () -> Unit,
     onCancelRouteEditing: () -> Unit,
     onExecuteRoute: (String) -> Unit,
     onDeleteRoute: (String) -> Unit,
+    onRenameRoute: (String, String) -> Unit,
     onIncreaseAutoGear: () -> Unit,
     onDecreaseAutoGear: () -> Unit,
     onStopAutoNavigation: () -> Unit,
@@ -158,11 +170,19 @@ fun NavigationScreen(
     var playbackSpeedMultiplier by rememberSaveable { mutableStateOf(30) }
     var previousSyncing by remember { mutableStateOf(gpsTrack.syncing) }
     var syncNotice by remember { mutableStateOf<String?>(null) }
-    val liveLocation = state.telemetry.liveLatLng()
-    val liveHeadingDegrees = state.navigationHeadingDegrees(usePhoneHeading, ybImuHeadingOffsetDegrees, ybImuHeadingMode)
-    val liveHeadingSourceText = if (usePhoneHeading) "手机" else "IMU"
-    val liveHeadingText = liveHeadingDegrees?.let { "$liveHeadingSourceText ${it.roundToInt()}°" }
-    val gpsSpeedText = state.telemetry.gpsSpeedText()
+    var selectedRoutePointIndex by rememberSaveable(autoNavigation.editingRouteId) { mutableStateOf<Int?>(null) }
+    var movingRoutePointIndex by rememberSaveable(autoNavigation.editingRouteId) { mutableStateOf<Int?>(null) }
+    val liveLocation = state.liveLatLng(navigationGpsSource)
+    val liveHeadingDegrees = state.navigationHeadingDegrees(
+        usePhoneHeading,
+        phoneHeadingOffsetDegrees,
+        ybImuHeadingOffsetDegrees,
+        ybImuHeadingMode,
+    )
+    val liveHeadingSourceText = if (usePhoneHeading) "船头" else "IMU"
+    val gpsStatusText = state.gpsFixText(navigationGpsSource)
+    val gpsSpeedText = state.gpsSpeedText(navigationGpsSource)
+    val gpsLocated = state.hasNavigationGpsLocation(navigationGpsSource)
     val rawTrackPoints = remember(gpsTrack.recentPoints) {
         gpsTrack.recentPoints.map { LatLng(it.latitude, it.longitude) }
     }
@@ -205,10 +225,14 @@ fun NavigationScreen(
     val stationKeepingTarget = autoNavigation.stationKeepingTarget
         ?.let { LatLng(it.latitude, it.longitude) }
     val activeTargetPoint = stationKeepingTarget ?: targetRoutePoint
+    LaunchedEffect(autoNavigation.editingPoints.size) {
+        val lastIndex = autoNavigation.editingPoints.lastIndex
+        selectedRoutePointIndex = selectedRoutePointIndex?.takeIf { it in 0..lastIndex }
+        movingRoutePointIndex = movingRoutePointIndex?.takeIf { it in 0..lastIndex }
+    }
+
     val cameraTarget = if (showingPlayback) {
         trackPoints.firstOrNull()
-    } else if (autoNavigation.editing && routePoints.isNotEmpty()) {
-        routePoints.last()
     } else if (autoNavigation.stationKeepingEnabled) {
         liveLocation ?: stationKeepingTarget
     } else if (autoNavigation.trackLineLockEnabled) {
@@ -223,7 +247,7 @@ fun NavigationScreen(
     val cameraTargetKey = if (showingPlayback) {
         gpsTrack.selectedTrackId?.let { "track:$it" }
     } else if (autoNavigation.editing) {
-        autoNavigation.editingRouteId?.let { "route-edit:$it:${autoNavigation.editingPoints.size}" }
+        null
     } else if (autoNavigation.trackLineLockEnabled) {
         autoNavigation.trackLineOrigin?.let { "track-line:${it.latitude}:${it.longitude}:${autoNavigation.trackLineBearingDegrees}" }
     } else if (autoNavigation.stationKeepingEnabled) {
@@ -290,8 +314,23 @@ fun NavigationScreen(
                 playbackBearing = if (showingPlayback) playbackBearing else null,
                 routePoints = routePoints,
                 routeEditing = autoNavigation.editing,
+                selectedRoutePointIndex = selectedRoutePointIndex,
                 routeTarget = activeTargetPoint,
-                onRoutePointAdd = { point -> onAddRoutePoint(point.latitude, point.longitude) },
+                onRoutePointAdd = { point ->
+                    val movingIndex = movingRoutePointIndex
+                    if (movingIndex != null && movingIndex in autoNavigation.editingPoints.indices) {
+                        onUpdateRoutePoint(movingIndex, point.latitude, point.longitude)
+                        selectedRoutePointIndex = movingIndex
+                        movingRoutePointIndex = null
+                    } else {
+                        onAddRoutePoint(point.latitude, point.longitude)
+                        selectedRoutePointIndex = autoNavigation.editingPoints.size
+                    }
+                },
+                onRoutePointSelected = { index ->
+                    selectedRoutePointIndex = index
+                    movingRoutePointIndex = null
+                },
                 followTarget = if (showingPlayback) playbackLocation else null,
                 cameraTarget = cameraTarget,
                 cameraTargetKey = cameraTargetKey,
@@ -303,86 +342,15 @@ fun NavigationScreen(
 
         Column(
             modifier = Modifier
-                .align(Alignment.TopCenter)
-                .fillMaxWidth()
+                .align(Alignment.TopStart)
                 .padding(12.dp),
             verticalArrangement = Arrangement.spacedBy(8.dp),
         ) {
-            Surface(
-                shape = RoundedCornerShape(8.dp),
-                color = MaterialTheme.colorScheme.surface.copy(alpha = 0.98f),
-                tonalElevation = 3.dp,
-            ) {
-                Row(
-                    modifier = Modifier
-                        .fillMaxWidth()
-                        .padding(horizontal = 12.dp, vertical = 8.dp),
-                    horizontalArrangement = Arrangement.spacedBy(4.dp),
-                    verticalAlignment = Alignment.CenterVertically,
-                ) {
-                    GpsStatusChip(
-                        text = "GPS ${state.telemetry.gpsFixText()}",
-                        speedText = gpsSpeedText,
-                        headingText = liveHeadingText,
-                        modifier = Modifier.weight(1f),
-                    )
-                    TextButton(
-                        onClick = onSyncTrack,
-                        enabled = !gpsTrack.syncing,
-                        contentPadding = PaddingValues(horizontal = 8.dp, vertical = 6.dp),
-                    ) {
-                        Text(if (gpsTrack.syncing) "同步中" else "同步")
-                    }
-                    TextButton(
-                        onClick = {
-                            playbackControlsVisible = false
-                            playbackPlaying = false
-                            if (autoNavigation.stationKeepingEnabled) {
-                                onStopStationKeeping()
-                            } else {
-                                onStartStationKeeping()
-                            }
-                        },
-                        enabled = !gpsTrack.syncing &&
-                            !autoNavigation.editing &&
-                            !autoNavigation.executing &&
-                            !autoNavigation.trackLineLockEnabled,
-                        contentPadding = PaddingValues(horizontal = 8.dp, vertical = 6.dp),
-                    ) {
-                        Text(if (autoNavigation.stationKeepingEnabled) "停点" else "定点")
-                    }
-                    TextButton(
-                        onClick = {
-                            playbackControlsVisible = false
-                            playbackPlaying = false
-                            if (autoNavigation.trackLineLockEnabled) {
-                                onStopTrackLineLock()
-                            } else {
-                                onStartTrackLineLock()
-                            }
-                        },
-                        enabled = !gpsTrack.syncing &&
-                            !autoNavigation.editing &&
-                            !autoNavigation.executing &&
-                            !autoNavigation.stationKeepingEnabled,
-                        contentPadding = PaddingValues(horizontal = 8.dp, vertical = 6.dp),
-                    ) {
-                        Text(if (autoNavigation.trackLineLockEnabled) "停锁" else "锁线")
-                    }
-                    TextButton(
-                        onClick = { trackDialogVisible = true },
-                        contentPadding = PaddingValues(horizontal = 8.dp, vertical = 6.dp),
-                    ) {
-                        Text("轨迹")
-                    }
-                    TextButton(
-                        onClick = { routeDialogVisible = true },
-                        contentPadding = PaddingValues(horizontal = 8.dp, vertical = 6.dp),
-                    ) {
-                        Text("路线")
-                    }
-                }
-            }
+            NavigationTopPanel(
+                gpsLocated = gpsLocated,
+                gpsText = "${navigationGpsSource.label()} $gpsStatusText",
+                speedText = gpsSpeedText,
+            )
             if (gpsTrack.syncing) {
                 TrackSyncProgressPanel(gpsTrack = gpsTrack)
             } else {
@@ -392,98 +360,120 @@ fun NavigationScreen(
             }
         }
 
-        if (showingPlayback) {
-            MinimalTrackPlaybackControls(
-                playing = playbackPlaying,
-                pointCount = gpsTrack.recentPoints.size,
-                playbackPosition = playbackPosition,
-                playbackTimeText = playbackTimeText,
-                playbackTravelSpeedText = playbackTravelSpeedText,
-                playbackSpeedMultiplier = playbackSpeedMultiplier,
-                onTogglePlaying = {
-                    if (playbackPlaying) {
-                        playbackPlaying = false
-                    } else {
-                        if (playbackPosition >= gpsTrack.recentPoints.lastIndex) {
-                            playbackPosition = 0f
-                            onPlaybackIndexChange(0)
+        Column(
+            modifier = Modifier
+                .align(Alignment.BottomCenter)
+                .fillMaxWidth()
+                .padding(12.dp),
+            verticalArrangement = Arrangement.spacedBy(8.dp),
+        ) {
+            if (showingPlayback) {
+                MinimalTrackPlaybackControls(
+                    playing = playbackPlaying,
+                    pointCount = gpsTrack.recentPoints.size,
+                    playbackPosition = playbackPosition,
+                    playbackTimeText = playbackTimeText,
+                    playbackTravelSpeedText = playbackTravelSpeedText,
+                    playbackSpeedMultiplier = playbackSpeedMultiplier,
+                    onTogglePlaying = {
+                        if (playbackPlaying) {
+                            playbackPlaying = false
+                        } else {
+                            if (playbackPosition >= gpsTrack.recentPoints.lastIndex) {
+                                playbackPosition = 0f
+                                onPlaybackIndexChange(0)
+                            }
+                            playbackPlaying = true
                         }
-                        playbackPlaying = true
+                    },
+                    onPlaybackPositionChange = {
+                        playbackPlaying = false
+                        playbackPosition = it
+                        onPlaybackIndexChange(it.toInt())
+                    },
+                    onPlaybackSpeedChange = { playbackSpeedMultiplier = it },
+                    onClose = {
+                        playbackPlaying = false
+                        playbackControlsVisible = false
+                        playbackPosition = 0f
+                        onPlaybackIndexChange(0)
+                    },
+                )
+            } else if (autoNavigation.editing) {
+                RouteEditingControls(
+                    pointCount = autoNavigation.editingPoints.size,
+                    selectedPointIndex = selectedRoutePointIndex?.takeIf { it in autoNavigation.editingPoints.indices },
+                    movingPointIndex = movingRoutePointIndex?.takeIf { it in autoNavigation.editingPoints.indices },
+                    message = autoNavigation.message,
+                    onMoveSelected = { index, delta ->
+                        onMoveRoutePoint(index, delta)
+                        selectedRoutePointIndex = (index + delta).coerceIn(0, autoNavigation.editingPoints.lastIndex)
+                        movingRoutePointIndex = null
+                    },
+                    onStartMoving = { index -> movingRoutePointIndex = index },
+                    onDeleteSelected = { index ->
+                        onDeleteRoutePoint(index)
+                        selectedRoutePointIndex = null
+                        movingRoutePointIndex = null
+                    },
+                    onUndo = onUndoRoutePoint,
+                    onSave = onSaveRoute,
+                    onCancel = onCancelRouteEditing,
+                )
+            } else if (autoNavigation.stationKeepingEnabled) {
+                StationKeepingControls(
+                    state = state,
+                    onDecreaseGear = onDecreaseAutoGear,
+                    onIncreaseGear = onIncreaseAutoGear,
+                    onStop = onStopStationKeeping,
+                )
+            } else if (autoNavigation.trackLineLockEnabled) {
+                TrackLineLockControls(
+                    state = state,
+                    onDecreaseGear = onDecreaseAutoGear,
+                    onIncreaseGear = onIncreaseAutoGear,
+                    onStop = onStopTrackLineLock,
+                )
+            } else if (autoNavigation.executing) {
+                AutoNavigationControls(
+                    state = state,
+                    onDecreaseGear = onDecreaseAutoGear,
+                    onIncreaseGear = onIncreaseAutoGear,
+                    onStop = onStopAutoNavigation,
+                )
+            } else if (selectedRoute != null) {
+                SelectedRouteControls(
+                    route = selectedRoute,
+                    message = autoNavigation.message,
+                    onClose = onClearSelectedRoute,
+                    onExecute = {
+                        playbackControlsVisible = false
+                        playbackPlaying = false
+                        pendingExecuteRoute = selectedRoute
+                    },
+                    onEdit = { onEditRoute(selectedRoute.id) },
+                    onRename = { onRenameRoute(selectedRoute.id, it) },
+                )
+            }
+            NavigationActionBar(
+                syncing = gpsTrack.syncing,
+                stationKeepingEnabled = autoNavigation.stationKeepingEnabled,
+                stationKeepingEnabledForClick = !gpsTrack.syncing &&
+                    !autoNavigation.editing &&
+                    !autoNavigation.executing &&
+                    !autoNavigation.trackLineLockEnabled,
+                onSyncTrack = onSyncTrack,
+                onToggleStationKeeping = {
+                    playbackControlsVisible = false
+                    playbackPlaying = false
+                    if (autoNavigation.stationKeepingEnabled) {
+                        onStopStationKeeping()
+                    } else {
+                        onStartStationKeeping()
                     }
                 },
-                onPlaybackPositionChange = {
-                    playbackPlaying = false
-                    playbackPosition = it
-                    onPlaybackIndexChange(it.toInt())
-                },
-                onPlaybackSpeedChange = { playbackSpeedMultiplier = it },
-                onClose = {
-                    playbackPlaying = false
-                    playbackControlsVisible = false
-                    playbackPosition = 0f
-                    onPlaybackIndexChange(0)
-                },
-                modifier = Modifier
-                    .align(Alignment.BottomCenter)
-                    .padding(12.dp),
-            )
-        }
-
-        if (autoNavigation.editing) {
-            RouteEditingControls(
-                pointCount = autoNavigation.editingPoints.size,
-                message = autoNavigation.message,
-                onUndo = onUndoRoutePoint,
-                onSave = onSaveRoute,
-                onCancel = onCancelRouteEditing,
-                modifier = Modifier
-                    .align(Alignment.BottomCenter)
-                    .padding(12.dp),
-            )
-        } else if (autoNavigation.stationKeepingEnabled) {
-            StationKeepingControls(
-                state = state,
-                onDecreaseGear = onDecreaseAutoGear,
-                onIncreaseGear = onIncreaseAutoGear,
-                onStop = onStopStationKeeping,
-                modifier = Modifier
-                    .align(Alignment.BottomCenter)
-                    .padding(12.dp),
-            )
-        } else if (autoNavigation.trackLineLockEnabled) {
-            TrackLineLockControls(
-                state = state,
-                onDecreaseGear = onDecreaseAutoGear,
-                onIncreaseGear = onIncreaseAutoGear,
-                onStop = onStopTrackLineLock,
-                modifier = Modifier
-                    .align(Alignment.BottomCenter)
-                    .padding(12.dp),
-            )
-        } else if (autoNavigation.executing) {
-            AutoNavigationControls(
-                state = state,
-                onDecreaseGear = onDecreaseAutoGear,
-                onIncreaseGear = onIncreaseAutoGear,
-                onStop = onStopAutoNavigation,
-                modifier = Modifier
-                    .align(Alignment.BottomCenter)
-                    .padding(12.dp),
-            )
-        } else if (selectedRoute != null && !showingPlayback) {
-            SelectedRouteControls(
-                route = selectedRoute,
-                message = autoNavigation.message,
-                onClose = onClearSelectedRoute,
-                onExecute = {
-                    playbackControlsVisible = false
-                    playbackPlaying = false
-                    pendingExecuteRoute = selectedRoute
-                },
-                onEdit = { onEditRoute(selectedRoute.id) },
-                modifier = Modifier
-                    .align(Alignment.BottomCenter)
-                    .padding(12.dp),
+                onOpenTracks = { trackDialogVisible = true },
+                onOpenRoutes = { routeDialogVisible = true },
             )
         }
 
@@ -491,7 +481,9 @@ fun NavigationScreen(
             StartAutoNavigationDialog(
                 route = route,
                 state = state,
+                navigationGpsSource = navigationGpsSource,
                 usePhoneHeading = usePhoneHeading,
+                phoneHeadingOffsetDegrees = phoneHeadingOffsetDegrees,
                 ybImuHeadingOffsetDegrees = ybImuHeadingOffsetDegrees,
                 ybImuHeadingMode = ybImuHeadingMode,
                 onDismiss = { pendingExecuteRoute = null },
@@ -540,52 +532,133 @@ fun NavigationScreen(
                     onSelectRoute(routeId)
                     routeDialogVisible = false
                 },
+                onExecuteRoute = { route ->
+                    playbackControlsVisible = false
+                    playbackPlaying = false
+                    pendingExecuteRoute = route
+                    routeDialogVisible = false
+                },
                 onEditRoute = { routeId ->
                     onEditRoute(routeId)
                     routeDialogVisible = false
                 },
                 onDeleteRoute = onDeleteRoute,
+                onRenameRoute = onRenameRoute,
             )
         }
     }
 }
 
 @Composable
-private fun GpsStatusChip(
-    text: String,
-    speedText: String? = null,
-    headingText: String? = null,
+private fun NavigationTopPanel(
+    gpsLocated: Boolean,
+    gpsText: String,
+    speedText: String?,
     modifier: Modifier = Modifier,
 ) {
-    Column(
+    Surface(
+        shape = RoundedCornerShape(8.dp),
+        color = MaterialTheme.colorScheme.surface.copy(alpha = 0.98f),
+        tonalElevation = 3.dp,
         modifier = modifier,
-        verticalArrangement = Arrangement.spacedBy(2.dp),
     ) {
-        Text(
-            text = text,
-            style = MaterialTheme.typography.titleSmall,
-            fontWeight = FontWeight.SemiBold,
-            maxLines = 1,
-            overflow = TextOverflow.Ellipsis,
-        )
-        if (speedText != null) {
+        Row(
+            modifier = Modifier.padding(horizontal = 8.dp, vertical = 6.dp),
+            horizontalArrangement = Arrangement.spacedBy(8.dp),
+            verticalAlignment = Alignment.CenterVertically,
+        ) {
+            val gpsColor = if (gpsLocated) {
+                MaterialTheme.colorScheme.primary
+            } else {
+                MaterialTheme.colorScheme.error
+            }
+            Icon(
+                imageVector = if (gpsLocated) Icons.Outlined.CheckCircle else Icons.Outlined.ErrorOutline,
+                contentDescription = gpsText,
+                tint = gpsColor,
+                modifier = Modifier.size(22.dp),
+            )
+            SpeedBadge(speedText = speedText)
+        }
+    }
+}
+
+@Composable
+private fun SpeedBadge(speedText: String?) {
+    Surface(
+        shape = CircleShape,
+        color = MaterialTheme.colorScheme.primaryContainer,
+        contentColor = MaterialTheme.colorScheme.onPrimaryContainer,
+        modifier = Modifier.size(40.dp),
+    ) {
+        Box(contentAlignment = Alignment.Center) {
             Text(
-                text = "当前速度 $speedText",
-                style = MaterialTheme.typography.titleMedium,
+                speedText.speedBadgeText(),
+                style = MaterialTheme.typography.labelLarge,
                 fontWeight = FontWeight.Bold,
                 maxLines = 1,
                 overflow = TextOverflow.Ellipsis,
             )
         }
-        if (headingText != null) {
-            Text(
-                text = "当前航向 $headingText",
-                style = MaterialTheme.typography.labelLarge,
-                fontWeight = FontWeight.SemiBold,
-                color = MaterialTheme.colorScheme.primary,
-                maxLines = 1,
-                overflow = TextOverflow.Ellipsis,
-            )
+    }
+}
+
+@Composable
+private fun NavigationActionBar(
+    syncing: Boolean,
+    stationKeepingEnabled: Boolean,
+    stationKeepingEnabledForClick: Boolean,
+    onSyncTrack: () -> Unit,
+    onToggleStationKeeping: () -> Unit,
+    onOpenTracks: () -> Unit,
+    onOpenRoutes: () -> Unit,
+    modifier: Modifier = Modifier,
+) {
+    Surface(
+        shape = RoundedCornerShape(8.dp),
+        color = MaterialTheme.colorScheme.surface.copy(alpha = 0.96f),
+        tonalElevation = 3.dp,
+        modifier = modifier.fillMaxWidth(),
+    ) {
+        Row(
+            modifier = Modifier.padding(horizontal = 8.dp, vertical = 6.dp),
+            horizontalArrangement = Arrangement.spacedBy(6.dp),
+            verticalAlignment = Alignment.CenterVertically,
+        ) {
+            TextButton(
+                onClick = onSyncTrack,
+                enabled = !syncing,
+                modifier = Modifier.weight(1f),
+                contentPadding = PaddingValues(horizontal = 2.dp, vertical = 6.dp),
+            ) {
+                Icon(Icons.Outlined.Refresh, contentDescription = null, modifier = Modifier.size(18.dp))
+                Spacer(Modifier.width(4.dp))
+                Text(if (syncing) "同步中" else "同步", maxLines = 1)
+            }
+            TextButton(
+                onClick = onToggleStationKeeping,
+                enabled = stationKeepingEnabledForClick,
+                modifier = Modifier.weight(1f),
+                contentPadding = PaddingValues(horizontal = 2.dp, vertical = 6.dp),
+            ) {
+                Icon(Icons.Outlined.CheckCircle, contentDescription = null, modifier = Modifier.size(18.dp))
+                Spacer(Modifier.width(4.dp))
+                Text(if (stationKeepingEnabled) "停点" else "定点", maxLines = 1)
+            }
+            TextButton(
+                onClick = onOpenTracks,
+                modifier = Modifier.weight(1f),
+                contentPadding = PaddingValues(horizontal = 2.dp, vertical = 6.dp),
+            ) {
+                Text("轨迹", maxLines = 1)
+            }
+            TextButton(
+                onClick = onOpenRoutes,
+                modifier = Modifier.weight(1f),
+                contentPadding = PaddingValues(horizontal = 2.dp, vertical = 6.dp),
+            ) {
+                Text("路线", maxLines = 1)
+            }
         }
     }
 }
@@ -857,7 +930,12 @@ private fun PlaybackInfoText(
 @Composable
 private fun RouteEditingControls(
     pointCount: Int,
+    selectedPointIndex: Int?,
+    movingPointIndex: Int?,
     message: String,
+    onMoveSelected: (Int, Int) -> Unit,
+    onStartMoving: (Int) -> Unit,
+    onDeleteSelected: (Int) -> Unit,
     onUndo: () -> Unit,
     onSave: () -> Unit,
     onCancel: () -> Unit,
@@ -869,23 +947,79 @@ private fun RouteEditingControls(
         tonalElevation = 3.dp,
         modifier = modifier.fillMaxWidth(),
     ) {
-        Row(
+        Column(
             modifier = Modifier.padding(horizontal = 10.dp, vertical = 8.dp),
-            horizontalArrangement = Arrangement.spacedBy(8.dp),
-            verticalAlignment = Alignment.CenterVertically,
+            verticalArrangement = Arrangement.spacedBy(8.dp),
         ) {
-            Column(modifier = Modifier.weight(1f)) {
-                Text("路线编辑 · $pointCount 点", style = MaterialTheme.typography.titleSmall, fontWeight = FontWeight.SemiBold)
-                Text(message, style = MaterialTheme.typography.bodySmall, color = MaterialTheme.colorScheme.onSurfaceVariant)
+            Row(
+                horizontalArrangement = Arrangement.spacedBy(8.dp),
+                verticalAlignment = Alignment.CenterVertically,
+            ) {
+                Column(modifier = Modifier.weight(1f)) {
+                    Text("路线编辑 · $pointCount 点", style = MaterialTheme.typography.titleSmall, fontWeight = FontWeight.SemiBold)
+                    Text(
+                        if (movingPointIndex != null) {
+                            "点击地图设置航点 ${movingPointIndex + 1} 的新位置"
+                        } else {
+                            message
+                        },
+                        style = MaterialTheme.typography.bodySmall,
+                        color = MaterialTheme.colorScheme.onSurfaceVariant,
+                        maxLines = 2,
+                        overflow = TextOverflow.Ellipsis,
+                    )
+                }
+                IconButton(onClick = onUndo, enabled = pointCount > 0) {
+                    Icon(Icons.Outlined.Close, contentDescription = "撤销最后航点")
+                }
+                TextButton(onClick = onCancel) {
+                    Text("取消")
+                }
+                OutlinedButton(onClick = onSave, enabled = pointCount >= 2) {
+                    Text("保存")
+                }
             }
-            IconButton(onClick = onUndo, enabled = pointCount > 0) {
-                Icon(Icons.Outlined.Close, contentDescription = "撤销最后航点")
-            }
-            TextButton(onClick = onCancel) {
-                Text("取消")
-            }
-            OutlinedButton(onClick = onSave, enabled = pointCount >= 2) {
-                Text("保存")
+            selectedPointIndex?.let { index ->
+                Row(
+                    modifier = Modifier
+                        .fillMaxWidth()
+                        .horizontalScroll(rememberScrollState()),
+                    horizontalArrangement = Arrangement.spacedBy(6.dp),
+                    verticalAlignment = Alignment.CenterVertically,
+                ) {
+                    Text(
+                        "航点 ${index + 1}",
+                        style = MaterialTheme.typography.labelLarge,
+                        fontWeight = FontWeight.SemiBold,
+                        color = MaterialTheme.colorScheme.primary,
+                    )
+                    TextButton(
+                        onClick = { onStartMoving(index) },
+                        contentPadding = PaddingValues(horizontal = 8.dp, vertical = 4.dp),
+                    ) {
+                        Text(if (movingPointIndex == index) "等待点击" else "移动")
+                    }
+                    TextButton(
+                        onClick = { onMoveSelected(index, -1) },
+                        enabled = index > 0,
+                        contentPadding = PaddingValues(horizontal = 8.dp, vertical = 4.dp),
+                    ) {
+                        Text("前移")
+                    }
+                    TextButton(
+                        onClick = { onMoveSelected(index, 1) },
+                        enabled = index < pointCount - 1,
+                        contentPadding = PaddingValues(horizontal = 8.dp, vertical = 4.dp),
+                    ) {
+                        Text("后移")
+                    }
+                    TextButton(
+                        onClick = { onDeleteSelected(index) },
+                        contentPadding = PaddingValues(horizontal = 8.dp, vertical = 4.dp),
+                    ) {
+                        Text("删除", color = MaterialTheme.colorScheme.error)
+                    }
+                }
             }
         }
     }
@@ -1133,25 +1267,68 @@ private fun StationKeepingControls(
 }
 
 @Composable
+private fun RequirementLine(label: String, value: String, ready: Boolean) {
+    val color = if (ready) {
+        MaterialTheme.colorScheme.onSurfaceVariant
+    } else {
+        MaterialTheme.colorScheme.error
+    }
+    Row(
+        modifier = Modifier.fillMaxWidth(),
+        horizontalArrangement = Arrangement.SpaceBetween,
+        verticalAlignment = Alignment.CenterVertically,
+    ) {
+        Text(
+            label,
+            style = MaterialTheme.typography.bodySmall,
+            color = color,
+        )
+        Text(
+            value,
+            style = MaterialTheme.typography.bodySmall,
+            fontWeight = if (ready) FontWeight.Normal else FontWeight.SemiBold,
+            color = color,
+        )
+    }
+}
+
+@Composable
 private fun StartAutoNavigationDialog(
     route: NavigationRoute,
     state: ControlUiState,
+    navigationGpsSource: NavigationGpsSource,
     usePhoneHeading: Boolean,
+    phoneHeadingOffsetDegrees: Float,
     ybImuHeadingOffsetDegrees: Float,
     ybImuHeadingMode: Int,
     onDismiss: () -> Unit,
     onConfirm: () -> Unit,
 ) {
-    val gpsReady = state.telemetry.statusFields["GPS_FIX"] == "1"
-    val satelliteCount = state.telemetry.statusFields["GPS_SAT"]?.toIntOrNull() ?: 0
-    val headingSourceText = if (usePhoneHeading) "手机" else "IMU"
-    val headingReady = state.navigationHeadingDegrees(usePhoneHeading, ybImuHeadingOffsetDegrees, ybImuHeadingMode) != null
-    val ready = state.connectionState == ConnectionState.Connected &&
-        state.armed &&
+    val gpsLocated = state.hasNavigationGpsLocation(navigationGpsSource)
+    val gpsReady = state.hasNavigationGpsFix(navigationGpsSource)
+    val satelliteCount = state.navigationGpsSatelliteCount(navigationGpsSource)
+    val gpsStateText = when {
+        gpsReady -> "已定位"
+        gpsLocated -> state.navigationGpsAccuracyText(navigationGpsSource) ?: "精度不足"
+        else -> "未定位"
+    }
+    val headingSourceText = if (usePhoneHeading) "手机校准船头" else "IMU"
+    val headingReady = state.navigationHeadingDegrees(
+        usePhoneHeading,
+        phoneHeadingOffsetDegrees,
+        ybImuHeadingOffsetDegrees,
+        ybImuHeadingMode,
+    ) != null
+    val connectionReady = state.connectionState == ConnectionState.Connected
+    val armedReady = state.armed
+    val satelliteReady = satelliteCount >= 4
+    val routeReady = route.points.size >= 2
+    val ready = connectionReady &&
+        armedReady &&
         gpsReady &&
-        satelliteCount >= 4 &&
+        satelliteReady &&
         headingReady &&
-        route.points.size >= 2
+        routeReady
     AlertDialog(
         onDismissRequest = onDismiss,
         title = { Text("启动自动驾驶") },
@@ -1159,12 +1336,15 @@ private fun StartAutoNavigationDialog(
             Column(verticalArrangement = Arrangement.spacedBy(8.dp)) {
                 Text("${route.name} · ${route.points.size} 点 · ${route.distanceText()}")
                 Text("启动后 App 会按路线持续计算左右推进，并每 100ms 发送控制心跳。")
-                Text("请确认：主控已连接并手动解锁，GPS 已定位，航向源有效，人员随时可接管。")
-                Text(
-                    "当前：连接=${connectionText(state.connectionState)}；解锁=${if (state.armed) "是" else "否"}；GPS=${if (gpsReady) "已定位" else "未定位"}；卫星=$satelliteCount；航向=$headingSourceText ${if (headingReady) "可用" else "不可用"}",
-                    color = MaterialTheme.colorScheme.onSurfaceVariant,
-                    style = MaterialTheme.typography.bodySmall,
-                )
+                Text("请确认：主控已连接并手动解锁，${navigationGpsSource.label()} 已定位，航向源有效，人员随时可接管。")
+                Column(verticalArrangement = Arrangement.spacedBy(4.dp)) {
+                    RequirementLine("连接", connectionText(state.connectionState), connectionReady)
+                    RequirementLine("解锁", if (armedReady) "是" else "否", armedReady)
+                    RequirementLine(navigationGpsSource.label(), gpsStateText, gpsReady)
+                    RequirementLine(if (navigationGpsSource == NavigationGpsSource.Phone) "定位等效" else "卫星", satelliteCount.toString(), satelliteReady)
+                    RequirementLine("航向", "$headingSourceText ${if (headingReady) "可用" else "不可用"}", headingReady)
+                    RequirementLine("路线", "${route.points.size} 点", routeReady)
+                }
             }
         },
         confirmButton = {
@@ -1190,8 +1370,10 @@ private fun SelectedRouteControls(
     onClose: () -> Unit,
     onExecute: () -> Unit,
     onEdit: () -> Unit,
+    onRename: (String) -> Unit,
     modifier: Modifier = Modifier,
 ) {
+    var renameDialogVisible by remember { mutableStateOf(false) }
     Surface(
         shape = RoundedCornerShape(8.dp),
         color = MaterialTheme.colorScheme.surface.copy(alpha = 0.96f),
@@ -1219,6 +1401,9 @@ private fun SelectedRouteControls(
             IconButton(onClick = onEdit) {
                 Icon(Icons.Outlined.Edit, contentDescription = "编辑路线")
             }
+            TextButton(onClick = { renameDialogVisible = true }) {
+                Text("改名")
+            }
             OutlinedButton(onClick = onExecute, enabled = route.points.size >= 2) {
                 Icon(Icons.Outlined.PlayArrow, contentDescription = null, modifier = Modifier.size(18.dp))
                 Spacer(Modifier.width(6.dp))
@@ -1226,6 +1411,52 @@ private fun SelectedRouteControls(
             }
         }
     }
+    if (renameDialogVisible) {
+        RenameRouteDialog(
+            route = route,
+            onDismiss = { renameDialogVisible = false },
+            onConfirm = { name ->
+                renameDialogVisible = false
+                onRename(name)
+            },
+        )
+    }
+}
+
+@Composable
+private fun RenameRouteDialog(
+    route: NavigationRoute,
+    onDismiss: () -> Unit,
+    onConfirm: (String) -> Unit,
+) {
+    var name by rememberSaveable(route.id) { mutableStateOf(route.name) }
+    val normalizedName = name.trim()
+    AlertDialog(
+        onDismissRequest = onDismiss,
+        title = { Text("路线改名") },
+        text = {
+            OutlinedTextField(
+                value = name,
+                onValueChange = { name = it },
+                singleLine = true,
+                label = { Text("路线名") },
+                modifier = Modifier.fillMaxWidth(),
+            )
+        },
+        confirmButton = {
+            TextButton(
+                onClick = { onConfirm(normalizedName) },
+                enabled = normalizedName.isNotBlank(),
+            ) {
+                Text("保存")
+            }
+        },
+        dismissButton = {
+            TextButton(onClick = onDismiss) {
+                Text("取消")
+            }
+        },
+    )
 }
 
 @Composable
@@ -1237,10 +1468,13 @@ private fun RouteLibraryDialog(
     onDismiss: () -> Unit,
     onAddRoute: () -> Unit,
     onSelectRoute: (String) -> Unit,
+    onExecuteRoute: (NavigationRoute) -> Unit,
     onEditRoute: (String) -> Unit,
     onDeleteRoute: (String) -> Unit,
+    onRenameRoute: (String, String) -> Unit,
 ) {
     var pendingDelete by remember { mutableStateOf<NavigationRoute?>(null) }
+    var pendingRename by remember { mutableStateOf<NavigationRoute?>(null) }
 
     AlertDialog(
         onDismissRequest = onDismiss,
@@ -1263,7 +1497,9 @@ private fun RouteLibraryDialog(
                                 selected = route.id == selectedRouteId,
                                 executing = route.id == executingRouteId,
                                 onSelect = { onSelectRoute(route.id) },
+                                onExecute = { onExecuteRoute(route) },
                                 onEdit = { onEditRoute(route.id) },
+                                onRename = { pendingRename = route },
                                 onDelete = { pendingDelete = route },
                             )
                         }
@@ -1284,6 +1520,17 @@ private fun RouteLibraryDialog(
             }
         },
     )
+
+    pendingRename?.let { route ->
+        RenameRouteDialog(
+            route = route,
+            onDismiss = { pendingRename = null },
+            onConfirm = { name ->
+                onRenameRoute(route.id, name)
+                pendingRename = null
+            },
+        )
+    }
 
     pendingDelete?.let { route ->
         AlertDialog(
@@ -1323,7 +1570,9 @@ private fun RouteListItem(
     selected: Boolean,
     executing: Boolean,
     onSelect: () -> Unit,
+    onExecute: () -> Unit,
     onEdit: () -> Unit,
+    onRename: () -> Unit,
     onDelete: () -> Unit,
 ) {
     Card(
@@ -1357,9 +1606,22 @@ private fun RouteListItem(
                     Text("执行中", style = MaterialTheme.typography.labelMedium, color = MaterialTheme.colorScheme.primary)
                 }
             }
-            Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
+            Row(
+                modifier = Modifier.horizontalScroll(rememberScrollState()),
+                horizontalArrangement = Arrangement.spacedBy(8.dp),
+                verticalAlignment = Alignment.CenterVertically,
+            ) {
                 OutlinedButton(onClick = onSelect) {
                     Text(if (selected) "已选择" else "选择")
+                }
+                TextButton(onClick = onRename) {
+                    Text("改名")
+                }
+                IconButton(
+                    onClick = onExecute,
+                    enabled = route.points.size >= 2 && !executing,
+                ) {
+                    Icon(Icons.Outlined.PlayArrow, contentDescription = "执行路线")
                 }
                 IconButton(onClick = onEdit) {
                     Icon(Icons.Outlined.Edit, contentDescription = "编辑路线")
@@ -1527,8 +1789,10 @@ private fun MapLibreTrackMap(
     playbackBearing: Double?,
     routePoints: List<LatLng>,
     routeEditing: Boolean,
+    selectedRoutePointIndex: Int?,
     routeTarget: LatLng?,
     onRoutePointAdd: (LatLng) -> Unit,
+    onRoutePointSelected: (Int) -> Unit,
     followTarget: LatLng?,
     cameraTarget: LatLng?,
     cameraTargetKey: String?,
@@ -1558,24 +1822,35 @@ private fun MapLibreTrackMap(
         }
     }
 
-    DisposableEffect(mapView, routeEditing, onRoutePointAdd) {
+    DisposableEffect(mapView, routeEditing, onRoutePointAdd, onRoutePointSelected) {
         var mapRef: MapLibreMap? = null
         val listener = MapLibreMap.OnMapClickListener { point ->
             onRoutePointAdd(point)
             true
         }
+        val markerListener = MapLibreMap.OnMarkerClickListener { marker ->
+            val routeMarkerIndex = annotations.routeMarkerIndex(marker)
+            if (routeEditing && routeMarkerIndex != null) {
+                onRoutePointSelected(routeMarkerIndex)
+                true
+            } else {
+                false
+            }
+        }
         if (routeEditing) {
             mapView.getMapAsync { map ->
                 mapRef = map
                 map.addOnMapClickListener(listener)
+                map.setOnMarkerClickListener(markerListener)
             }
         }
         onDispose {
             mapRef?.removeOnMapClickListener(listener)
+            mapRef?.setOnMarkerClickListener(null)
         }
     }
 
-    LaunchedEffect(liveLocation, liveHeadingDegrees, liveHeadingSourceText, trackPoints, playbackLocation, routePoints, routeTarget, pathColor, routeColor, styleUrl) {
+    LaunchedEffect(liveLocation, liveHeadingDegrees, liveHeadingSourceText, trackPoints, playbackLocation, routePoints, selectedRoutePointIndex, routeTarget, pathColor, routeColor, styleUrl) {
         mapView.getMapAsync { map ->
             renderTrackMap(
                 map = map,
@@ -1587,6 +1862,7 @@ private fun MapLibreTrackMap(
                 playbackLocation = playbackLocation,
                 playbackBearing = playbackBearing,
                 routePoints = routePoints,
+                selectedRoutePointIndex = selectedRoutePointIndex,
                 routeTarget = routeTarget,
                 pathColor = pathColor,
                 routeColor = routeColor,
@@ -1596,7 +1872,7 @@ private fun MapLibreTrackMap(
         }
     }
 
-    DisposableEffect(mapView, liveLocation, liveHeadingDegrees, liveHeadingSourceText, trackPoints, playbackLocation, routePoints, routeTarget, pathColor, routeColor, styleUrl) {
+    DisposableEffect(mapView, liveLocation, liveHeadingDegrees, liveHeadingSourceText, trackPoints, playbackLocation, routePoints, selectedRoutePointIndex, routeTarget, pathColor, routeColor, styleUrl) {
         var mapRef: MapLibreMap? = null
         val listener = MapLibreMap.OnCameraIdleListener {
             mapRef?.let { map ->
@@ -1610,6 +1886,7 @@ private fun MapLibreTrackMap(
                     playbackLocation = playbackLocation,
                     playbackBearing = playbackBearing,
                     routePoints = routePoints,
+                    selectedRoutePointIndex = selectedRoutePointIndex,
                     routeTarget = routeTarget,
                     pathColor = pathColor,
                     routeColor = routeColor,
@@ -1659,6 +1936,7 @@ private fun renderTrackMap(
     playbackLocation: LatLng?,
     playbackBearing: Double?,
     routePoints: List<LatLng>,
+    selectedRoutePointIndex: Int?,
     routeTarget: LatLng?,
     pathColor: Int,
     routeColor: Int,
@@ -1679,6 +1957,7 @@ private fun renderTrackMap(
                 playbackLocation = playbackLocation,
                 playbackBearing = playbackBearing,
                 routePoints = routePoints,
+                selectedRoutePointIndex = selectedRoutePointIndex,
                 routeTarget = routeTarget,
                 pathColor = pathColor,
                 routeColor = routeColor,
@@ -1697,6 +1976,7 @@ private fun renderTrackMap(
         playbackLocation = playbackLocation,
         playbackBearing = playbackBearing,
         routePoints = routePoints,
+        selectedRoutePointIndex = selectedRoutePointIndex,
         routeTarget = routeTarget,
         pathColor = pathColor,
         routeColor = routeColor,
@@ -1714,6 +1994,7 @@ private fun drawTrackAnnotations(
     playbackLocation: LatLng?,
     playbackBearing: Double?,
     routePoints: List<LatLng>,
+    selectedRoutePointIndex: Int?,
     routeTarget: LatLng?,
     pathColor: Int,
     routeColor: Int,
@@ -1844,17 +2125,30 @@ private fun drawTrackAnnotations(
         annotations.routePolyline?.let(map::removePolyline)
         annotations.routePolyline = null
     }
-    if (annotations.routeSignature != routeSignature) {
+    val routeMarkerSignature = "$routeSignature:selected=$selectedRoutePointIndex"
+    if (annotations.routeMarkerSignature != routeMarkerSignature) {
         clearRouteMarkers(map, annotations)
         routePoints.forEachIndexed { index, point ->
-            annotations.routeMarkers += map.addMarker(
+            val selected = index == selectedRoutePointIndex
+            val marker = map.addMarker(
                 MarkerOptions()
                     .position(point)
-                    .title("航点 ${index + 1}"),
+                    .title("航点 ${index + 1}")
+                    .icon(
+                        annotations.routePointIcon(
+                            context = context,
+                            index = index,
+                            selected = selected,
+                            color = routeColor,
+                        ),
+                    ),
             )
+            annotations.routeMarkers += marker
+            annotations.routeMarkerIndexes[marker] = index
         }
-        annotations.routeSignature = routeSignature
+        annotations.routeMarkerSignature = routeMarkerSignature
     }
+    annotations.routeSignature = routeSignature
 
     if (routeTarget != null) {
         val marker = annotations.routeTargetMarker
@@ -1884,8 +2178,10 @@ private class TrackMapAnnotations {
     var trackSignature: String? = null
     var directionArrowSignature: String? = null
     var routeSignature: String? = null
+    var routeMarkerSignature: String? = null
     val directionArrowMarkers: MutableList<Marker> = mutableListOf()
     val routeMarkers: MutableList<Marker> = mutableListOf()
+    val routeMarkerIndexes: MutableMap<Marker, Int> = mutableMapOf()
     private val iconCache: MutableMap<String, Icon> = mutableMapOf()
 
     fun iconForBearing(context: Context, bearingBucket: Int, sizePx: Int, color: Int): Icon {
@@ -1894,11 +2190,24 @@ private class TrackMapAnnotations {
             IconFactory.getInstance(context).fromBitmap(createArrowBitmap(sizePx, color, bearingBucket.toFloat()))
         }
     }
+
+    fun routeMarkerIndex(marker: Marker): Int? {
+        return routeMarkerIndexes[marker]
+    }
+
+    fun routePointIcon(context: Context, index: Int, selected: Boolean, color: Int): Icon {
+        val key = "route-point:$index:$selected:$color"
+        return iconCache.getOrPut(key) {
+            IconFactory.getInstance(context).fromBitmap(createRoutePointBitmap(index = index, selected = selected, color = color))
+        }
+    }
 }
 
 private fun clearRouteMarkers(map: MapLibreMap, annotations: TrackMapAnnotations) {
     annotations.routeMarkers.forEach(map::removeMarker)
     annotations.routeMarkers.clear()
+    annotations.routeMarkerIndexes.clear()
+    annotations.routeMarkerSignature = null
 }
 
 private fun updateTrackDirectionArrows(
@@ -1966,6 +2275,13 @@ private fun applyChineseMapLabels(style: Style) {
     }
 }
 
+private fun ControlUiState.liveLatLng(source: NavigationGpsSource): LatLng? {
+    return when (source) {
+        NavigationGpsSource.Esp32 -> telemetry.liveLatLng()
+        NavigationGpsSource.Phone -> phoneGps.liveLatLng()
+    }
+}
+
 private fun com.smartsup.controller.model.Telemetry.liveLatLng(): LatLng? {
     if (statusFields["GPS_FIX"] != "1") {
         return null
@@ -1975,11 +2291,43 @@ private fun com.smartsup.controller.model.Telemetry.liveLatLng(): LatLng? {
     return LatLng(lat, lon)
 }
 
+private fun PhoneGpsState.liveLatLng(): LatLng? {
+    val lat = latitude ?: return null
+    val lon = longitude ?: return null
+    return LatLng(lat, lon)
+}
+
+private fun ControlUiState.gpsFixText(source: NavigationGpsSource): String {
+    return when (source) {
+        NavigationGpsSource.Esp32 -> telemetry.gpsFixText()
+        NavigationGpsSource.Phone -> phoneGps.gpsFixText()
+    }
+}
+
 private fun com.smartsup.controller.model.Telemetry.gpsFixText(): String {
     return when (statusFields["GPS_FIX"]) {
         "1" -> "已定位"
         "0" -> "未定位"
         else -> "--"
+    }
+}
+
+private fun PhoneGpsState.gpsFixText(): String {
+    if (!hasLocation) {
+        return "未定位"
+    }
+    val accuracy = accuracyMeters
+    return if (accuracy != null) {
+        "已定位 · 精度 ${accuracy.roundToInt()}m"
+    } else {
+        "已定位"
+    }
+}
+
+private fun ControlUiState.gpsSpeedText(source: NavigationGpsSource): String? {
+    return when (source) {
+        NavigationGpsSource.Esp32 -> telemetry.gpsSpeedText()
+        NavigationGpsSource.Phone -> phoneGps.gpsSpeedText()
     }
 }
 
@@ -1993,24 +2341,91 @@ private fun com.smartsup.controller.model.Telemetry.gpsSpeedText(): String? {
     return String.format(Locale.US, "%.1f km/h", speedKmh.coerceAtLeast(0.0))
 }
 
+private fun PhoneGpsState.gpsSpeedText(): String? {
+    if (!hasLocation) {
+        return null
+    }
+    val speed = speedKmh ?: return "-- km/h"
+    return String.format(Locale.US, "%.1f km/h", speed.coerceAtLeast(0.0))
+}
+
+private fun String?.speedBadgeText(): String {
+    val raw = this ?: return "--"
+    val value = raw
+        .replace("km/h", "")
+        .trim()
+    return value.ifBlank { "--" }
+}
+
+private fun ControlUiState.hasNavigationGpsFix(source: NavigationGpsSource): Boolean {
+    return when (source) {
+        NavigationGpsSource.Esp32 -> telemetry.statusFields["GPS_FIX"] == "1"
+        NavigationGpsSource.Phone -> phoneGps.hasLocation &&
+            (phoneGps.accuracyMeters == null || phoneGps.accuracyMeters <= 25f)
+    }
+}
+
+private fun ControlUiState.hasNavigationGpsLocation(source: NavigationGpsSource): Boolean {
+    return when (source) {
+        NavigationGpsSource.Esp32 -> telemetry.statusFields["GPS_FIX"] == "1"
+        NavigationGpsSource.Phone -> phoneGps.hasLocation
+    }
+}
+
+private fun ControlUiState.navigationGpsSatelliteCount(source: NavigationGpsSource): Int {
+    return when (source) {
+        NavigationGpsSource.Esp32 -> telemetry.statusFields["GPS_SAT"]?.toIntOrNull() ?: 0
+        NavigationGpsSource.Phone -> if (hasNavigationGpsLocation(source)) 4 else 0
+    }
+}
+
+private fun ControlUiState.navigationGpsAccuracyText(source: NavigationGpsSource): String? {
+    return when (source) {
+        NavigationGpsSource.Esp32 -> null
+        NavigationGpsSource.Phone -> {
+            val accuracy = phoneGps.accuracyMeters
+            if (accuracy != null) {
+                "精度不足 ${accuracy.roundToInt()}m"
+            } else {
+                "精度不足"
+            }
+        }
+    }
+}
+
+private fun NavigationGpsSource.label(): String {
+    return when (this) {
+        NavigationGpsSource.Esp32 -> "ESP32 GPS"
+        NavigationGpsSource.Phone -> "手机 GPS"
+    }
+}
+
 private fun ControlUiState.navigationHeadingDegrees(
     usePhoneHeading: Boolean,
+    phoneHeadingOffsetDegrees: Float,
     ybImuHeadingOffsetDegrees: Float,
     ybImuHeadingMode: Int,
 ): Float? {
     return if (usePhoneHeading) {
-        phoneHeadingDegrees?.takeIf { phoneHeadingAvailable }
+        phoneHeadingDegrees
+            ?.takeIf { phoneHeadingAvailable }
+            ?.let { normalizeCompassDegrees(it) }
     } else {
         telemetry
             .takeIf { it.ybImuAvailable == true }
             ?.let {
                 ybImuHeadingDegrees(
                     telemetry = it,
-                    offsetDegrees = ybImuHeadingOffsetDegrees,
-                    modeId = ybImuHeadingMode,
+                    offsetDegrees = magneticDeclinationDegrees ?: 0f,
+                    modeId = YB_IMU_HEADING_MODE_YBY_INVERTED,
                 )
             }
     }
+}
+
+private fun normalizeCompassDegrees(degrees: Float): Float {
+    val normalized = degrees % 360f
+    return if (normalized < 0f) normalized + 360f else normalized
 }
 
 private fun connectionText(connectionState: ConnectionState): String {
@@ -2318,6 +2733,55 @@ private fun createArrowBitmap(sizePx: Int, color: Int, bearingDegrees: Float): B
         postRotate(bearingDegrees, center, center)
     }
     return Bitmap.createBitmap(base, 0, 0, sizePx, sizePx, matrix, true)
+}
+
+private fun createRoutePointBitmap(index: Int, selected: Boolean, color: Int): Bitmap {
+    val sizePx = if (selected) 76 else 66
+    val bitmap = Bitmap.createBitmap(sizePx, sizePx, Bitmap.Config.ARGB_8888)
+    val canvas = Canvas(bitmap)
+    val centerX = sizePx / 2f
+    val circleCenterY = sizePx * 0.40f
+    val radius = sizePx * 0.28f
+    val fillPaint = Paint(Paint.ANTI_ALIAS_FLAG).apply {
+        this.color = if (selected) color else Color.WHITE
+        style = Paint.Style.FILL
+    }
+    val strokePaint = Paint(Paint.ANTI_ALIAS_FLAG).apply {
+        this.color = if (selected) Color.WHITE else color
+        style = Paint.Style.STROKE
+        strokeWidth = if (selected) sizePx * 0.07f else sizePx * 0.06f
+    }
+    val pointerPaint = Paint(Paint.ANTI_ALIAS_FLAG).apply {
+        this.color = if (selected) color else Color.WHITE
+        style = Paint.Style.FILL
+    }
+    val pointerStrokePaint = Paint(Paint.ANTI_ALIAS_FLAG).apply {
+        this.color = if (selected) Color.WHITE else color
+        style = Paint.Style.STROKE
+        strokeWidth = strokePaint.strokeWidth
+        strokeJoin = Paint.Join.ROUND
+    }
+    val pointer = Path().apply {
+        moveTo(centerX - radius * 0.55f, circleCenterY + radius * 0.62f)
+        lineTo(centerX, sizePx * 0.92f)
+        lineTo(centerX + radius * 0.55f, circleCenterY + radius * 0.62f)
+        close()
+    }
+    canvas.drawPath(pointer, pointerPaint)
+    canvas.drawPath(pointer, pointerStrokePaint)
+    canvas.drawCircle(centerX, circleCenterY, radius, fillPaint)
+    canvas.drawCircle(centerX, circleCenterY, radius, strokePaint)
+
+    val numberPaint = Paint(Paint.ANTI_ALIAS_FLAG).apply {
+        this.color = if (selected) Color.WHITE else color
+        textAlign = Paint.Align.CENTER
+        textSize = sizePx * 0.30f
+        typeface = android.graphics.Typeface.DEFAULT_BOLD
+    }
+    val label = (index + 1).toString()
+    val textBaseline = circleCenterY - (numberPaint.descent() + numberPaint.ascent()) / 2f
+    canvas.drawText(label, centerX, textBaseline, numberPaint)
+    return bitmap
 }
 
 private fun com.smartsup.controller.model.AutoNavigationUiState.routePointsForMap(): List<LatLng> {

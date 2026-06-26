@@ -19,9 +19,11 @@ data class SettingsUiState(
     val rightEscReversed: Boolean = false,
     val rampLimitEnabled: Boolean = true,
     val headingLockToleranceDegrees: Int = 2,
-    val headingLockFullCorrectionDegrees: Int = 6,
+    val headingLockFullCorrectionDegrees: Int = 45,
     val headingLockNeutralPivotMinDifferencePercent: Int = 20,
     val headingLockNeutralPivotMaxDifferencePercent: Int = 60,
+    val phoneHeadingOffsetDegrees: Float = 0f,
+    val navigationGpsSource: NavigationGpsSource = NavigationGpsSource.Esp32,
     val autoNavigationGpsJumpResetMeters: Int = 5,
     val usePhoneHeading: Boolean = true,
     val ybImuHeadingMode: Int = YB_IMU_HEADING_MODE_DEFAULT,
@@ -41,4 +43,9 @@ data class SettingsUiState(
 enum class RealtimeTtsMode {
     Local,
     Cloud,
+}
+
+enum class NavigationGpsSource {
+    Esp32,
+    Phone,
 }

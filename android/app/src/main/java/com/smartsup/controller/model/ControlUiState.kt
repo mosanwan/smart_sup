@@ -12,9 +12,11 @@ data class ControlUiState(
     val telemetry: Telemetry = Telemetry(),
     val gpsTrack: GpsTrackUiState = GpsTrackUiState(),
     val autoNavigation: AutoNavigationUiState = AutoNavigationUiState(),
+    val phoneGps: PhoneGpsState = PhoneGpsState(),
     val phoneHeadingDegrees: Float? = null,
     val phoneHeadingAvailable: Boolean = false,
     val phoneHeadingSensorName: String = "",
+    val magneticDeclinationDegrees: Float? = null,
     val appHeadingLockTargetDegrees: Float? = null,
     val appHeadingLockErrorDegrees: Float? = null,
     val appHeadingLockCorrectionPercent: Int = 0,
@@ -66,4 +68,17 @@ enum class RealtimeVoiceMode {
     Off,
     PushToTalk,
     Live,
+}
+
+data class PhoneGpsState(
+    val latitude: Double? = null,
+    val longitude: Double? = null,
+    val speedKmh: Double? = null,
+    val accuracyMeters: Float? = null,
+    val provider: String = "",
+    val updatedAtMs: Long = 0L,
+    val message: String = "手机 GPS 未启用",
+) {
+    val hasLocation: Boolean
+        get() = latitude != null && longitude != null
 }

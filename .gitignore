@@ -1,4 +1,6 @@
 .pio/
+.env
+tmp_station_logs/
 firmware/esp32/src/factory_unit_id.h
 android/.gradle/
 android/local.properties

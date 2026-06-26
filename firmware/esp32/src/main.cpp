@@ -61,6 +61,7 @@ constexpr uint32_t ARM_HOLD_MS = 1500;
 constexpr uint32_t BT_COMMAND_TIMEOUT_MS = 1000;
 constexpr uint32_t BT_STATUS_INTERVAL_MS = 1000;
 constexpr uint32_t BT_YB_IMU_STATUS_INTERVAL_MS = 100;
+constexpr uint16_t I2C_TIMEOUT_MS = 50;
 constexpr uint32_t OTA_TIMEOUT_MS = 30000;
 constexpr uint32_t OTA_READ_COALESCE_MS = 20;
 constexpr uint32_t TURN_CONTROL_TIMEOUT_MS = 8000;
@@ -75,10 +76,10 @@ constexpr float TURN_DONE_DEGREES = 3.0f;
 constexpr float TURN_SLOWDOWN_DEGREES = 45.0f;
 constexpr int8_t HEADING_LOCK_MIN_CORRECTION_PERCENT = 3;
 constexpr int8_t HEADING_LOCK_MAX_CORRECTION_PERCENT = 70;
-constexpr int8_t VOICE_HEADING_LOCK_MAX_OUTPUT_PERCENT = 100;
-constexpr int8_t APP_HEADING_LOCK_MAX_OUTPUT_PERCENT = 100;
-constexpr uint16_t DEFAULT_HEADING_LOCK_TOLERANCE_DEGREES = 4;
-constexpr uint16_t DEFAULT_HEADING_LOCK_FULL_CORRECTION_DEGREES = 6;
+constexpr int8_t VOICE_HEADING_LOCK_MAX_OUTPUT_PERCENT = 70;
+constexpr int8_t APP_HEADING_LOCK_MAX_OUTPUT_PERCENT = 70;
+constexpr uint16_t DEFAULT_HEADING_LOCK_TOLERANCE_DEGREES = 2;
+constexpr uint16_t DEFAULT_HEADING_LOCK_FULL_CORRECTION_DEGREES = 45;
 constexpr uint8_t DEFAULT_HEADING_LOCK_NEUTRAL_REVERSE_PERCENT = 70;
 constexpr uint16_t MIN_HEADING_LOCK_TOLERANCE_DEGREES = 1;
 constexpr uint16_t MAX_HEADING_LOCK_TOLERANCE_DEGREES = 20;
@@ -86,6 +87,20 @@ constexpr uint16_t MIN_HEADING_LOCK_FULL_CORRECTION_DEGREES = 5;
 constexpr uint16_t MAX_HEADING_LOCK_FULL_CORRECTION_DEGREES = 180;
 constexpr uint8_t MIN_HEADING_LOCK_NEUTRAL_REVERSE_PERCENT = 0;
 constexpr uint8_t MAX_HEADING_LOCK_NEUTRAL_REVERSE_PERCENT = 100;
+constexpr float HEADING_LOCK_MAX_KP_PERCENT_PER_DEGREE = 3.0f;
+constexpr float HEADING_LOCK_KD_PERCENT_PER_DEGREE_S = 0.75f;
+constexpr float HEADING_LOCK_LOOKAHEAD_SECONDS = 0.6f;
+constexpr float HEADING_LOCK_BRAKE_WINDOW_DEGREES = 3.0f;
+constexpr float HEADING_LOCK_MIN_BRAKE_RATE_DEG_S = 8.0f;
+constexpr float HEADING_LOCK_FULL_BRAKE_RATE_DEG_S = 35.0f;
+constexpr int8_t HEADING_LOCK_MIN_BRAKE_PERCENT = 20;
+constexpr int8_t HEADING_LOCK_MAX_BRAKE_PERCENT = 35;
+constexpr uint16_t HEADING_LOCK_MIN_BRAKE_HOLD_MS = 250;
+constexpr uint16_t HEADING_LOCK_MAX_BRAKE_HOLD_MS = 800;
+constexpr float HEADING_LOCK_SETTLE_RATE_DEG_S = 3.0f;
+constexpr uint32_t HEADING_LOCK_DIVERGENCE_WINDOW_MS = 3000;
+constexpr float HEADING_LOCK_DIVERGENCE_DEGREES = 8.0f;
+constexpr uint32_t YB_IMU_HEADING_TIMEOUT_MS = 500;
 constexpr uint16_t MAX_VOICE_TURN_ANGLE_DEGREES = 90;
 constexpr int16_t MIN_HEADING_LOCK_TARGET_OFFSET_DEGREES = -90;
 constexpr int16_t MAX_HEADING_LOCK_TARGET_OFFSET_DEGREES = 90;
@@ -127,6 +142,12 @@ constexpr int32_t MAG_CAL_MIN_RANGE = 100;
 constexpr float MAG_CAL_MIN_SCALE = 0.2f;
 constexpr float MAG_CAL_MAX_SCALE = 5.0f;
 constexpr uint8_t IMU_FAILURE_LIMIT = 10;
+constexpr uint8_t YB_CALIBRATION_STATE_ACTIVE = 250;
+constexpr uint8_t YB_CALIBRATION_STATE_TIMEOUT = 254;
+constexpr uint32_t YB_CALIBRATION_STATUS_POLL_MS = 500;
+constexpr uint32_t YB_IMU_CALIBRATION_MAX_MS = 10000;
+constexpr uint32_t YB_MAG_CALIBRATION_MAX_MS = 60000;
+constexpr uint32_t YB_IMU_REDETECT_INTERVAL_MS = 1000;
 constexpr size_t BT_RX_BUFFER_SIZE = 192;
 constexpr size_t SERIAL_RX_BUFFER_SIZE = 96;
 constexpr size_t GPS_RX_BUFFER_SIZE = 128;
@@ -182,9 +203,12 @@ constexpr uint8_t YB_IMU_RAW_GYRO = 0x0A;
 constexpr uint8_t YB_IMU_RAW_MAG = 0x10;
 constexpr uint8_t YB_IMU_QUAT = 0x16;
 constexpr uint8_t YB_IMU_EULER = 0x26;
+constexpr uint8_t YB_IMU_CALIB_IMU = 0x70;
+constexpr uint8_t YB_IMU_CALIB_MAG = 0x71;
 constexpr float YB_IMU_ACCEL_SCALE_G = 16.0f / 32767.0f;
 constexpr float YB_IMU_GYRO_SCALE_RAD_S = (2000.0f / 32767.0f) * (3.1415926f / 180.0f);
 constexpr float YB_IMU_MAG_SCALE_UT = 800.0f / 32767.0f;
+constexpr float YB_IMU_HEADING_FORWARD_OFFSET_DEGREES = 180.0f;
 
 enum class CommandSource : uint8_t {
   App,
@@ -200,6 +224,12 @@ enum class CommandMode : uint8_t {
 enum class TurnDirection : uint8_t {
   Left,
   Right,
+};
+
+enum class HeadingLockPhase : uint8_t {
+  Correct,
+  Brake,
+  Settle,
 };
 
 struct __attribute__((packed)) TrackLogRecord {
@@ -264,6 +294,13 @@ bool phoneHeadingEnabled = false;
 uint8_t imuAddress = ICM20948_ADDR_LOW;
 uint8_t imuFailureCount = 0;
 uint8_t ybImuFailureCount = 0;
+bool ybCalibrationActive = false;
+uint8_t ybCalibrationTargetRegister = 0;
+uint8_t ybCalibrationLastState = 0;
+uint16_t ybCalibrationReadFailures = 0;
+uint32_t ybCalibrationStartedMs = 0;
+uint32_t ybCalibrationLastPollMs = 0;
+uint32_t ybCalibrationMaxMs = 0;
 float headingDegrees = 0.0f;
 float imuHeadingDegrees = 0.0f;
 float phoneHeadingDegrees = 0.0f;
@@ -306,6 +343,8 @@ uint32_t imuLastMagCorrectionMs = 0;
 uint32_t imuLastTurningMs = 0;
 const char* imuFusionQuality = "STALE";
 uint32_t lastYbImuReadMs = 0;
+uint32_t lastYbImuDetectAttemptMs = 0;
+uint32_t lastYbImuSampleMs = 0;
 float ybAccelXG = 0.0f;
 float ybAccelYG = 0.0f;
 float ybAccelZG = 0.0f;
@@ -322,6 +361,9 @@ float ybQuatZ = 0.0f;
 float ybRollDegrees = 0.0f;
 float ybPitchDegrees = 0.0f;
 float ybYawDegrees = 0.0f;
+bool ybHeadingInitialized = false;
+uint8_t ybImuCalibrationState = 255;
+uint8_t ybMagCalibrationState = 255;
 float lastTurnErrorDegrees = 0.0f;
 bool turnControlActive = false;
 bool turnControlCompleted = false;
@@ -337,6 +379,10 @@ bool headingLockOffsetRequestConsumed = false;
 uint16_t consumedHeadingLockOffsetRequestId = 0;
 float headingLockTargetDegrees = 0.0f;
 float lastHeadingLockErrorDegrees = 0.0f;
+float lastHeadingLockRateDegS = 0.0f;
+float lastHeadingLockPredictedErrorDegrees = 0.0f;
+float lastHeadingLockPdPercent = 0.0f;
+float lastHeadingLockBrakePercent = 0.0f;
 int8_t headingLockBasePercent = 0;
 int8_t lastHeadingLockCorrectionPercent = 0;
 uint16_t headingLockToleranceDegrees = DEFAULT_HEADING_LOCK_TOLERANCE_DEGREES;
@@ -345,6 +391,16 @@ uint8_t headingLockNeutralReversePercent = DEFAULT_HEADING_LOCK_NEUTRAL_REVERSE_
 CommandSource headingLockSource = CommandSource::App;
 bool headingLockLeftEscReversed = false;
 bool headingLockRightEscReversed = false;
+HeadingLockPhase headingLockPhase = HeadingLockPhase::Correct;
+uint32_t headingLockBrakeStartedMs = 0;
+uint16_t headingLockBrakeHoldTargetMs = 0;
+float headingLockBrakeStartRateSign = 0.0f;
+float previousHeadingLockHeadingDegrees = 0.0f;
+uint32_t previousHeadingLockRateMs = 0;
+bool previousHeadingLockRateValid = false;
+uint32_t headingLockDivergenceStartedMs = 0;
+float headingLockDivergenceStartAbsError = 0.0f;
+float headingLockDivergenceErrorSign = 0.0f;
 uint8_t activeVoicePowerLimitPercent = DEFAULT_VOICE_POWER_LIMIT_PERCENT;
 uint32_t gpsByteCount = 0;
 uint32_t gpsSentenceCount = 0;
@@ -523,6 +579,28 @@ const char* commandModeName(CommandMode mode) {
   }
 }
 
+const char* headingLockPhaseName(HeadingLockPhase phase) {
+  switch (phase) {
+    case HeadingLockPhase::Brake:
+      return "BRAKE";
+    case HeadingLockPhase::Settle:
+      return "SETTLE";
+    case HeadingLockPhase::Correct:
+    default:
+      return "CORRECT";
+  }
+}
+
+float signOrZero(float value) {
+  if (value > 0.0f) {
+    return 1.0f;
+  }
+  if (value < 0.0f) {
+    return -1.0f;
+  }
+  return 0.0f;
+}
+
 int8_t clampVoicePercent(int value, uint8_t voicePowerLimitPercent = activeVoicePowerLimitPercent) {
   const int limit = constrain(
     static_cast<int>(voicePowerLimitPercent),
@@ -596,17 +674,41 @@ float normalizeCompass360(float degrees) {
   return degrees;
 }
 
+float currentYbHeadingDegrees() {
+  return normalizeCompass360(ybYawDegrees + YB_IMU_HEADING_FORWARD_OFFSET_DEGREES);
+}
+
+float currentYbHeadingRateDegS() {
+  return ybGyroZRadS * RADIANS_TO_DEGREES;
+}
+
 bool hasFreshPhoneHeading(uint32_t now) {
   return phoneHeadingEnabled && lastPhoneHeadingMs != 0 && now - lastPhoneHeadingMs <= PHONE_HEADING_TIMEOUT_MS;
 }
 
+bool hasFreshYbHeading(uint32_t now) {
+  return ybImuAvailable &&
+    ybHeadingInitialized &&
+    lastYbImuSampleMs != 0 &&
+    now - lastYbImuSampleMs <= YB_IMU_HEADING_TIMEOUT_MS;
+}
+
+bool hasUsableFirmwareHeading(uint32_t now) {
+  return hasFreshYbHeading(now);
+}
+
 bool hasUsableHeading(uint32_t now) {
-  return hasFreshPhoneHeading(now) || (!phoneHeadingEnabled && imuAvailable && magnetometerAvailable);
+  return hasFreshPhoneHeading(now) ||
+    hasUsableFirmwareHeading(now) ||
+    (!phoneHeadingEnabled && imuAvailable && magnetometerAvailable);
 }
 
 const char* activeHeadingSourceName(uint32_t now) {
   if (hasFreshPhoneHeading(now)) {
     return "PHONE";
+  }
+  if (hasUsableFirmwareHeading(now)) {
+    return "YBIMU";
   }
   if (!phoneHeadingEnabled && magnetometerAvailable && imuHeadingFilterInitialized) {
     return "FUSION";
@@ -721,6 +823,13 @@ bool ybImuRead(uint8_t reg, uint8_t* buffer, size_t length) {
   return true;
 }
 
+bool ybImuWriteByte(uint8_t reg, uint8_t value) {
+  Wire.beginTransmission(YB_IMU_ADDR);
+  Wire.write(reg);
+  Wire.write(value);
+  return Wire.endTransmission() == 0;
+}
+
 int16_t ybInt16Le(const uint8_t* data) {
   return static_cast<int16_t>((static_cast<uint16_t>(data[1]) << 8) | data[0]);
 }
@@ -765,7 +874,7 @@ bool readYbImuSample() {
 
   const float accelNorm = sqrtf(ybAccelXG * ybAccelXG + ybAccelYG * ybAccelYG + ybAccelZG * ybAccelZG);
   const float quatNorm = sqrtf(ybQuatW * ybQuatW + ybQuatX * ybQuatX + ybQuatY * ybQuatY + ybQuatZ * ybQuatZ);
-  return
+  const bool valid =
     isfinite(accelNorm) &&
     accelNorm >= IMU_ACCEL_NORM_MIN_G &&
     accelNorm <= IMU_ACCEL_NORM_MAX_G &&
@@ -775,6 +884,82 @@ bool readYbImuSample() {
     isfinite(ybRollDegrees) &&
     isfinite(ybPitchDegrees) &&
     isfinite(ybYawDegrees);
+
+  if (valid) {
+    headingDegrees = currentYbHeadingDegrees();
+    headingFilterInitialized = true;
+    ybHeadingInitialized = true;
+    lastYbImuSampleMs = millis();
+  }
+  return valid;
+}
+
+void beginYbCalibration(uint8_t targetRegister) {
+  ybCalibrationActive = true;
+  ybCalibrationTargetRegister = targetRegister;
+  ybCalibrationLastState = 0;
+  ybCalibrationReadFailures = 0;
+  ybCalibrationStartedMs = millis();
+  ybCalibrationLastPollMs = 0;
+  ybCalibrationMaxMs = targetRegister == YB_IMU_CALIB_MAG
+    ? YB_MAG_CALIBRATION_MAX_MS
+    : YB_IMU_CALIBRATION_MAX_MS;
+  ybImuFailureCount = 0;
+
+  if (targetRegister == YB_IMU_CALIB_IMU) {
+    ybImuCalibrationState = YB_CALIBRATION_STATE_ACTIVE;
+  } else if (targetRegister == YB_IMU_CALIB_MAG) {
+    ybMagCalibrationState = YB_CALIBRATION_STATE_ACTIVE;
+  }
+}
+
+void finishYbCalibration(uint8_t finalState) {
+  if (ybCalibrationTargetRegister == YB_IMU_CALIB_IMU) {
+    ybImuCalibrationState = finalState;
+  } else if (ybCalibrationTargetRegister == YB_IMU_CALIB_MAG) {
+    ybMagCalibrationState = finalState;
+  }
+  ybCalibrationActive = false;
+  ybCalibrationTargetRegister = 0;
+  ybCalibrationLastState = finalState;
+  ybCalibrationStartedMs = 0;
+  ybCalibrationLastPollMs = 0;
+  ybCalibrationMaxMs = 0;
+  ybImuFailureCount = 0;
+}
+
+void updateYbCalibration(uint32_t now) {
+  if (!ybCalibrationActive) {
+    return;
+  }
+
+  if (now - ybCalibrationStartedMs >= ybCalibrationMaxMs) {
+    finishYbCalibration(YB_CALIBRATION_STATE_TIMEOUT);
+    Serial.println("Yahboom calibration timeout; telemetry restored");
+    SerialBT.println("YB_CAL;ERR=TIMEOUT");
+    return;
+  }
+
+  if (now - ybCalibrationLastPollMs < YB_CALIBRATION_STATUS_POLL_MS) {
+    return;
+  }
+  ybCalibrationLastPollMs = now;
+
+  uint8_t state = 0;
+  if (!ybImuRead(ybCalibrationTargetRegister, &state, 1)) {
+    if (ybCalibrationReadFailures < UINT16_MAX) {
+      ybCalibrationReadFailures += 1;
+    }
+    return;
+  }
+  ybCalibrationLastState = state;
+
+  if (state != 0) {
+    finishYbCalibration(state);
+    Serial.println("Yahboom calibration completed");
+    SerialBT.print("YB_CAL;DONE=");
+    SerialBT.println(state);
+  }
 }
 
 bool detectYbImu() {
@@ -1324,6 +1509,7 @@ bool calibrateGyroBias() {
 
 void setupImu() {
   Wire.begin(IMU_SDA_PIN, IMU_SCL_PIN);
+  Wire.setTimeOut(I2C_TIMEOUT_MS);
   Wire.setClock(IMU_I2C_CLOCK_HZ);
 
   if (detectYbImu()) {
@@ -2099,20 +2285,39 @@ void updateTrackLog(uint32_t now) {
 
 void updateImu(uint32_t now) {
   if (phoneHeadingEnabled) {
-    if (!hasFreshPhoneHeading(now) && (turnControlActive || headingLockActive)) {
+    if (!hasFreshPhoneHeading(now) && turnControlActive) {
       forceNeutralAndDisarm();
       Serial.println("Phone heading timeout; autonomous control disabled");
       SerialBT.println("STATUS;ARMED=0;FAULT=PHONE_HEADING_TIMEOUT");
     }
   }
+  if (!ybImuAvailable && now - lastYbImuDetectAttemptMs >= YB_IMU_REDETECT_INTERVAL_MS) {
+    lastYbImuDetectAttemptMs = now;
+    if (detectYbImu()) {
+      ybImuAvailable = true;
+      ybImuFailureCount = 0;
+      lastYbImuReadMs = now;
+      lastYbImuSampleMs = 0;
+      ybHeadingInitialized = false;
+      imuAvailable = false;
+      magnetometerAvailable = false;
+      imuFusionQuality = "YB_TELEMETRY_ONLY";
+      Serial.println("Yahboom IMU recovered; telemetry restored");
+      SerialBT.println("STATUS;YBIMU=1");
+    }
+  }
   if (ybImuAvailable && now - lastYbImuReadMs >= MAG_HEADING_INTERVAL_MS) {
     lastYbImuReadMs = now;
-    if (readYbImuSample()) {
+    if (ybCalibrationActive) {
+      updateYbCalibration(now);
+    } else if (readYbImuSample()) {
       ybImuFailureCount = 0;
     } else {
       ybImuFailureCount += 1;
       if (ybImuFailureCount >= IMU_FAILURE_LIMIT) {
         ybImuAvailable = false;
+        ybHeadingInitialized = false;
+        lastYbImuSampleMs = 0;
         Serial.println("Yahboom IMU read failed; telemetry disabled");
         SerialBT.println("STATUS;FAULT=YB_IMU_READ_FAILED");
       }
@@ -2193,9 +2398,28 @@ void cancelTurnControl() {
   lastCommandMode = CommandMode::Throttle;
 }
 
+void resetHeadingLockRuntimeState() {
+  lastHeadingLockErrorDegrees = 0.0f;
+  lastHeadingLockRateDegS = 0.0f;
+  lastHeadingLockPredictedErrorDegrees = 0.0f;
+  lastHeadingLockPdPercent = 0.0f;
+  lastHeadingLockBrakePercent = 0.0f;
+  lastHeadingLockCorrectionPercent = 0;
+  headingLockPhase = HeadingLockPhase::Correct;
+  headingLockBrakeStartedMs = 0;
+  headingLockBrakeHoldTargetMs = 0;
+  headingLockBrakeStartRateSign = 0.0f;
+  previousHeadingLockHeadingDegrees = ybHeadingInitialized ? currentYbHeadingDegrees() : headingDegrees;
+  previousHeadingLockRateMs = millis();
+  previousHeadingLockRateValid = false;
+  headingLockDivergenceStartedMs = 0;
+  headingLockDivergenceStartAbsError = 0.0f;
+  headingLockDivergenceErrorSign = 0.0f;
+}
+
 void cancelHeadingLockControl() {
   headingLockActive = false;
-  lastHeadingLockCorrectionPercent = 0;
+  resetHeadingLockRuntimeState();
   lastCommandMode = CommandMode::Throttle;
 }
 
@@ -2213,7 +2437,7 @@ void forceNeutralAndDisarm() {
   turnControlActive = false;
   turnControlCompleted = false;
   headingLockActive = false;
-  lastHeadingLockCorrectionPercent = 0;
+  resetHeadingLockRuntimeState();
   leftPulseUs = ESC_NEUTRAL_US;
   rightPulseUs = ESC_NEUTRAL_US;
   writeEsc(LEFT_ESC_CHANNEL, ESC_NEUTRAL_US);
@@ -2313,6 +2537,103 @@ bool applyMagCalibrationLine(char* line, Print& response) {
     return true;
   }
 
+  return true;
+}
+
+void printYbCalibrationStatus(Print& response) {
+  response.print("YB_CAL;YBCIMU=");
+  response.print(ybImuCalibrationState);
+  response.print(";YBCMAG=");
+  response.println(ybMagCalibrationState);
+}
+
+bool applyYbCalibrationLine(char* line, Print& response) {
+  if (strncmp(line, "YB_CAL", 6) != 0) {
+    return false;
+  }
+
+  bool sawAction = false;
+  bool startRequested = false;
+  bool clearRequested = false;
+  bool statusRequested = false;
+  bool sawTarget = false;
+  uint8_t targetRegister = 0;
+  bool badToken = false;
+
+  char* token = strtok(line, ";");
+  while (token != nullptr) {
+    if (strcmp(token, "YB_CAL") == 0) {
+      // Header marker.
+    } else if (strcmp(token, "ACTION=START") == 0) {
+      badToken = badToken || sawAction;
+      sawAction = true;
+      startRequested = true;
+    } else if (strcmp(token, "ACTION=CLEAR") == 0) {
+      badToken = badToken || sawAction;
+      sawAction = true;
+      clearRequested = true;
+    } else if (strcmp(token, "ACTION=STATUS") == 0) {
+      badToken = badToken || sawAction;
+      sawAction = true;
+      statusRequested = true;
+    } else if (strcmp(token, "TARGET=IMU") == 0) {
+      badToken = badToken || sawTarget;
+      sawTarget = true;
+      targetRegister = YB_IMU_CALIB_IMU;
+    } else if (strcmp(token, "TARGET=MAG") == 0) {
+      badToken = badToken || sawTarget;
+      sawTarget = true;
+      targetRegister = YB_IMU_CALIB_MAG;
+    } else if (strncmp(token, "ACTION=", 7) == 0 || strncmp(token, "TARGET=", 7) == 0) {
+      badToken = true;
+    }
+    token = strtok(nullptr, ";");
+  }
+
+  if (!sawAction || badToken || (!statusRequested && !sawTarget)) {
+    response.println("ERR;BAD_YB_CAL_COMMAND");
+    return true;
+  }
+
+  if (statusRequested) {
+    printYbCalibrationStatus(response);
+    return true;
+  }
+
+  forceNeutralAndDisarm();
+  lastValidBtCommandMs = 0;
+
+  if (!ybImuAvailable && !detectYbImu()) {
+    response.println("ERR;YB_IMU_UNAVAILABLE");
+    return true;
+  }
+  ybImuAvailable = true;
+
+  const uint8_t value = startRequested ? 1 : 0;
+  if (!ybImuWriteByte(targetRegister, value)) {
+    response.println("ERR;YB_CAL_WRITE_FAILED");
+    return true;
+  }
+
+  if (startRequested) {
+    beginYbCalibration(targetRegister);
+  } else if (clearRequested) {
+    if (targetRegister == YB_IMU_CALIB_IMU) {
+      ybImuCalibrationState = 0;
+    } else if (targetRegister == YB_IMU_CALIB_MAG) {
+      ybMagCalibrationState = 0;
+    }
+    if (ybCalibrationTargetRegister == targetRegister) {
+      finishYbCalibration(0);
+    }
+  }
+
+  response.println("STATUS;ARMED=0;L=0;R=0;HLOCK=OFF");
+  printYbCalibrationStatus(response);
+  Serial.print("Yahboom calibration command target=0x");
+  Serial.print(targetRegister, HEX);
+  Serial.print(" value=");
+  Serial.println(value);
   return true;
 }
 
@@ -3092,6 +3413,8 @@ void applyHeadingLockCommand(
   uint8_t neutralReversePercent,
   uint8_t voicePowerLimitPercent,
   uint16_t requestId,
+  bool hasTargetHeading,
+  float targetHeadingDegrees,
   bool hasTargetOffset,
   int16_t targetOffsetDegrees,
   bool leftEscReversed,
@@ -3111,9 +3434,9 @@ void applyHeadingLockCommand(
     return;
   }
 
-  if (!hasUsableHeading(now)) {
-    SerialBT.println("ERR;HEADING_UNAVAILABLE");
-    Serial.println("Heading lock rejected: heading unavailable");
+  if (!hasUsableFirmwareHeading(now)) {
+    SerialBT.println("ERR;YB_HEADING_UNAVAILABLE");
+    Serial.println("Heading lock rejected: Yahboom heading unavailable");
     return;
   }
 
@@ -3132,7 +3455,7 @@ void applyHeadingLockCommand(
   headingLockLeftEscReversed = leftEscReversed;
   headingLockRightEscReversed = rightEscReversed;
 
-  if (headingLockActive && requestId == activeHeadingLockRequestId) {
+  if (headingLockActive && requestId == activeHeadingLockRequestId && !hasTargetHeading && !hasTargetOffset) {
     return;
   }
 
@@ -3143,15 +3466,19 @@ void applyHeadingLockCommand(
   const bool shouldApplyTargetOffset = hasTargetOffset && !duplicateConsumedOffset;
 
   activeHeadingLockRequestId = requestId;
-  headingLockTargetDegrees = shouldApplyTargetOffset
-    ? normalizeAngle180(headingDegrees + static_cast<float>(targetOffsetDegrees))
-    : headingDegrees;
+  if (hasTargetHeading) {
+    headingLockTargetDegrees = normalizeCompass360(targetHeadingDegrees);
+  } else if (shouldApplyTargetOffset) {
+    const float offsetBase = headingLockActive ? headingLockTargetDegrees : currentYbHeadingDegrees();
+    headingLockTargetDegrees = normalizeCompass360(offsetBase + static_cast<float>(targetOffsetDegrees));
+  } else if (!headingLockActive) {
+    headingLockTargetDegrees = currentYbHeadingDegrees();
+  }
   if (shouldApplyTargetOffset) {
     headingLockOffsetRequestConsumed = true;
     consumedHeadingLockOffsetRequestId = requestId;
   }
-  lastHeadingLockErrorDegrees = 0.0f;
-  lastHeadingLockCorrectionPercent = 0;
+  resetHeadingLockRuntimeState();
   headingLockActive = true;
 
   Serial.print("Heading lock start hid=");
@@ -3163,6 +3490,8 @@ void applyHeadingLockCommand(
   if (shouldApplyTargetOffset) {
     Serial.print(" offset=");
     Serial.print(targetOffsetDegrees);
+  } else if (hasTargetHeading) {
+    Serial.print(" explicit_target=1");
   } else if (duplicateConsumedOffset) {
     Serial.print(" stale_offset_ignored=");
     Serial.print(targetOffsetDegrees);
@@ -3180,6 +3509,8 @@ void applyHeadingLockCommand(
   if (shouldApplyTargetOffset) {
     SerialBT.print(";HOFF=");
     SerialBT.print(targetOffsetDegrees);
+  } else if (hasTargetHeading) {
+    SerialBT.print(";TARGET_SRC=CMD");
   } else if (duplicateConsumedOffset) {
     SerialBT.print(";HOFF_IGNORED=");
     SerialBT.print(targetOffsetDegrees);
@@ -3205,49 +3536,176 @@ void updateHeadingLockControl(uint32_t now) {
     return;
   }
 
-  if (!hasUsableHeading(now)) {
+  if (!hasUsableFirmwareHeading(now)) {
     forceNeutralAndDisarm();
-    SerialBT.println("STATUS;ARMED=0;FAULT=HEADING_UNAVAILABLE");
+    SerialBT.println("STATUS;ARMED=0;FAULT=YB_HEADING_UNAVAILABLE");
     return;
   }
 
-  const float errorDegrees = shortestAngleError(headingLockTargetDegrees, headingDegrees);
+  const float currentHeadingDegrees = currentYbHeadingDegrees();
+  const float errorDegrees = shortestAngleError(headingLockTargetDegrees, currentHeadingDegrees);
   lastHeadingLockErrorDegrees = errorDegrees;
   const float absError = fabs(errorDegrees);
-
-  int8_t correction = 0;
+  const float errorSign = signOrZero(errorDegrees);
   const float toleranceDegrees = static_cast<float>(headingLockToleranceDegrees);
+
+  float headingRateDegS = currentYbHeadingRateDegS();
+  if (!isfinite(headingRateDegS)) {
+    headingRateDegS = 0.0f;
+  }
+  if (previousHeadingLockRateValid && previousHeadingLockRateMs != now) {
+    const float dtSeconds = static_cast<float>(now - previousHeadingLockRateMs) / 1000.0f;
+    if (dtSeconds > 0.0f && dtSeconds <= 0.2f) {
+      const float diffRateDegS = shortestAngleError(currentHeadingDegrees, previousHeadingLockHeadingDegrees) / dtSeconds;
+      if (isfinite(diffRateDegS) && fabs(headingRateDegS) < 0.5f) {
+        headingRateDegS = diffRateDegS;
+      }
+    }
+  }
+  previousHeadingLockHeadingDegrees = currentHeadingDegrees;
+  previousHeadingLockRateMs = now;
+  previousHeadingLockRateValid = true;
+  lastHeadingLockRateDegS = headingRateDegS;
+  const float absRate = fabs(headingRateDegS);
+
+  if (absError <= toleranceDegrees) {
+    headingLockDivergenceStartedMs = 0;
+    headingLockDivergenceStartAbsError = 0.0f;
+    headingLockDivergenceErrorSign = 0.0f;
+  } else if (
+    headingLockDivergenceStartedMs == 0 ||
+    headingLockDivergenceErrorSign != errorSign
+  ) {
+    headingLockDivergenceStartedMs = now;
+    headingLockDivergenceStartAbsError = absError;
+    headingLockDivergenceErrorSign = errorSign;
+  } else if (
+    now - headingLockDivergenceStartedMs >= HEADING_LOCK_DIVERGENCE_WINDOW_MS &&
+    absError >= headingLockDivergenceStartAbsError + HEADING_LOCK_DIVERGENCE_DEGREES
+  ) {
+    forceNeutralAndDisarm();
+    SerialBT.println("STATUS;ARMED=0;FAULT=HEADING_LOCK_DIVERGED");
+    Serial.println("Heading lock diverged; disarmed");
+    return;
+  }
+
   const float fullCorrectionDegrees = max(
     static_cast<float>(headingLockFullCorrectionDegrees),
     toleranceDegrees + 1.0f
   );
-  if (absError > toleranceDegrees) {
-    const float activeError = min(absError, fullCorrectionDegrees) - toleranceDegrees;
-    const float activeRange = fullCorrectionDegrees - toleranceDegrees;
-    const float ratio = activeRange > 0.0f ? activeError / activeRange : 1.0f;
-    const int correctionPercent = HEADING_LOCK_MIN_CORRECTION_PERCENT +
-      static_cast<int>(roundf((HEADING_LOCK_MAX_CORRECTION_PERCENT - HEADING_LOCK_MIN_CORRECTION_PERCENT) * ratio));
-    correction = static_cast<int8_t>(
-      constrain(correctionPercent, static_cast<int>(HEADING_LOCK_MIN_CORRECTION_PERCENT), static_cast<int>(HEADING_LOCK_MAX_CORRECTION_PERCENT))
-    );
-    if (errorDegrees < 0.0f) {
-      correction = -correction;
+  const float activeRange = fullCorrectionDegrees - toleranceDegrees;
+  const float kp = min(
+    HEADING_LOCK_MAX_KP_PERCENT_PER_DEGREE,
+    activeRange > 0.0f
+      ? static_cast<float>(HEADING_LOCK_MAX_CORRECTION_PERCENT) / activeRange
+      : HEADING_LOCK_MAX_KP_PERCENT_PER_DEGREE
+  );
+  const float pdPercent = kp * errorDegrees - HEADING_LOCK_KD_PERCENT_PER_DEGREE_S * headingRateDegS;
+  lastHeadingLockPdPercent = pdPercent;
+
+  const float predictedErrorDegrees = errorDegrees - headingRateDegS * HEADING_LOCK_LOOKAHEAD_SECONDS;
+  lastHeadingLockPredictedErrorDegrees = predictedErrorDegrees;
+  const float predictedSign = signOrZero(predictedErrorDegrees);
+  const float rateSign = signOrZero(headingRateDegS);
+  const bool movingTowardTarget = errorSign != 0.0f && errorSign == rateSign;
+  const bool willOvershoot = movingTowardTarget && predictedSign != 0.0f && predictedSign != errorSign;
+  const bool nearStopLine = fabs(predictedErrorDegrees) <= HEADING_LOCK_BRAKE_WINDOW_DEGREES;
+  const bool needBrake = movingTowardTarget &&
+    absRate >= HEADING_LOCK_MIN_BRAKE_RATE_DEG_S &&
+    (willOvershoot || nearStopLine);
+
+  const float brakeRateRange = HEADING_LOCK_FULL_BRAKE_RATE_DEG_S - HEADING_LOCK_MIN_BRAKE_RATE_DEG_S;
+  const float rateRatio = constrain(
+    brakeRateRange > 0.0f
+      ? (absRate - HEADING_LOCK_MIN_BRAKE_RATE_DEG_S) / brakeRateRange
+      : 1.0f,
+    0.0f,
+    1.0f
+  );
+  const float brakePercent = static_cast<float>(HEADING_LOCK_MIN_BRAKE_PERCENT) +
+    static_cast<float>(HEADING_LOCK_MAX_BRAKE_PERCENT - HEADING_LOCK_MIN_BRAKE_PERCENT) * rateRatio;
+  const uint16_t brakeHoldTargetMs = static_cast<uint16_t>(
+    roundf(static_cast<float>(HEADING_LOCK_MIN_BRAKE_HOLD_MS) +
+      static_cast<float>(HEADING_LOCK_MAX_BRAKE_HOLD_MS - HEADING_LOCK_MIN_BRAKE_HOLD_MS) * rateRatio)
+  );
+
+  if (needBrake && headingLockPhase != HeadingLockPhase::Brake) {
+    headingLockPhase = HeadingLockPhase::Brake;
+    headingLockBrakeStartedMs = now;
+    headingLockBrakeStartRateSign = rateSign;
+    headingLockBrakeHoldTargetMs = brakeHoldTargetMs;
+  }
+
+  bool brakeActive = headingLockPhase == HeadingLockPhase::Brake;
+  if (brakeActive) {
+    headingLockBrakeHoldTargetMs = brakeHoldTargetMs;
+    const uint32_t brakeElapsedMs = now - headingLockBrakeStartedMs;
+    const bool rateReversed = rateSign == 0.0f || rateSign != headingLockBrakeStartRateSign;
+    const bool settled = absRate <= HEADING_LOCK_SETTLE_RATE_DEG_S;
+    const bool expired = brakeElapsedMs >= headingLockBrakeHoldTargetMs ||
+      brakeElapsedMs >= HEADING_LOCK_MAX_BRAKE_HOLD_MS;
+    if (rateReversed || settled || expired) {
+      headingLockPhase = (absError <= toleranceDegrees || settled)
+        ? HeadingLockPhase::Settle
+        : HeadingLockPhase::Correct;
+      headingLockBrakeStartedMs = 0;
+      headingLockBrakeStartRateSign = 0.0f;
+      brakeActive = false;
     }
+  }
+
+  float correctionFloat = 0.0f;
+  lastHeadingLockBrakePercent = 0.0f;
+  if (brakeActive) {
+    correctionFloat = -headingLockBrakeStartRateSign * brakePercent;
+    lastHeadingLockBrakePercent = correctionFloat;
+  } else if (absError <= toleranceDegrees && absRate <= HEADING_LOCK_SETTLE_RATE_DEG_S) {
+    headingLockPhase = HeadingLockPhase::Settle;
+    correctionFloat = 0.0f;
+  } else {
+    headingLockPhase = HeadingLockPhase::Correct;
+    correctionFloat = pdPercent;
+  }
+
+  int8_t correction = 0;
+  if (isfinite(correctionFloat)) {
+    int correctionPercent = static_cast<int>(roundf(constrain(
+      correctionFloat,
+      -static_cast<float>(HEADING_LOCK_MAX_CORRECTION_PERCENT),
+      static_cast<float>(HEADING_LOCK_MAX_CORRECTION_PERCENT)
+    )));
+    if (
+      headingLockPhase == HeadingLockPhase::Correct &&
+      absError > toleranceDegrees &&
+      correctionPercent != 0 &&
+      abs(correctionPercent) < HEADING_LOCK_MIN_CORRECTION_PERCENT
+    ) {
+      correctionPercent = correctionPercent > 0
+        ? HEADING_LOCK_MIN_CORRECTION_PERCENT
+        : -HEADING_LOCK_MIN_CORRECTION_PERCENT;
+    }
+    correction = static_cast<int8_t>(constrain(
+      correctionPercent,
+      -static_cast<int>(HEADING_LOCK_MAX_CORRECTION_PERCENT),
+      static_cast<int>(HEADING_LOCK_MAX_CORRECTION_PERCENT)
+    ));
   }
   lastHeadingLockCorrectionPercent = correction;
 
   int rawLeft = headingLockBasePercent + correction;
   int rawRight = headingLockBasePercent - correction;
-  if (headingLockBasePercent > 0) {
+  if (headingLockBasePercent >= 70) {
     rawLeft = max(0, rawLeft);
     rawRight = max(0, rawRight);
-  } else if (headingLockBasePercent < 0) {
+  } else if (headingLockBasePercent <= -70) {
     rawLeft = min(0, rawLeft);
     rawRight = min(0, rawRight);
   } else {
-    const int neutralReverseLimit = static_cast<int>(headingLockNeutralReversePercent);
-    rawLeft = max(-neutralReverseLimit, rawLeft);
-    rawRight = max(-neutralReverseLimit, rawRight);
+    if (headingLockBasePercent == 0) {
+      const int neutralReverseLimit = static_cast<int>(headingLockNeutralReversePercent);
+      rawLeft = max(-neutralReverseLimit, rawLeft);
+      rawRight = max(-neutralReverseLimit, rawRight);
+    }
   }
 
   int8_t nextLeft = static_cast<int8_t>(constrain(rawLeft, -100, 100));
@@ -3404,6 +3862,9 @@ void applyBluetoothLine(char* line) {
   if (applyMagCalibrationLine(line, SerialBT)) {
     return;
   }
+  if (applyYbCalibrationLine(line, SerialBT)) {
+    return;
+  }
   if (applyTrackLogLine(line, SerialBT)) {
     return;
   }
@@ -3421,6 +3882,7 @@ void applyBluetoothLine(char* line) {
   bool sawHeadingLockTolerance = false;
   bool sawHeadingLockFullCorrection = false;
   bool sawHeadingLockNeutralReverse = false;
+  bool sawHeadingLockTarget = false;
   bool sawHeadingLockTargetOffset = false;
   bool sawVoicePowerLimit = false;
   bool sawHeadingSource = false;
@@ -3445,6 +3907,7 @@ void applyBluetoothLine(char* line) {
   uint16_t nextHeadingLockToleranceDegrees = DEFAULT_HEADING_LOCK_TOLERANCE_DEGREES;
   uint16_t nextHeadingLockFullCorrectionDegrees = DEFAULT_HEADING_LOCK_FULL_CORRECTION_DEGREES;
   uint16_t nextHeadingLockNeutralReversePercent = DEFAULT_HEADING_LOCK_NEUTRAL_REVERSE_PERCENT;
+  float nextHeadingLockTargetDegrees = 0.0f;
   int16_t nextHeadingLockTargetOffsetDegrees = 0;
   float nextPhoneHeadingDegrees = 0.0f;
   bool nextHeadingLockEnabled = false;
@@ -3517,6 +3980,11 @@ void applyBluetoothLine(char* line) {
       badHeadingLockToken = badHeadingLockToken || sawHeadingLockNeutralReverse;
       sawHeadingLockNeutralReverse = true;
     } else if (
+      parseHeadingDegreesToken(token, "TARGET=", nextHeadingLockTargetDegrees)
+    ) {
+      badHeadingLockToken = badHeadingLockToken || sawHeadingLockTarget;
+      sawHeadingLockTarget = true;
+    } else if (
       parseSignedToken(
         token,
         "HOFF=",
@@ -3567,6 +4035,7 @@ void applyBluetoothLine(char* line) {
       strncmp(token, "HTOL=", 5) == 0 ||
       strncmp(token, "HFULL=", 6) == 0 ||
       strncmp(token, "HREV=", 5) == 0 ||
+      strncmp(token, "TARGET=", 7) == 0 ||
       strncmp(token, "HOFF=", 5) == 0
     ) {
       badHeadingLockToken = true;
@@ -3605,13 +4074,6 @@ void applyBluetoothLine(char* line) {
   if (badHeadingSourceToken) {
     SerialBT.println("ERR;BAD_HEADING_SOURCE");
     Serial.println("Bluetooth command rejected: bad heading source");
-    return;
-  }
-
-  if (nextMode != CommandMode::Throttle) {
-    forceNeutralAndDisarm();
-    SerialBT.println("ERR;APP_HEADING_CONTROL_ONLY");
-    Serial.println("Autonomous heading command rejected: heading control runs in Android App");
     return;
   }
 
@@ -3682,6 +4144,11 @@ void applyBluetoothLine(char* line) {
       Serial.println("Heading lock rejected: missing HID");
       return;
     }
+    if (sawHeadingLockTarget && sawHeadingLockTargetOffset) {
+      SerialBT.println("ERR;BAD_HEADING_LOCK_COMMAND");
+      Serial.println("Heading lock rejected: TARGET and HOFF conflict");
+      return;
+    }
     if (nextHeadingLockFullCorrectionDegrees <= nextHeadingLockToleranceDegrees) {
       SerialBT.println("ERR;BAD_HEADING_LOCK_COMMAND");
       Serial.println("Heading lock rejected: full correction angle must exceed tolerance");
@@ -3695,6 +4162,8 @@ void applyBluetoothLine(char* line) {
       static_cast<uint8_t>(nextHeadingLockNeutralReversePercent),
       static_cast<uint8_t>(nextVoicePowerLimitPercent),
       nextHeadingLockRequestId,
+      sawHeadingLockTarget,
+      nextHeadingLockTargetDegrees,
       sawHeadingLockTargetOffset,
       nextHeadingLockTargetOffsetDegrees,
       nextLeftEscReversed,
@@ -3744,6 +4213,9 @@ void applySerialLine(char* line) {
     return;
   }
   if (applyMagCalibrationLine(line, Serial)) {
+    return;
+  }
+  if (applyYbCalibrationLine(line, Serial)) {
     return;
   }
   if (applyTrackLogLine(line, Serial)) {
@@ -3882,6 +4354,28 @@ void publishBluetoothStatus(uint32_t now) {
     SerialBT.print(ybAccelZG, 3);
     SerialBT.print(";YBGZ=");
     SerialBT.print(ybGyroZRadS, 3);
+    SerialBT.print(";YBMX=");
+    SerialBT.print(ybMagXUt, 2);
+    SerialBT.print(";YBMY=");
+    SerialBT.print(ybMagYUt, 2);
+    SerialBT.print(";YBMZ=");
+    SerialBT.print(ybMagZUt, 2);
+    SerialBT.print(";YBCIMU=");
+    SerialBT.print(ybImuCalibrationState);
+    SerialBT.print(";YBCMAG=");
+    SerialBT.print(ybMagCalibrationState);
+    SerialBT.print(";YBCACT=");
+    if (ybCalibrationActive && ybCalibrationTargetRegister == YB_IMU_CALIB_IMU) {
+      SerialBT.print("IMU");
+    } else if (ybCalibrationActive && ybCalibrationTargetRegister == YB_IMU_CALIB_MAG) {
+      SerialBT.print("MAG");
+    } else {
+      SerialBT.print("NONE");
+    }
+    SerialBT.print(";YBCRAW=");
+    SerialBT.print(ybCalibrationLastState);
+    SerialBT.print(";YBCFAIL=");
+    SerialBT.print(ybCalibrationReadFailures);
     SerialBT.print(";YBQW=");
     SerialBT.print(ybQuatW, 4);
     SerialBT.print(";YBQX=");
@@ -3990,6 +4484,23 @@ void publishBluetoothStatus(uint32_t now) {
     SerialBT.print(headingLockTargetDegrees, 1);
     SerialBT.print(";HERR=");
     SerialBT.print(lastHeadingLockErrorDegrees, 1);
+    SerialBT.print(";HPHASE=");
+    SerialBT.print(headingLockPhaseName(headingLockPhase));
+    SerialBT.print(";HRATE=");
+    SerialBT.print(lastHeadingLockRateDegS, 1);
+    SerialBT.print(";HPRED=");
+    SerialBT.print(lastHeadingLockPredictedErrorDegrees, 1);
+    SerialBT.print(";HPD=");
+    SerialBT.print(lastHeadingLockPdPercent, 1);
+    SerialBT.print(";HBRK=");
+    SerialBT.print(lastHeadingLockBrakePercent, 1);
+    SerialBT.print(";BMS=");
+    if (headingLockPhase == HeadingLockPhase::Brake && headingLockBrakeStartedMs != 0) {
+      const uint32_t elapsedMs = millis() - headingLockBrakeStartedMs;
+      SerialBT.print(elapsedMs >= headingLockBrakeHoldTargetMs ? 0 : headingLockBrakeHoldTargetMs - elapsedMs);
+    } else {
+      SerialBT.print(0);
+    }
     SerialBT.print(";HCORR=");
     SerialBT.print(lastHeadingLockCorrectionPercent);
     SerialBT.print(";HTOL=");
