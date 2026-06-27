@@ -5103,6 +5103,7 @@ class ControlViewModel(application: Application) : AndroidViewModel(application)
             headingLockNeutralPivotMaxDifferencePercent = settings.headingLockNeutralPivotMaxDifferencePercent,
             voicePowerLimitPercent = settings.voicePowerLimitPercent,
         )
+        activeHeadingLockStartPending = true
         return true
     }
 
