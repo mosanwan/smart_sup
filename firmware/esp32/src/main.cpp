@@ -121,6 +121,7 @@ constexpr float HEADING_LOCK_DIVERGENCE_MIN_AWAY_RATE_DEG_S = 3.0f;
 // decreasing right thrust, so the internal correction sign is inverted here.
 constexpr int8_t HEADING_LOCK_STEER_SIGN = -1;
 constexpr uint32_t YB_IMU_HEADING_TIMEOUT_MS = 500;
+constexpr uint32_t PHONE_HEADING_TIMEOUT_MS = 1500;
 constexpr uint16_t MAX_VOICE_TURN_ANGLE_DEGREES = 180;
 constexpr float ICM20948_GYRO_250DPS_LSB_PER_DPS = 131.0f;
 constexpr float IMU_YAW_SIGN = 1.0f;
@@ -237,6 +238,11 @@ enum class CommandMode : uint8_t {
   TurnAngle,
   HeadingLock,
   KeepAlive,
+};
+
+enum class HeadingSource : uint8_t {
+  YbImu,
+  Phone,
 };
 
 enum class TurnDirection : uint8_t {
@@ -365,6 +371,10 @@ const char* imuFusionQuality = "STALE";
 uint32_t lastYbImuReadMs = 0;
 uint32_t lastYbImuDetectAttemptMs = 0;
 uint32_t lastYbImuSampleMs = 0;
+uint32_t lastPhoneHeadingSampleMs = 0;
+float phoneHeadingDegrees = 0.0f;
+bool phoneHeadingInitialized = false;
+HeadingSource requestedHeadingSource = HeadingSource::YbImu;
 float ybAccelXG = 0.0f;
 float ybAccelYG = 0.0f;
 float ybAccelZG = 0.0f;
@@ -414,6 +424,7 @@ uint16_t headingLockToleranceDegrees = DEFAULT_HEADING_LOCK_TOLERANCE_DEGREES;
 uint16_t headingLockFullCorrectionDegrees = DEFAULT_HEADING_LOCK_FULL_CORRECTION_DEGREES;
 uint8_t headingLockNeutralReversePercent = DEFAULT_HEADING_LOCK_NEUTRAL_REVERSE_PERCENT;
 CommandSource headingLockSource = CommandSource::App;
+HeadingSource headingLockHeadingSource = HeadingSource::YbImu;
 HeadingLockPhase headingLockPhase = HeadingLockPhase::Correct;
 uint32_t headingLockBrakeStartedMs = 0;
 uint16_t headingLockBrakeHoldTargetMs = 0;
@@ -628,6 +639,10 @@ const char* commandModeName(CommandMode mode) {
   }
 }
 
+const char* headingSourceName(HeadingSource source) {
+  return source == HeadingSource::Phone ? "PHONE" : "YBIMU";
+}
+
 const char* headingLockPhaseName(HeadingLockPhase phase) {
   switch (phase) {
     case HeadingLockPhase::Brake:
@@ -748,15 +763,85 @@ bool hasFreshYbHeading(uint32_t now) {
     ybHeadingAgeMs(now) <= YB_IMU_HEADING_TIMEOUT_MS;
 }
 
-bool hasUsableFirmwareHeading(uint32_t now) {
-  return hasFreshYbHeading(now);
+uint32_t phoneHeadingAgeMs(uint32_t now) {
+  if (lastPhoneHeadingSampleMs == 0) {
+    return 999999UL;
+  }
+  if (lastPhoneHeadingSampleMs > now) {
+    return 0;
+  }
+  return now - lastPhoneHeadingSampleMs;
+}
+
+bool hasFreshPhoneHeading(uint32_t now) {
+  return phoneHeadingInitialized &&
+    lastPhoneHeadingSampleMs != 0 &&
+    phoneHeadingAgeMs(now) <= PHONE_HEADING_TIMEOUT_MS;
+}
+
+bool hasUsableHeadingSource(HeadingSource source, uint32_t now) {
+  switch (source) {
+    case HeadingSource::Phone:
+      return hasFreshPhoneHeading(now);
+    case HeadingSource::YbImu:
+    default:
+      return hasFreshYbHeading(now);
+  }
+}
+
+float currentPhoneHeadingDegrees() {
+  return normalizeCompass360(phoneHeadingDegrees);
+}
+
+float currentHeadingDegrees(HeadingSource source) {
+  return source == HeadingSource::Phone
+    ? currentPhoneHeadingDegrees()
+    : currentYbHeadingDegrees();
+}
+
+float currentHeadingRateDegS(HeadingSource source) {
+  return source == HeadingSource::Phone
+    ? 0.0f
+    : currentYbHeadingRateDegS();
 }
 
 const char* activeHeadingSourceName(uint32_t now) {
-  if (hasUsableFirmwareHeading(now)) {
-    return "YBIMU";
+  const HeadingSource source = headingLockActive || turnControlActive
+    ? headingLockHeadingSource
+    : requestedHeadingSource;
+  return hasUsableHeadingSource(source, now) ? headingSourceName(source) : "NONE";
+}
+
+void updatePhoneHeadingSample(float headingDegrees, uint32_t now) {
+  phoneHeadingDegrees = normalizeCompass360(headingDegrees);
+  phoneHeadingInitialized = true;
+  lastPhoneHeadingSampleMs = now;
+}
+
+void printHeadingSourceUnavailable(HeadingSource source, uint32_t now) {
+  SerialBT.print("ERR;");
+  SerialBT.print(source == HeadingSource::Phone ? "PHONE_HEADING_UNAVAILABLE" : "YB_HEADING_UNAVAILABLE");
+  SerialBT.print(";HSRC=");
+  SerialBT.print(activeHeadingSourceName(now));
+  SerialBT.print(";H_SRC=");
+  SerialBT.print(headingSourceName(source));
+  SerialBT.print(";YBIMU=");
+  SerialBT.print(ybImuAvailable ? 1 : 0);
+  SerialBT.print(";YBINIT=");
+  SerialBT.print(ybHeadingInitialized ? 1 : 0);
+  SerialBT.print(";YBAGE=");
+  SerialBT.print(ybHeadingAgeMs(now));
+  if (ybHeadingInitialized) {
+    SerialBT.print(";YBHDG=");
+    SerialBT.print(currentYbHeadingDegrees(), 1);
   }
-  return "NONE";
+  SerialBT.print(";PHDG_AGE=");
+  SerialBT.print(phoneHeadingAgeMs(now));
+  if (phoneHeadingInitialized) {
+    SerialBT.print(";PHDG=");
+    SerialBT.print(currentPhoneHeadingDegrees(), 1);
+  }
+  SerialBT.println();
 }
 
 bool imuWrite(uint8_t reg, uint8_t value) {
@@ -2455,7 +2540,9 @@ void resetHeadingLockRuntimeState() {
   headingLockBrakeStartedMs = 0;
   headingLockBrakeHoldTargetMs = 0;
   headingLockBrakeStartRateSign = 0.0f;
-  previousHeadingLockHeadingDegrees = ybHeadingInitialized ? currentYbHeadingDegrees() : headingDegrees;
+  previousHeadingLockHeadingDegrees = hasUsableHeadingSource(headingLockHeadingSource, millis())
+    ? currentHeadingDegrees(headingLockHeadingSource)
+    : headingDegrees;
   previousHeadingLockRateMs = millis();
   previousHeadingLockRateValid = false;
   previousHeadingLockRateDegS = 0.0f;
@@ -2837,8 +2924,17 @@ bool parseTurnDirectionToken(const char* token, TurnDirection& outDirection) {
   return false;
 }
 
-bool parseHeadingSourceToken(const char* token) {
+bool parseHeadingSourceToken(const char* token, HeadingSource& outSource) {
   if (strcmp(token, "H_SRC=IMU") == 0) {
+    outSource = HeadingSource::YbImu;
+    return true;
+  }
+  if (strcmp(token, "H_SRC=YBIMU") == 0) {
+    outSource = HeadingSource::YbImu;
+    return true;
+  }
+  if (strcmp(token, "H_SRC=PHONE") == 0) {
+    outSource = HeadingSource::Phone;
     return true;
   }
   return false;
@@ -3377,11 +3473,12 @@ void applyTurnAngleCommand(
   TurnDirection direction,
   uint16_t angleDegrees,
   uint16_t requestId,
-  uint8_t voicePowerLimitPercent
+  uint8_t voicePowerLimitPercent,
+  HeadingSource headingSource
 ) {
   const uint32_t now = millis();
-  if (!hasUsableFirmwareHeading(now)) {
-    SerialBT.println("ERR;HEADING_UNAVAILABLE");
+  if (!hasUsableHeadingSource(headingSource, now)) {
+    printHeadingSourceUnavailable(headingSource, now);
     Serial.println("Turn angle rejected: heading unavailable");
     return;
   }
@@ -3389,6 +3486,7 @@ void applyTurnAngleCommand(
   lastValidBtCommandMs = now;
   lastCommandSource = CommandSource::Voice;
   lastCommandMode = CommandMode::TurnAngle;
+  requestedHeadingSource = headingSource;
 
   if (turnControlActive && requestId == activeTurnRequestId) {
     return;
@@ -3412,6 +3510,7 @@ void applyTurnAngleCommand(
       static_cast<int>(MIN_VOICE_POWER_LIMIT_PERCENT),
       static_cast<int>(MAX_VOICE_POWER_LIMIT_PERCENT)
     );
+    headingLockHeadingSource = headingSource;
     resetHeadingLockRuntimeState();
     Serial.print("Turn angle applied to heading lock tid=");
     Serial.print(requestId);
@@ -3422,11 +3521,15 @@ void applyTurnAngleCommand(
     SerialBT.print(";HLOCK=ACTIVE;HID=");
     SerialBT.print(activeHeadingLockRequestId);
     SerialBT.print(";TARGET=");
-    SerialBT.println(headingLockTargetDegrees, 1);
+    SerialBT.print(headingLockTargetDegrees, 1);
+    SerialBT.print(";HSRC=");
+    SerialBT.println(headingSourceName(headingLockHeadingSource));
     return;
   }
 
-  turnTargetHeadingDegrees = normalizeCompass360(currentYbHeadingDegrees() + signedAngle);
+  headingLockHeadingSource = headingSource;
+  const float currentHeading = currentHeadingDegrees(headingLockHeadingSource);
+  turnTargetHeadingDegrees = normalizeCompass360(currentHeading + signedAngle);
   turnStartedMs = now;
   activeTurnRequestId = requestId;
   turnControlActive = true;
@@ -3457,13 +3560,15 @@ void applyTurnAngleCommand(
   Serial.print(" angle=");
   Serial.print(angleDegrees);
   Serial.print(" current=");
-  Serial.print(currentYbHeadingDegrees(), 1);
+  Serial.print(currentHeading, 1);
   Serial.print(" target=");
   Serial.println(turnTargetHeadingDegrees, 1);
   SerialBT.print("STATUS;TURN=START;TID=");
   SerialBT.print(requestId);
   SerialBT.print(";TARGET=");
-  SerialBT.println(turnTargetHeadingDegrees, 1);
+  SerialBT.print(turnTargetHeadingDegrees, 1);
+  SerialBT.print(";HSRC=");
+  SerialBT.println(headingSourceName(headingLockHeadingSource));
 }
 
 void applyHeadingLockCommand(
@@ -3476,11 +3581,13 @@ void applyHeadingLockCommand(
   uint16_t requestId,
   bool hasTargetHeading,
   float targetHeadingDegrees,
-  CommandSource source
+  CommandSource source,
+  HeadingSource headingSource
 ) {
   const uint32_t now = millis();
   lastValidBtCommandMs = now;
   lastCommandSource = source;
+  requestedHeadingSource = headingSource;
 
   if (!enabled) {
     cancelHeadingLockControl();
@@ -3493,27 +3600,17 @@ void applyHeadingLockCommand(
     return;
   }
 
-  if (!hasUsableFirmwareHeading(now)) {
-    SerialBT.print("ERR;YB_HEADING_UNAVAILABLE;YBIMU=");
-    SerialBT.print(ybImuAvailable ? 1 : 0);
-    SerialBT.print(";YBINIT=");
-    SerialBT.print(ybHeadingInitialized ? 1 : 0);
-    SerialBT.print(";YBAGE=");
-    SerialBT.print(ybHeadingAgeMs(now));
-    SerialBT.print(";HSRC=");
-    SerialBT.print(activeHeadingSourceName(now));
-    if (ybHeadingInitialized) {
-      SerialBT.print(";YBHDG=");
-      SerialBT.print(currentYbHeadingDegrees(), 1);
-    }
-    SerialBT.println();
-    Serial.println("Heading lock rejected: Yahboom heading unavailable");
+  if (!hasUsableHeadingSource(headingSource, now)) {
+    printHeadingSourceUnavailable(headingSource, now);
+    Serial.println("Heading lock rejected: selected heading source unavailable");
     return;
   }
 
   lastCommandMode = CommandMode::HeadingLock;
   turnControlActive = false;
   headingLockSource = source;
+  const HeadingSource previousHeadingLockHeadingSource = headingLockHeadingSource;
+  headingLockHeadingSource = headingSource;
   activeVoicePowerLimitPercent = constrain(
     static_cast<int>(voicePowerLimitPercent),
     static_cast<int>(MIN_VOICE_POWER_LIMIT_PERCENT),
@@ -3525,7 +3622,8 @@ void applyHeadingLockCommand(
   headingLockNeutralReversePercent = HEADING_LOCK_REVERSE_MAX_OUTPUT_PERCENT;
 
   const bool sameActiveHeadingLockRequest = headingLockActive && requestId == activeHeadingLockRequestId;
-  if (sameActiveHeadingLockRequest && !hasTargetHeading) {
+  const bool headingSourceChanged = previousHeadingLockHeadingSource != headingLockHeadingSource;
+  if (sameActiveHeadingLockRequest && !hasTargetHeading && !headingSourceChanged) {
     return;
   }
 
@@ -3533,9 +3631,9 @@ void applyHeadingLockCommand(
   if (hasTargetHeading) {
     headingLockTargetDegrees = normalizeCompass360(targetHeadingDegrees);
   } else if (!headingLockActive) {
-    headingLockTargetDegrees = currentYbHeadingDegrees();
+    headingLockTargetDegrees = currentHeadingDegrees(headingLockHeadingSource);
   }
-  if (!sameActiveHeadingLockRequest) {
+  if (!sameActiveHeadingLockRequest || headingSourceChanged) {
     resetHeadingLockRuntimeState();
   }
   headingLockActive = true;
@@ -3546,6 +3644,8 @@ void applyHeadingLockCommand(
   Serial.print(headingLockBasePercent);
   Serial.print(" target=");
   Serial.print(headingLockTargetDegrees, 1);
+  Serial.print(" hsrc=");
+  Serial.print(headingSourceName(headingLockHeadingSource));
   if (hasTargetHeading) {
     Serial.print(" explicit_target=1");
   }
@@ -3559,6 +3659,8 @@ void applyHeadingLockCommand(
   SerialBT.print(requestId);
   SerialBT.print(";TARGET=");
   SerialBT.print(headingLockTargetDegrees, 1);
+  SerialBT.print(";HSRC=");
+  SerialBT.print(headingSourceName(headingLockHeadingSource));
   if (hasTargetHeading) {
     SerialBT.print(";TARGET_SRC=CMD");
   }
@@ -3591,7 +3693,7 @@ void updateHeadingLockControl(uint32_t now) {
   }
   lastHeadingLockControlMs = now;
 
-  if (!hasUsableFirmwareHeading(now)) {
+  if (!hasUsableHeadingSource(headingLockHeadingSource, now)) {
     headingLockHeadingUnavailableWarningActive = true;
     requestedLeftPercent = 0;
     requestedRightPercent = 0;
@@ -3610,13 +3712,13 @@ void updateHeadingLockControl(uint32_t now) {
     }
     lastHeadingLockBrakePercent = 0.0f;
     headingLockAdaptiveBoostPercent = static_cast<int8_t>(roundf(headingLockAdaptiveBoostFloatPercent));
-    Serial.println("Heading lock waiting: Yahboom heading unavailable; keeping heading lock active");
+    Serial.println("Heading lock waiting: selected heading source unavailable; keeping heading lock active");
     return;
   }
   headingLockHeadingUnavailableWarningActive = false;
 
-  const float currentHeadingDegrees = currentYbHeadingDegrees();
-  const float errorDegrees = shortestAngleError(headingLockTargetDegrees, currentHeadingDegrees);
+  const float currentHeading = currentHeadingDegrees(headingLockHeadingSource);
+  const float errorDegrees = shortestAngleError(headingLockTargetDegrees, currentHeading);
   lastHeadingLockErrorDegrees = errorDegrees;
   const float absError = fabs(errorDegrees);
   const float errorSign = signOrZero(errorDegrees);
@@ -3661,7 +3763,7 @@ void updateHeadingLockControl(uint32_t now) {
     }
   }
 
-  float headingRateDegS = currentYbHeadingRateDegS();
+  float headingRateDegS = currentHeadingRateDegS(headingLockHeadingSource);
   if (!isfinite(headingRateDegS)) {
     headingRateDegS = 0.0f;
   }
@@ -3669,7 +3771,7 @@ void updateHeadingLockControl(uint32_t now) {
   if (previousHeadingLockRateValid && previousHeadingLockRateMs != now) {
     headingDtSeconds = static_cast<float>(now - previousHeadingLockRateMs) / 1000.0f;
     if (headingDtSeconds > 0.0f && headingDtSeconds <= 0.2f) {
-      const float diffRateDegS = shortestAngleError(currentHeadingDegrees, previousHeadingLockHeadingDegrees) / headingDtSeconds;
+      const float diffRateDegS = shortestAngleError(currentHeading, previousHeadingLockHeadingDegrees) / headingDtSeconds;
       if (isfinite(diffRateDegS) && fabs(headingRateDegS) < 0.5f) {
         headingRateDegS = diffRateDegS;
       }
@@ -3682,7 +3784,7 @@ void updateHeadingLockControl(uint32_t now) {
       rateDotDegS2 = observedRateDotDegS2;
     }
   }
-  previousHeadingLockHeadingDegrees = currentHeadingDegrees;
+  previousHeadingLockHeadingDegrees = currentHeading;
   previousHeadingLockRateMs = now;
   previousHeadingLockRateValid = true;
   previousHeadingLockRateDegS = headingRateDegS;
@@ -4126,6 +4228,8 @@ void applyBluetoothLine(char* line) {
   bool sawHeadingLockFullCorrection = false;
   bool sawHeadingLockNeutralReverse = false;
   bool sawHeadingLockTarget = false;
+  bool sawHeadingSource = false;
+  bool sawPhoneHeading = false;
   bool sawVoicePowerLimit = false;
   bool badSource = false;
   bool badMode = false;
@@ -4149,6 +4253,8 @@ void applyBluetoothLine(char* line) {
   uint16_t nextHeadingLockFullCorrectionDegrees = DEFAULT_HEADING_LOCK_FULL_CORRECTION_DEGREES;
   uint16_t nextHeadingLockNeutralReversePercent = DEFAULT_HEADING_LOCK_NEUTRAL_REVERSE_PERCENT;
   float nextHeadingLockTargetDegrees = 0.0f;
+  float nextPhoneHeadingDegrees = 0.0f;
+  HeadingSource nextHeadingSource = HeadingSource::YbImu;
   bool nextHeadingLockEnabled = false;
 
   char* token = strtok(line, ";");
@@ -4231,8 +4337,12 @@ void applyBluetoothLine(char* line) {
     ) {
       badVoiceLimitToken = badVoiceLimitToken || sawVoicePowerLimit;
       sawVoicePowerLimit = true;
-    } else if (parseHeadingSourceToken(token)) {
-      // H_SRC=IMU is accepted for protocol compatibility; control always uses YB IMU.
+    } else if (parseHeadingSourceToken(token, nextHeadingSource)) {
+      badHeadingSourceToken = badHeadingSourceToken || sawHeadingSource;
+      sawHeadingSource = true;
+    } else if (parseHeadingDegreesToken(token, "PHDG=", nextPhoneHeadingDegrees)) {
+      badHeadingSourceToken = badHeadingSourceToken || sawPhoneHeading;
+      sawPhoneHeading = true;
     } else if (strncmp(token, "LREV=", 5) == 0 || strncmp(token, "RREV=", 5) == 0) {
       badEscConfigToken = true;
     } else if (strncmp(token, "SRC=", 4) == 0) {
@@ -4299,6 +4409,14 @@ void applyBluetoothLine(char* line) {
     return;
   }
 
+  const uint32_t commandNow = millis();
+  if (sawHeadingSource) {
+    requestedHeadingSource = nextHeadingSource;
+  }
+  if (sawPhoneHeading) {
+    updatePhoneHeadingSample(nextPhoneHeadingDegrees, commandNow);
+  }
+
   if (nextMode == CommandMode::KeepAlive) {
     if (!sawArm || !nextArmed) {
       SerialBT.println("ERR;KEEPALIVE_REQUIRES_ARM");
@@ -4310,7 +4428,7 @@ void applyBluetoothLine(char* line) {
       Serial.println("Keepalive rejected: cannot arm from locked state");
       return;
     }
-    lastValidBtCommandMs = millis();
+    lastValidBtCommandMs = commandNow;
     lastCommandSource = nextSource;
     if (!headingLockActive && !turnControlActive) {
       lastCommandMode = CommandMode::KeepAlive;
@@ -4343,7 +4461,8 @@ void applyBluetoothLine(char* line) {
       nextDirection,
       nextAngleDegrees,
       nextTurnRequestId,
-      static_cast<uint8_t>(nextVoicePowerLimitPercent)
+      static_cast<uint8_t>(nextVoicePowerLimitPercent),
+      nextHeadingSource
     );
     return;
   }
@@ -4384,7 +4503,8 @@ void applyBluetoothLine(char* line) {
       nextHeadingLockRequestId,
       sawHeadingLockTarget,
       nextHeadingLockTargetDegrees,
-      nextSource
+      nextSource,
+      nextHeadingSource
     );
     return;
   }
@@ -4628,6 +4748,12 @@ void publishBluetoothStatus(uint32_t now) {
     SerialBT.print(";YBHDG=");
     SerialBT.print(currentYbHeadingDegrees(), 1);
   }
+  SerialBT.print(";PHDG_AGE=");
+  SerialBT.print(phoneHeadingAgeMs(now));
+  if (phoneHeadingInitialized) {
+    SerialBT.print(";PHDG=");
+    SerialBT.print(currentPhoneHeadingDegrees(), 1);
+  }
   SerialBT.print(";HSRC=");
   SerialBT.print(activeHeadingSourceName(now));
   SerialBT.print(";MCAL=");
@@ -4736,7 +4862,12 @@ void publishBluetoothStatus(uint32_t now) {
     SerialBT.print(";HBOOST=");
     SerialBT.print(headingLockAdaptiveBoostPercent);
     if (headingLockHeadingUnavailableWarningActive) {
-      SerialBT.print(";HWARN=YB_HEADING_UNAVAILABLE");
+      SerialBT.print(";HWARN=");
+      SerialBT.print(
+        headingLockHeadingSource == HeadingSource::Phone
+          ? "PHONE_HEADING_UNAVAILABLE"
+          : "YB_HEADING_UNAVAILABLE"
+      );
     } else if (headingLockDivergenceWarningActive) {
       SerialBT.print(";HWARN=HEADING_LOCK_DIVERGED");
     }

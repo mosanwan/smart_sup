@@ -147,6 +147,7 @@ fun AppScreen(viewModel: ControlViewModel) {
                 state = controlState,
                 navigationGpsSource = settingsState.navigationGpsSource,
                 usePhoneHeading = settingsState.usePhoneHeading,
+                phoneHeadingOffsetDegrees = settingsState.phoneHeadingOffsetDegrees,
                 modifier = modifier,
                 onSyncTrack = viewModel::requestTrackLogSync,
                 onPlaybackIndexChange = viewModel::setGpsPlaybackIndex,
@@ -180,6 +181,7 @@ fun AppScreen(viewModel: ControlViewModel) {
                 fineTuneStepPercent = settingsState.fineTuneStepPercent,
                 gearPercents = settingsState.gearPercents,
                 usePhoneHeading = settingsState.usePhoneHeading,
+                phoneHeadingOffsetDegrees = settingsState.phoneHeadingOffsetDegrees,
                 modifier = modifier,
                 onArm = { viewModel.setArmed(true) },
                 onDisarm = { viewModel.setArmed(false) },
@@ -526,7 +528,7 @@ private fun buildArkAgentStatePrompt(
     val phoneHeading = state.phoneHeadingDegrees
         ?.takeIf { state.phoneHeadingAvailable }
         ?.let { heading ->
-            val normalized = (heading % 360f + 360f) % 360f
+            val normalized = ((heading + settings.phoneHeadingOffsetDegrees) % 360f + 360f) % 360f
             "${"%.1f".format(Locale.US, normalized)}°"
         }
         ?: "不可用"

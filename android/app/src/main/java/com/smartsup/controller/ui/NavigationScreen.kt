@@ -128,6 +128,7 @@ fun NavigationScreen(
     state: ControlUiState,
     navigationGpsSource: NavigationGpsSource,
     usePhoneHeading: Boolean,
+    phoneHeadingOffsetDegrees: Float,
     modifier: Modifier = Modifier,
     onSyncTrack: () -> Unit,
     onPlaybackIndexChange: (Int) -> Unit,
@@ -171,6 +172,7 @@ fun NavigationScreen(
     val liveLocation = state.liveLatLng(navigationGpsSource)
     val liveHeadingDegrees = state.navigationHeadingDegrees(
         usePhoneHeading,
+        phoneHeadingOffsetDegrees,
     )
     val liveHeadingSourceText = if (usePhoneHeading) "船头" else "IMU"
     val gpsStatusText = state.gpsFixText(navigationGpsSource)
@@ -476,6 +478,7 @@ fun NavigationScreen(
                 state = state,
                 navigationGpsSource = navigationGpsSource,
                 usePhoneHeading = usePhoneHeading,
+                phoneHeadingOffsetDegrees = phoneHeadingOffsetDegrees,
                 onDismiss = { pendingExecuteRoute = null },
                 onConfirm = {
                     pendingExecuteRoute = null
@@ -1288,6 +1291,7 @@ private fun StartAutoNavigationDialog(
     state: ControlUiState,
     navigationGpsSource: NavigationGpsSource,
     usePhoneHeading: Boolean,
+    phoneHeadingOffsetDegrees: Float,
     onDismiss: () -> Unit,
     onConfirm: () -> Unit,
 ) {
@@ -1302,6 +1306,7 @@ private fun StartAutoNavigationDialog(
     val headingSourceText = if (usePhoneHeading) "手机校准船头" else "IMU"
     val headingReady = state.navigationHeadingDegrees(
         usePhoneHeading,
+        phoneHeadingOffsetDegrees,
     ) != null
     val connectionReady = state.connectionState == ConnectionState.Connected
     val armedReady = state.armed
@@ -2386,11 +2391,12 @@ private fun NavigationGpsSource.label(): String {
 
 private fun ControlUiState.navigationHeadingDegrees(
     usePhoneHeading: Boolean,
+    phoneHeadingOffsetDegrees: Float,
 ): Float? {
     return if (usePhoneHeading) {
         phoneHeadingDegrees
             ?.takeIf { phoneHeadingAvailable }
-            ?.let { normalizeCompassDegrees(it) }
+            ?.let { normalizeCompassDegrees(it + phoneHeadingOffsetDegrees) }
     } else {
         telemetry
             .takeIf { it.ybImuAvailable == true }

@@ -83,6 +83,7 @@ fun ControlScreen(
     fineTuneStepPercent: Int,
     gearPercents: Map<ThrottleGear, Int>,
     usePhoneHeading: Boolean,
+    phoneHeadingOffsetDegrees: Float,
     modifier: Modifier = Modifier,
     onArm: () -> Unit,
     onDisarm: () -> Unit,
@@ -178,6 +179,7 @@ fun ControlScreen(
                 fineTuneStepPercent = fineTuneStepPercent,
                 gearPercents = gearPercents,
                 usePhoneHeading = usePhoneHeading,
+                phoneHeadingOffsetDegrees = phoneHeadingOffsetDegrees,
                 modifier = Modifier
                     .weight(1f)
                     .fillMaxHeight(),
@@ -563,6 +565,7 @@ private fun CenterControlPanel(
     fineTuneStepPercent: Int,
     gearPercents: Map<ThrottleGear, Int>,
     usePhoneHeading: Boolean,
+    phoneHeadingOffsetDegrees: Float,
     modifier: Modifier = Modifier,
     onArm: () -> Unit,
     onDisarm: () -> Unit,
@@ -609,12 +612,14 @@ private fun CenterControlPanel(
                 HeadingValueRow(
                     state = state,
                     usePhoneHeading = usePhoneHeading,
+                    phoneHeadingOffsetDegrees = phoneHeadingOffsetDegrees,
                     onEnableHeadingLock = onEnableHeadingLock,
                     onDisableHeadingLock = onDisableHeadingLock,
                 )
                 TargetHeadingValueRow(
                     state = state,
                     usePhoneHeading = usePhoneHeading,
+                    phoneHeadingOffsetDegrees = phoneHeadingOffsetDegrees,
                     onSetTargetHeading = onSetTargetHeading,
                 )
                 CompactInfoRow("航向误差", state.appHeadingErrorText())
@@ -685,6 +690,7 @@ private fun CenterControlPanel(
                     "船头航向",
                     state.runtimeHeadingText(
                         usePhoneHeading = usePhoneHeading,
+                        phoneHeadingOffsetDegrees = phoneHeadingOffsetDegrees,
                     ),
                 )
                 CompactInfoRow("App 目标航向", state.targetHeadingText())
@@ -703,6 +709,7 @@ private fun CenterControlPanel(
 private fun HeadingValueRow(
     state: ControlUiState,
     usePhoneHeading: Boolean,
+    phoneHeadingOffsetDegrees: Float,
     onEnableHeadingLock: () -> Unit,
     onDisableHeadingLock: () -> Unit,
 ) {
@@ -739,6 +746,7 @@ private fun HeadingValueRow(
                 Text(
                     state.runtimeHeadingText(
                         usePhoneHeading = usePhoneHeading,
+                        phoneHeadingOffsetDegrees = phoneHeadingOffsetDegrees,
                     ),
                     fontWeight = FontWeight.Medium,
                     style = MaterialTheme.typography.bodySmall,
@@ -767,12 +775,14 @@ private fun HeadingValueRow(
 private fun TargetHeadingValueRow(
     state: ControlUiState,
     usePhoneHeading: Boolean,
+    phoneHeadingOffsetDegrees: Float,
     onSetTargetHeading: (Float) -> Unit,
 ) {
     val haptic = LocalHapticFeedback.current
     val dialogAnchor = remember { mutableStateOf<TargetHeadingDialogAnchor?>(null) }
     val currentHeading = state.runtimeHeadingDegrees(
         usePhoneHeading = usePhoneHeading,
+        phoneHeadingOffsetDegrees = phoneHeadingOffsetDegrees,
     )
     val actionEnabled = state.connectionState == ConnectionState.Connected &&
         state.armed &&
@@ -1434,11 +1444,12 @@ private const val TARGET_HEADING_ARC_DEGREES = 90f
 
 private fun ControlUiState.runtimeHeadingDegrees(
     usePhoneHeading: Boolean,
+    phoneHeadingOffsetDegrees: Float,
 ): Float? {
     return if (usePhoneHeading) {
         phoneHeadingDegrees
             ?.takeIf { phoneHeadingAvailable }
-            ?.let { normalizeCompassDegrees(it) }
+            ?.let { normalizeCompassDegrees(it + phoneHeadingOffsetDegrees) }
     } else {
         telemetry
             .takeIf { it.ybImuAvailable == true }
@@ -1453,9 +1464,11 @@ private fun ControlUiState.runtimeHeadingDegrees(
 
 private fun ControlUiState.runtimeHeadingText(
     usePhoneHeading: Boolean,
+    phoneHeadingOffsetDegrees: Float,
 ): String {
     return runtimeHeadingDegrees(
         usePhoneHeading = usePhoneHeading,
+        phoneHeadingOffsetDegrees = phoneHeadingOffsetDegrees,
     ).formatDegrees()
 }
 

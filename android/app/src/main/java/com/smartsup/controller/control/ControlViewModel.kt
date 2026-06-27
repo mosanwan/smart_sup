@@ -40,6 +40,7 @@ import com.smartsup.controller.model.ControlLogLevel
 import com.smartsup.controller.model.ControlUiState
 import com.smartsup.controller.model.FirmwareReleaseManifest
 import com.smartsup.controller.model.GpsTrackPoint
+import com.smartsup.controller.model.HeadingSource
 import com.smartsup.controller.model.NavigationRoute
 import com.smartsup.controller.model.NavigationRoutePoint
 import com.smartsup.controller.model.NavigationGpsSource
@@ -1026,18 +1027,22 @@ class ControlViewModel(application: Application) : AndroidViewModel(application)
     }
 
     fun setUsePhoneHeading(enabled: Boolean) {
-        preferences.edit().putBoolean(KEY_USE_PHONE_HEADING, false).apply()
-        mutableSettingsState.update { it.copy(usePhoneHeading = false) }
+        preferences.edit().putBoolean(KEY_USE_PHONE_HEADING, enabled).apply()
+        clearAutonomousCommands()
+        mutableSettingsState.update { it.copy(usePhoneHeading = enabled) }
         updatePhoneHeadingSensorRegistration()
         mutableUiState.update {
             it.copy(
-                statusMessage = if (enabled) {
-                    "控制航向来源已统一为主控 IMU；手机指南针只用于显示和调试"
-                } else {
-                    "控制航向来源保持主控 IMU"
-                },
+                leftThrottlePercent = 0,
+                rightThrottlePercent = 0,
+                commandSource = CommandSource.App,
+                headingLockEnabled = false,
+                selectedGear = ThrottleGear.Neutral,
+                throttleTrimPercent = 0,
+                statusMessage = "航向源已切换为${if (enabled) "手机指南针" else "主控 IMU"}，已取消当前锁航/自动导航",
             )
         }
+        sendCurrentCommand()
     }
 
     fun setRealtimeVoiceEndpoint(value: String) {
@@ -1100,9 +1105,9 @@ class ControlViewModel(application: Application) : AndroidViewModel(application)
             mutableUiState.update { it.copy(statusMessage = "航向锁定拒绝：请先手动解锁") }
             return
         }
-        val firmwareHeading = currentFirmwareHeadingForLockOrNull()
-        if (firmwareHeading == null) {
-            mutableUiState.update { it.copy(statusMessage = "航向锁定拒绝：主控 IMU 航向暂无有效读数，导航页手机航向不能用于固件锁航") }
+        val currentHeading = currentControllerHeadingForLockStartOrNull()
+        if (currentHeading == null) {
+            mutableUiState.update { it.copy(statusMessage = "航向锁定拒绝：${headingSourceUnavailableText()}") }
             return
         }
 
@@ -1119,17 +1124,18 @@ class ControlViewModel(application: Application) : AndroidViewModel(application)
             ),
             allocateHeadingLockRequestId = true,
         )
-        startAppHeadingLock(command, firmwareHeading)
+        startAppHeadingLock(command, currentHeading)
+        val headingSourceText = if (mutableSettingsState.value.usePhoneHeading) "手机指南针" else "主控 IMU"
         appendControlLog(
             level = ControlLogLevel.Info,
             title = "用户操作",
-            message = "点击锁航；目标为主控当前航向 ${firmwareHeading.roundToInt()}°，基础油门 ${basePercent.signedPercentText()}",
+            message = "点击锁航；目标为${headingSourceText}当前航向 ${currentHeading.roundToInt()}°，基础油门 ${basePercent.signedPercentText()}",
         )
         mutableUiState.update {
             it.copy(
                 commandSource = CommandSource.App,
                 headingLockEnabled = true,
-                statusMessage = "航向锁定已发送，目标 ${firmwareHeading.roundToInt()}°，基础油门 ${basePercent.signedPercentText()}",
+                statusMessage = "航向锁定已发送，目标 ${currentHeading.roundToInt()}°，基础油门 ${basePercent.signedPercentText()}",
             )
         }
         sendCurrentCommand()
@@ -3377,7 +3383,7 @@ class ControlViewModel(application: Application) : AndroidViewModel(application)
         if (command.mode == ControlCommandMode.HeadingLock) {
             clearActiveTurnCommand()
             if (command.headingLockEnabled) {
-                val currentHeading = currentHeadingForLockOrNull()
+                val currentHeading = currentControllerHeadingForLockStartOrNull()
                 if (currentHeading == null) {
                     val unavailableText = headingSourceUnavailableText()
                     mutableUiState.update {
@@ -3750,7 +3756,17 @@ class ControlViewModel(application: Application) : AndroidViewModel(application)
     }
 
     private fun ControlCommand.withRuntimeHeadingSource(): ControlCommand {
-        return this
+        val settings = mutableSettingsState.value
+        if (!settings.usePhoneHeading) {
+            return copy(
+                headingSource = HeadingSource.Imu,
+                phoneHeadingDegrees = null,
+            )
+        }
+        return copy(
+            headingSource = HeadingSource.Phone,
+            phoneHeadingDegrees = currentPhoneBoatHeadingDegreesOrNull(),
+        )
     }
 
     private fun currentPhoneHeadingDegreesOrNull(): Float? {
@@ -3761,12 +3777,26 @@ class ControlViewModel(application: Application) : AndroidViewModel(application)
             ?.let(::normalizeCompassDegrees)
     }
 
+    private fun currentPhoneBoatHeadingDegreesOrNull(): Float? {
+        return currentPhoneHeadingDegreesOrNull()?.let { phoneHeading ->
+            normalizeCompassDegrees(phoneHeading + mutableSettingsState.value.phoneHeadingOffsetDegrees)
+        }
+    }
+
     private fun currentYbImuHeadingDegreesOrNull(): Float? {
         val telemetry = currentYbImuHeadingTelemetryOrNull() ?: return null
         return ybImuHeadingDegrees(
             telemetry = telemetry,
             magneticDeclinationDegrees = currentMagneticDeclinationDegreesOrNull() ?: 0f,
         )
+    }
+
+    private fun currentControllerHeadingForLockStartOrNull(): Float? {
+        return if (mutableSettingsState.value.usePhoneHeading) {
+            currentPhoneBoatHeadingDegreesOrNull()
+        } else {
+            currentYbImuHeadingTelemetryOrNull()?.let(::ybImuControllerHeadingDegrees)
+        }
     }
 
     private fun currentMagneticDeclinationDegreesOrNull(): Float? {
@@ -3801,16 +3831,19 @@ class ControlViewModel(application: Application) : AndroidViewModel(application)
     }
 
     private fun currentHeadingForLockOrNull(): Float? {
-        return currentYbImuHeadingDegreesOrNull()
-    }
-
-    private fun currentFirmwareHeadingForLockOrNull(): Float? {
-        val telemetry = currentYbImuHeadingTelemetryOrNull() ?: return null
-        return ybImuControllerHeadingDegrees(telemetry)
+        return if (mutableSettingsState.value.usePhoneHeading) {
+            currentPhoneBoatHeadingDegreesOrNull()
+        } else {
+            currentYbImuHeadingDegreesOrNull()
+        }
     }
 
     private fun headingSourceUnavailableText(): String {
-        return "主控 IMU 航向暂无有效读数"
+        return if (mutableSettingsState.value.usePhoneHeading) {
+            "手机指南针暂无有效读数"
+        } else {
+            "主控 IMU 航向暂无有效读数"
+        }
     }
 
     private fun updatePhoneHeadingSensorRegistration() {
@@ -6620,9 +6653,13 @@ class ControlViewModel(application: Application) : AndroidViewModel(application)
         val state = mutableUiState.value
         val userLeftPercent = fields["L"]?.toIntOrNull() ?: state.telemetry.leftOutputPercent
         val userRightPercent = fields["R"]?.toIntOrNull() ?: state.telemetry.rightOutputPercent
+        val headingDegrees = when (fields["HSRC"]) {
+            "PHONE" -> fields["PHDG"]?.toFloatOrNull()
+            else -> fields["YBHDG"]?.toFloatOrNull() ?: fields["HDG"]?.toFloatOrNull()
+        }
         val sample = HeadingLockSample(
             hid = fields["HID"].orEmpty(),
-            headingDegrees = fields["YBHDG"]?.toFloatOrNull() ?: fields["HDG"]?.toFloatOrNull(),
+            headingDegrees = headingDegrees,
             targetDegrees = fields["TARGET"]?.toFloatOrNull(),
             errorDegrees = fields["HERR"]?.toFloatOrNull(),
             leftUserPercent = userLeftPercent,
@@ -6749,6 +6786,7 @@ class ControlViewModel(application: Application) : AndroidViewModel(application)
         fields["BASE"]?.let { parts += "BASE=$it%" }
         fields["HID"]?.let { parts += "HID=$it" }
         fields["H_SRC"]?.let { parts += "H_SRC=$it" }
+        fields["PHDG"]?.let { parts += "PHDG=$it°" }
         if (mode == "THROTTLE") {
             fields["L"]?.let { parts += "L=$it%" }
             fields["R"]?.let { parts += "R=$it%" }
@@ -7184,13 +7222,17 @@ class ControlViewModel(application: Application) : AndroidViewModel(application)
         }
         val errorCode = controllerErrorCode(line)
         val detailText = controllerErrorDetailText(line)
-        if (activeHeadingLockCommand != null && errorCode == "YB_HEADING_UNAVAILABLE") {
+        if (
+            activeHeadingLockCommand != null &&
+            (errorCode == "YB_HEADING_UNAVAILABLE" || errorCode == "PHONE_HEADING_UNAVAILABLE")
+        ) {
             lastHandledControllerErrorLine = line
+            val sourceText = if (errorCode == "PHONE_HEADING_UNAVAILABLE") "手机指南针" else "主控 IMU"
             mutableUiState.update {
                 it.copy(
                     headingLockEnabled = true,
                     appHeadingLockCorrectionPercent = 0,
-                    statusMessage = "主控暂时没有 IMU 航向${detailText.prependIfNotBlank("，")}；按用户规则继续维持锁航目标",
+                    statusMessage = "主控暂时没有${sourceText}航向${detailText.prependIfNotBlank("，")}；按用户规则继续维持锁航目标",
                 )
             }
             sendCurrentCommand()
@@ -7295,6 +7337,7 @@ class ControlViewModel(application: Application) : AndroidViewModel(application)
     private fun controllerFaultText(faultCode: String): String {
         return when (faultCode) {
             "YB_HEADING_UNAVAILABLE" -> "主控 IMU 航向中断"
+            "PHONE_HEADING_UNAVAILABLE" -> "手机指南针航向中断"
             "HEADING_LOCK_DIVERGED" -> "锁航误差扩大警告"
             "HEADING_UNAVAILABLE" -> "航向暂无有效读数"
             "PHONE_HEADING_TIMEOUT" -> "手机航向超时"
@@ -7322,6 +7365,8 @@ class ControlViewModel(application: Application) : AndroidViewModel(application)
             fields["YBINIT"]?.let { "YBINIT=$it" },
             fields["YBAGE"]?.let { "YBAGE=${it}ms" },
             fields["YBHDG"]?.let { "YBHDG=$it°" },
+            fields["PHDG"]?.let { "PHDG=$it°" },
+            fields["PHDG_AGE"]?.let { "PHDG_AGE=${it}ms" },
         ).joinToString("，")
     }
 
@@ -7408,7 +7453,7 @@ class ControlViewModel(application: Application) : AndroidViewModel(application)
                     AUTO_NAVIGATION_GPS_JUMP_RESET_DEFAULT_METERS,
                 ),
             ),
-            usePhoneHeading = false,
+            usePhoneHeading = preferences.getBoolean(KEY_USE_PHONE_HEADING, false),
             realtimeVoiceEndpoint = preferences.getString(KEY_REALTIME_VOICE_ENDPOINT, null)
                 ?.ifBlank { REALTIME_VOICE_ENDPOINT_DEFAULT }
                 ?: REALTIME_VOICE_ENDPOINT_DEFAULT,

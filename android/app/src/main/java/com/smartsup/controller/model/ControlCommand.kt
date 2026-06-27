@@ -1,11 +1,15 @@
 package com.smartsup.controller.model
 
+import java.util.Locale
+
 data class ControlCommand(
     val leftThrottlePercent: Int = 0,
     val rightThrottlePercent: Int = 0,
     val armed: Boolean = false,
     val source: CommandSource = CommandSource.App,
     val mode: ControlCommandMode = ControlCommandMode.Throttle,
+    val headingSource: HeadingSource = HeadingSource.Imu,
+    val phoneHeadingDegrees: Float? = null,
     val turnDirection: TurnDirection? = null,
     val turnAngleDegrees: Int? = null,
     val turnRequestId: Int? = null,
@@ -23,6 +27,9 @@ data class ControlCommand(
         require(leftThrottlePercent in -100..100)
         require(rightThrottlePercent in -100..100)
         require(voicePowerLimitPercent in 5..100) { "声控功率限制只允许 5..100%" }
+        phoneHeadingDegrees?.let {
+            require(it in 0f..360f) { "手机船头航向只允许 0..360 度" }
+        }
         if (mode == ControlCommandMode.TurnAngle) {
             require(armed) { "角度转向命令必须在已解锁状态下发送" }
             require(source == CommandSource.Voice) { "角度转向当前只开放语音来源" }
@@ -60,7 +67,10 @@ data class ControlCommand(
 
     fun toWireLine(): String {
         val voiceLimitToken = if (source == CommandSource.Voice) ";VMAX=$voicePowerLimitPercent" else ""
-        val headingSourceToken = ";H_SRC=IMU"
+        val phoneHeadingToken = phoneHeadingDegrees?.let {
+            ";PHDG=${String.format(Locale.US, "%.1f", it)}"
+        }.orEmpty()
+        val headingSourceToken = ";H_SRC=${headingSource.wireValue}$phoneHeadingToken"
         return when (mode) {
             ControlCommandMode.Throttle -> {
                 "SRC=${source.wireValue};ARM=${if (armed) 1 else 0};L=$leftThrottlePercent;R=$rightThrottlePercent" +
@@ -97,4 +107,9 @@ data class ControlCommand(
     companion object {
         val Idle = ControlCommand()
     }
+}
+
+enum class HeadingSource(val wireValue: String) {
+    Imu("IMU"),
+    Phone("PHONE"),
 }
