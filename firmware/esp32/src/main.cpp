@@ -86,16 +86,20 @@ constexpr uint16_t MIN_HEADING_LOCK_FULL_CORRECTION_DEGREES = 5;
 constexpr uint16_t MAX_HEADING_LOCK_FULL_CORRECTION_DEGREES = 180;
 constexpr uint8_t MIN_HEADING_LOCK_NEUTRAL_REVERSE_PERCENT = 0;
 constexpr uint8_t MAX_HEADING_LOCK_NEUTRAL_REVERSE_PERCENT = 100;
-constexpr float HEADING_LOCK_MAX_TARGET_RATE_DEG_S = 45.0f;
-constexpr float HEADING_LOCK_RATE_KP_PERCENT_PER_DEGREE_S = 0.8f;
-constexpr float HEADING_LOCK_RATE_KI_PERCENT_PER_DEGREE_S_SECOND = 2.5f;
-constexpr float HEADING_LOCK_ACCEL_DAMP_PERCENT_PER_DEGREE_S2 = 0.015f;
-constexpr float HEADING_LOCK_RATE_ERROR_INTEGRAL_DEADBAND_DEG_S = 0.8f;
-constexpr float HEADING_LOCK_ADAPTIVE_BOOST_MAX_PERCENT = 65.0f;
-constexpr float HEADING_LOCK_ADAPTIVE_BOOST_RATE_LIMIT_PERCENT_PER_SECOND = 25.0f;
-constexpr float HEADING_LOCK_ADAPTIVE_BOOST_MIN_RATE_PERCENT_PER_SECOND = 12.0f;
+constexpr float HEADING_LOCK_MAX_TARGET_RATE_DEG_S = 28.0f;
+constexpr float HEADING_LOCK_RATE_KP_PERCENT_PER_DEGREE_S = 0.45f;
+constexpr float HEADING_LOCK_RATE_KI_PERCENT_PER_DEGREE_S_SECOND = 0.8f;
+constexpr float HEADING_LOCK_ACCEL_DAMP_PERCENT_PER_DEGREE_S2 = 0.025f;
+constexpr float HEADING_LOCK_RATE_ERROR_INTEGRAL_DEADBAND_DEG_S = 1.5f;
+constexpr float HEADING_LOCK_ADAPTIVE_BOOST_MAX_PERCENT = 35.0f;
+constexpr float HEADING_LOCK_ADAPTIVE_BOOST_RATE_LIMIT_PERCENT_PER_SECOND = 8.0f;
+constexpr float HEADING_LOCK_ADAPTIVE_BOOST_MIN_RATE_PERCENT_PER_SECOND = 2.5f;
 constexpr float HEADING_LOCK_ADAPTIVE_BOOST_DECAY = 0.90f;
-constexpr float HEADING_LOCK_ADAPTIVE_BOOST_HOLD_DECAY = 0.995f;
+constexpr float HEADING_LOCK_ADAPTIVE_BOOST_HOLD_DECAY = 0.990f;
+constexpr float HEADING_LOCK_ADAPTIVE_BOOST_BRAKE_DECAY = 0.85f;
+constexpr float HEADING_LOCK_ADAPTIVE_BOOST_OPPOSING_DECAY = 0.80f;
+constexpr float HEADING_LOCK_CORRECT_SLEW_PERCENT_PER_SECOND = 22.0f;
+constexpr float HEADING_LOCK_BRAKE_SLEW_PERCENT_PER_SECOND = 85.0f;
 constexpr int8_t HEADING_LOCK_MIN_NEUTRAL_EFFECTIVE_CORRECTION_PERCENT =
   ESC_MIN_EFFECTIVE_THROTTLE_PERCENT + 1;
 constexpr float HEADING_LOCK_QUIET_HOLD_MARGIN_DEGREES = 1.0f;
@@ -104,14 +108,14 @@ constexpr float HEADING_LOCK_OBSERVER_ALPHA = 0.10f;
 constexpr float HEADING_LOCK_OBSERVER_DECAY = 0.95f;
 constexpr float HEADING_LOCK_OBSERVER_MAX_PERCENT = 25.0f;
 constexpr float HEADING_LOCK_MAX_RATE_DOT_DEG_S2 = 360.0f;
-constexpr float HEADING_LOCK_LOOKAHEAD_SECONDS = 0.6f;
-constexpr float HEADING_LOCK_BRAKE_WINDOW_DEGREES = 3.0f;
-constexpr float HEADING_LOCK_MIN_BRAKE_RATE_DEG_S = 8.0f;
-constexpr float HEADING_LOCK_FULL_BRAKE_RATE_DEG_S = 35.0f;
-constexpr int8_t HEADING_LOCK_MIN_BRAKE_PERCENT = 20;
-constexpr int8_t HEADING_LOCK_MAX_BRAKE_PERCENT = 35;
-constexpr uint16_t HEADING_LOCK_MIN_BRAKE_HOLD_MS = 250;
-constexpr uint16_t HEADING_LOCK_MAX_BRAKE_HOLD_MS = 800;
+constexpr float HEADING_LOCK_LOOKAHEAD_SECONDS = 0.9f;
+constexpr float HEADING_LOCK_BRAKE_WINDOW_DEGREES = 6.0f;
+constexpr float HEADING_LOCK_MIN_BRAKE_RATE_DEG_S = 5.0f;
+constexpr float HEADING_LOCK_FULL_BRAKE_RATE_DEG_S = 25.0f;
+constexpr int8_t HEADING_LOCK_MIN_BRAKE_PERCENT = 22;
+constexpr int8_t HEADING_LOCK_MAX_BRAKE_PERCENT = 58;
+constexpr uint16_t HEADING_LOCK_MIN_BRAKE_HOLD_MS = 350;
+constexpr uint16_t HEADING_LOCK_MAX_BRAKE_HOLD_MS = 1100;
 constexpr float HEADING_LOCK_SETTLE_RATE_DEG_S = 3.0f;
 constexpr uint32_t HEADING_LOCK_DIVERGENCE_WINDOW_MS = 1500;
 constexpr float HEADING_LOCK_DIVERGENCE_DEGREES = 5.0f;
@@ -414,6 +418,7 @@ float lastHeadingLockPdPercent = 0.0f;
 float lastHeadingLockInnerPercent = 0.0f;
 float headingLockDisturbancePercent = 0.0f;
 float headingLockAdaptiveBoostFloatPercent = 0.0f;
+float headingLockSlewedCorrectionFloatPercent = 0.0f;
 float lastHeadingLockBrakePercent = 0.0f;
 int8_t headingLockAdaptiveBoostPercent = 0;
 int8_t headingLockBasePercent = 0;
@@ -2531,6 +2536,7 @@ void resetHeadingLockRuntimeState() {
   lastHeadingLockInnerPercent = 0.0f;
   headingLockDisturbancePercent = 0.0f;
   headingLockAdaptiveBoostFloatPercent = 0.0f;
+  headingLockSlewedCorrectionFloatPercent = 0.0f;
   lastHeadingLockBrakePercent = 0.0f;
   headingLockAdaptiveBoostPercent = 0;
   lastHeadingLockCorrectionPercent = 0;
@@ -3707,6 +3713,7 @@ void updateHeadingLockControl(uint32_t now) {
     lastHeadingLockInnerPercent = 0.0f;
     headingLockDisturbancePercent *= HEADING_LOCK_OBSERVER_DECAY;
     headingLockAdaptiveBoostFloatPercent *= HEADING_LOCK_ADAPTIVE_BOOST_DECAY;
+    headingLockSlewedCorrectionFloatPercent = 0.0f;
     if (fabs(headingLockAdaptiveBoostFloatPercent) < 0.1f) {
       headingLockAdaptiveBoostFloatPercent = 0.0f;
     }
@@ -3792,6 +3799,9 @@ void updateHeadingLockControl(uint32_t now) {
   lastHeadingLockRateDegS = headingRateDegS;
   lastHeadingLockRateDotDegS2 = rateDotDegS2;
   const float absRate = fabs(headingRateDegS);
+  const float controlDtSeconds = headingDtSeconds > 0.0f && headingDtSeconds <= 0.2f
+    ? headingDtSeconds
+    : static_cast<float>(CONTROL_TICK_MS) / 1000.0f;
   const float rateSign = signOrZero(headingRateDegS);
   const bool movingAwayFromTarget =
     errorSign != 0.0f &&
@@ -3934,6 +3944,13 @@ void updateHeadingLockControl(uint32_t now) {
     fabs(rateDotDegS2) <= HEADING_LOCK_MAX_RATE_DOT_DEG_S2;
   if (boostCanUpdate) {
     const float rateErrorSign = signOrZero(rateErrorDegS);
+    if (
+      rateErrorSign != 0.0f &&
+      signOrZero(headingLockAdaptiveBoostFloatPercent) != 0.0f &&
+      signOrZero(headingLockAdaptiveBoostFloatPercent) != rateErrorSign
+    ) {
+      headingLockAdaptiveBoostFloatPercent *= HEADING_LOCK_ADAPTIVE_BOOST_OPPOSING_DECAY;
+    }
     const float integralInputDegS =
       rateErrorDegS - rateErrorSign * HEADING_LOCK_RATE_ERROR_INTEGRAL_DEADBAND_DEG_S;
     const float maxStep = HEADING_LOCK_ADAPTIVE_BOOST_RATE_LIMIT_PERCENT_PER_SECOND * headingDtSeconds;
@@ -3951,9 +3968,13 @@ void updateHeadingLockControl(uint32_t now) {
   } else {
     const bool shouldClearBoost =
       inQuietHoldBand && absRate <= HEADING_LOCK_SETTLE_RATE_DEG_S;
+    const bool shouldBrakeDecayBoost =
+      brakeActive || (movingTowardTarget && (nearStopLine || willOvershoot));
     headingLockAdaptiveBoostFloatPercent *= shouldClearBoost
       ? HEADING_LOCK_ADAPTIVE_BOOST_DECAY
-      : HEADING_LOCK_ADAPTIVE_BOOST_HOLD_DECAY;
+      : shouldBrakeDecayBoost
+        ? HEADING_LOCK_ADAPTIVE_BOOST_BRAKE_DECAY
+        : HEADING_LOCK_ADAPTIVE_BOOST_HOLD_DECAY;
     if (fabs(headingLockAdaptiveBoostFloatPercent) < 0.1f) {
       headingLockAdaptiveBoostFloatPercent = 0.0f;
     }
@@ -3989,9 +4010,10 @@ void updateHeadingLockControl(uint32_t now) {
     correctionFloat = pdPercent + headingLockAdaptiveBoostFloatPercent;
   }
 
+  int targetCorrectionPercent = 0;
   int8_t correction = 0;
   if (isfinite(correctionFloat)) {
-    int correctionPercent = static_cast<int>(roundf(constrain(
+    targetCorrectionPercent = static_cast<int>(roundf(constrain(
       correctionFloat,
       -static_cast<float>(HEADING_LOCK_MAX_CORRECTION_PERCENT),
       static_cast<float>(HEADING_LOCK_MAX_CORRECTION_PERCENT)
@@ -4003,16 +4025,16 @@ void updateHeadingLockControl(uint32_t now) {
     if (
       headingLockBasePercent == 0 &&
       !neutralEffectiveMinimumAllowed &&
-      abs(correctionPercent) < HEADING_LOCK_MIN_NEUTRAL_EFFECTIVE_CORRECTION_PERCENT
+      abs(targetCorrectionPercent) < HEADING_LOCK_MIN_NEUTRAL_EFFECTIVE_CORRECTION_PERCENT
     ) {
-      correctionPercent = 0;
+      targetCorrectionPercent = 0;
     }
     if (
       minimumCorrectionAllowed &&
       headingLockPhase == HeadingLockPhase::Correct &&
       absError > toleranceDegrees &&
       fabs(correctionFloat) > 0.1f &&
-      abs(correctionPercent) < (
+      abs(targetCorrectionPercent) < (
         neutralEffectiveMinimumAllowed
           ? HEADING_LOCK_MIN_NEUTRAL_EFFECTIVE_CORRECTION_PERCENT
           : HEADING_LOCK_MIN_CORRECTION_PERCENT
@@ -4021,12 +4043,38 @@ void updateHeadingLockControl(uint32_t now) {
       const int minCorrectionPercent = neutralEffectiveMinimumAllowed
         ? HEADING_LOCK_MIN_NEUTRAL_EFFECTIVE_CORRECTION_PERCENT
         : HEADING_LOCK_MIN_CORRECTION_PERCENT;
-      correctionPercent = correctionFloat > 0.0f
+      targetCorrectionPercent = correctionFloat > 0.0f
         ? minCorrectionPercent
         : -minCorrectionPercent;
     }
+  }
+  targetCorrectionPercent = constrain(
+    targetCorrectionPercent,
+    -static_cast<int>(HEADING_LOCK_MAX_CORRECTION_PERCENT),
+    static_cast<int>(HEADING_LOCK_MAX_CORRECTION_PERCENT)
+  );
+  if (
+    headingLockDivergenceWarningActive ||
+    (headingLockPhase == HeadingLockPhase::Settle && targetCorrectionPercent == 0)
+  ) {
+    headingLockSlewedCorrectionFloatPercent = 0.0f;
+  } else {
+    const float correctionSlewRate = headingLockPhase == HeadingLockPhase::Brake
+      ? HEADING_LOCK_BRAKE_SLEW_PERCENT_PER_SECOND
+      : HEADING_LOCK_CORRECT_SLEW_PERCENT_PER_SECOND;
+    const float correctionStepLimit = correctionSlewRate * controlDtSeconds;
+    headingLockSlewedCorrectionFloatPercent += constrain(
+      static_cast<float>(targetCorrectionPercent) - headingLockSlewedCorrectionFloatPercent,
+      -correctionStepLimit,
+      correctionStepLimit
+    );
+  }
+  if (fabs(headingLockSlewedCorrectionFloatPercent) < 0.1f) {
+    headingLockSlewedCorrectionFloatPercent = 0.0f;
+  }
+  if (isfinite(headingLockSlewedCorrectionFloatPercent)) {
     correction = static_cast<int8_t>(constrain(
-      correctionPercent,
+      static_cast<int>(roundf(headingLockSlewedCorrectionFloatPercent)),
       -static_cast<int>(HEADING_LOCK_MAX_CORRECTION_PERCENT),
       static_cast<int>(HEADING_LOCK_MAX_CORRECTION_PERCENT)
     ));
