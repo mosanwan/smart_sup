@@ -250,6 +250,12 @@ class ControlViewModel(application: Application) : AndroidViewModel(application)
         val accepted: Boolean,
     )
 
+    private data class HeadingCommandSnapshot(
+        val source: HeadingSource,
+        val headingDegrees: Float,
+        val phoneHeadingDegrees: Float?,
+    )
+
     private val discoveryReceiver = object : BroadcastReceiver() {
         override fun onReceive(context: Context, intent: Intent) {
             when (intent.action) {
@@ -1105,11 +1111,12 @@ class ControlViewModel(application: Application) : AndroidViewModel(application)
             mutableUiState.update { it.copy(statusMessage = "航向锁定拒绝：请先手动解锁") }
             return
         }
-        val currentHeading = currentControllerHeadingForLockStartOrNull()
-        if (currentHeading == null) {
+        val headingSnapshot = currentControllerHeadingSnapshotForLockStartOrNull()
+        if (headingSnapshot == null) {
             mutableUiState.update { it.copy(statusMessage = "航向锁定拒绝：${headingSourceUnavailableText()}") }
             return
         }
+        val currentHeading = headingSnapshot.headingDegrees
 
         clearActiveTurnCommand()
         val basePercent = currentAverageThrottlePercent()
@@ -1121,9 +1128,10 @@ class ControlViewModel(application: Application) : AndroidViewModel(application)
                 headingLockEnabled = true,
                 headingLockRequestId = 1,
                 headingLockBaseThrottlePercent = basePercent,
+                headingLockTargetDegrees = currentHeading,
             ),
             allocateHeadingLockRequestId = true,
-        )
+        ).withHeadingCommandSnapshot(headingSnapshot)
         startAppHeadingLock(command, currentHeading)
         val headingSourceText = if (mutableSettingsState.value.usePhoneHeading) "手机指南针" else "主控 IMU"
         appendControlLog(
@@ -3383,8 +3391,8 @@ class ControlViewModel(application: Application) : AndroidViewModel(application)
         if (command.mode == ControlCommandMode.HeadingLock) {
             clearActiveTurnCommand()
             if (command.headingLockEnabled) {
-                val currentHeading = currentControllerHeadingForLockStartOrNull()
-                if (currentHeading == null) {
+                val headingSnapshot = currentControllerHeadingSnapshotForLockStartOrNull()
+                if (headingSnapshot == null) {
                     val unavailableText = headingSourceUnavailableText()
                     mutableUiState.update {
                         it.copy(
@@ -3396,7 +3404,11 @@ class ControlViewModel(application: Application) : AndroidViewModel(application)
                     }
                     return
                 }
-                startAppHeadingLock(runtimeCommand, currentHeading)
+                val currentHeading = headingSnapshot.headingDegrees
+                val headingLockCommand = runtimeCommand
+                    .copy(headingLockTargetDegrees = currentHeading)
+                    .withHeadingCommandSnapshot(headingSnapshot)
+                startAppHeadingLock(headingLockCommand, currentHeading)
                 mutableUiState.update {
                     it.copy(
                         commandSource = CommandSource.Voice,
@@ -3765,7 +3777,14 @@ class ControlViewModel(application: Application) : AndroidViewModel(application)
         }
         return copy(
             headingSource = HeadingSource.Phone,
-            phoneHeadingDegrees = currentPhoneBoatHeadingDegreesOrNull(),
+            phoneHeadingDegrees = phoneHeadingDegrees ?: currentPhoneBoatHeadingDegreesOrNull(),
+        )
+    }
+
+    private fun ControlCommand.withHeadingCommandSnapshot(snapshot: HeadingCommandSnapshot): ControlCommand {
+        return copy(
+            headingSource = snapshot.source,
+            phoneHeadingDegrees = snapshot.phoneHeadingDegrees,
         )
     }
 
@@ -3791,11 +3810,23 @@ class ControlViewModel(application: Application) : AndroidViewModel(application)
         )
     }
 
-    private fun currentControllerHeadingForLockStartOrNull(): Float? {
+    private fun currentControllerHeadingSnapshotForLockStartOrNull(): HeadingCommandSnapshot? {
         return if (mutableSettingsState.value.usePhoneHeading) {
-            currentPhoneBoatHeadingDegreesOrNull()
+            currentPhoneBoatHeadingDegreesOrNull()?.let { heading ->
+                HeadingCommandSnapshot(
+                    source = HeadingSource.Phone,
+                    headingDegrees = heading,
+                    phoneHeadingDegrees = heading,
+                )
+            }
         } else {
-            currentYbImuHeadingTelemetryOrNull()?.let(::ybImuControllerHeadingDegrees)
+            currentYbImuHeadingTelemetryOrNull()?.let(::ybImuControllerHeadingDegrees)?.let { heading ->
+                HeadingCommandSnapshot(
+                    source = HeadingSource.Imu,
+                    headingDegrees = heading,
+                    phoneHeadingDegrees = null,
+                )
+            }
         }
     }
 
@@ -4716,7 +4747,7 @@ class ControlViewModel(application: Application) : AndroidViewModel(application)
 
     private fun startAppHeadingLock(command: ControlCommand, targetHeadingDegrees: Float) {
         val normalizedTarget = normalizeCompassDegrees(targetHeadingDegrees)
-        activeHeadingLockCommand = command
+        activeHeadingLockCommand = command.copy(headingLockTargetDegrees = normalizedTarget)
         activeHeadingLockStartPending = true
         activeHeadingLockOwnedByAutoNavigation = false
         appHeadingControlTargetDegrees = normalizedTarget
