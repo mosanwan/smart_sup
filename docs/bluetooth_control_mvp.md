@@ -161,7 +161,7 @@ STATUS;ARMED=1;FW=v0.2.8;L=24;R=16;CMD_SRC=APP;MODE=THROTTLE;LPWM=1620;RPWM=1580
 | `GPS_LAT` / `GPS_LON` | 定位有效时的纬度/经度，十进制度 |
 | `GPS_SPD_KMH` | 定位有效时的地速，单位 km/h，来自 NMEA `RMC` 语句 |
 
-App 控制页和导航页的船头航向显示跟随设置页所选航向源：手机指南针或主控 IMU。手机模式显示和下发的都是“手机罗盘 + 船头偏置”后的 `PHDG`；主控 IMU 航向固定按 `YBY + 180°` 换算。设置页 IMU 观测卡保留原始 `YBY` 和四元数换算 yaw 用于排查。ESP32 回传的 `HSRC/HLOCK/HERR/HPHASE/HCORR` 是锁航状态的权威来源。
+App 控制页和导航页的船头航向显示跟随设置页所选航向源：手机指南针或主控 IMU。手机模式显示和下发的都是“手机罗盘 + 船头偏置”后的 `PHDG`，并要求手机固定在桨板上；主控 IMU 模式显示和控制使用 ESP32 回传的 `YBHDG`，它由 `YBGZ` 陀螺短期积分跟随并由原始 `YBRAWHDG = YBY + 180°` 慢速校正。设置页 IMU 观测卡保留原始 `YBY`、`YBRAWHDG` 和四元数换算 yaw 用于排查。ESP32 回传的 `HSRC/HLOCK/HERR/HPHASE/HCORR` 是锁航状态的权威来源。
 
 ICM20948 融合航向中期方案的第一阶段会额外回传 IMU 观测字段，用于 Android 维护界面对比和日志分析，不参与自动导航或航向锁定：
 

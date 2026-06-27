@@ -7365,6 +7365,8 @@ class ControlViewModel(application: Application) : AndroidViewModel(application)
             fields["YBINIT"]?.let { "YBINIT=$it" },
             fields["YBAGE"]?.let { "YBAGE=${it}ms" },
             fields["YBHDG"]?.let { "YBHDG=$it°" },
+            fields["YBRAWHDG"]?.let { "YBRAWHDG=$it°" },
+            fields["YBTRK"]?.let { "YBTRK=$it" },
             fields["PHDG"]?.let { "PHDG=$it°" },
             fields["PHDG_AGE"]?.let { "PHDG_AGE=${it}ms" },
         ).joinToString("，")

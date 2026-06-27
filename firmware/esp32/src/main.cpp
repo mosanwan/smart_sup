@@ -231,6 +231,12 @@ constexpr float YB_IMU_ACCEL_SCALE_G = 16.0f / 32767.0f;
 constexpr float YB_IMU_GYRO_SCALE_RAD_S = (2000.0f / 32767.0f) * (3.1415926f / 180.0f);
 constexpr float YB_IMU_MAG_SCALE_UT = 800.0f / 32767.0f;
 constexpr float YB_IMU_HEADING_FORWARD_OFFSET_DEGREES = 180.0f;
+constexpr float YB_IMU_TRACKED_HEADING_MAX_DT_SECONDS = 0.25f;
+constexpr float YB_IMU_TRACKED_HEADING_TURNING_RATE_DEG_S = 2.0f;
+constexpr float YB_IMU_RAW_CORRECTION_ALPHA_STILL = 0.12f;
+constexpr float YB_IMU_RAW_CORRECTION_ALPHA_TURNING = 0.01f;
+constexpr float YB_IMU_RAW_CORRECTION_MAX_DPS_STILL = 20.0f;
+constexpr float YB_IMU_RAW_CORRECTION_MAX_DPS_TURNING = 3.0f;
 
 enum class CommandSource : uint8_t {
   App,
@@ -395,6 +401,8 @@ float ybQuatZ = 0.0f;
 float ybRollDegrees = 0.0f;
 float ybPitchDegrees = 0.0f;
 float ybYawDegrees = 0.0f;
+float ybTrackedHeadingDegrees = 0.0f;
+bool ybTrackedHeadingInitialized = false;
 bool ybHeadingInitialized = false;
 uint8_t ybImuCalibrationState = 255;
 uint8_t ybMagCalibrationState = 255;
@@ -743,12 +751,51 @@ float normalizeCompass360(float degrees) {
   return degrees;
 }
 
-float currentYbHeadingDegrees() {
+float rawYbHeadingDegrees() {
   return normalizeCompass360(ybYawDegrees + YB_IMU_HEADING_FORWARD_OFFSET_DEGREES);
 }
 
 float currentYbHeadingRateDegS() {
   return ybGyroZRadS * RADIANS_TO_DEGREES;
+}
+
+void updateYbTrackedHeading(float rawHeadingDegrees, uint32_t now) {
+  if (!ybTrackedHeadingInitialized || lastYbImuSampleMs == 0 || lastYbImuSampleMs > now) {
+    ybTrackedHeadingDegrees = rawHeadingDegrees;
+    ybTrackedHeadingInitialized = true;
+    return;
+  }
+
+  const float dtSeconds = static_cast<float>(now - lastYbImuSampleMs) / 1000.0f;
+  if (dtSeconds <= 0.0f || dtSeconds > YB_IMU_TRACKED_HEADING_MAX_DT_SECONDS) {
+    ybTrackedHeadingDegrees = rawHeadingDegrees;
+    return;
+  }
+
+  const float rateDegS = currentYbHeadingRateDegS();
+  const float predictedHeadingDegrees = normalizeCompass360(
+    ybTrackedHeadingDegrees + rateDegS * dtSeconds
+  );
+  const bool turning = fabsf(rateDegS) >= YB_IMU_TRACKED_HEADING_TURNING_RATE_DEG_S;
+  const float alpha = turning
+    ? YB_IMU_RAW_CORRECTION_ALPHA_TURNING
+    : YB_IMU_RAW_CORRECTION_ALPHA_STILL;
+  const float maxCorrectionStepDegrees = (
+    turning ? YB_IMU_RAW_CORRECTION_MAX_DPS_TURNING : YB_IMU_RAW_CORRECTION_MAX_DPS_STILL
+  ) * dtSeconds;
+  const float rawErrorDegrees = shortestAngleError(rawHeadingDegrees, predictedHeadingDegrees);
+  const float correctionDegrees = constrain(
+    rawErrorDegrees * alpha,
+    -maxCorrectionStepDegrees,
+    maxCorrectionStepDegrees
+  );
+  ybTrackedHeadingDegrees = normalizeCompass360(predictedHeadingDegrees + correctionDegrees);
+}
+
+float currentYbHeadingDegrees() {
+  return ybTrackedHeadingInitialized
+    ? normalizeCompass360(ybTrackedHeadingDegrees)
+    : rawYbHeadingDegrees();
 }
 
 uint32_t ybHeadingAgeMs(uint32_t now) {
@@ -839,6 +886,10 @@ void printHeadingSourceUnavailable(HeadingSource source, uint32_t now) {
   if (ybHeadingInitialized) {
     SerialBT.print(";YBHDG=");
     SerialBT.print(currentYbHeadingDegrees(), 1);
+    SerialBT.print(";YBRAWHDG=");
+    SerialBT.print(rawYbHeadingDegrees(), 1);
+    SerialBT.print(";YBTRK=");
+    SerialBT.print(ybTrackedHeadingInitialized ? 1 : 0);
   }
   SerialBT.print(";PHDG_AGE=");
   SerialBT.print(phoneHeadingAgeMs(now));
@@ -1019,10 +1070,13 @@ bool readYbImuSample() {
     isfinite(ybYawDegrees);
 
   if (valid) {
+    const uint32_t now = millis();
+    const float rawHeading = rawYbHeadingDegrees();
+    updateYbTrackedHeading(rawHeading, now);
     headingDegrees = currentYbHeadingDegrees();
     headingFilterInitialized = true;
     ybHeadingInitialized = true;
-    lastYbImuSampleMs = millis();
+    lastYbImuSampleMs = now;
   }
   return valid;
 }
@@ -2425,6 +2479,7 @@ void updateImu(uint32_t now) {
       lastYbImuReadMs = now;
       lastYbImuSampleMs = 0;
       ybHeadingInitialized = false;
+      ybTrackedHeadingInitialized = false;
       imuAvailable = false;
       magnetometerAvailable = false;
       imuFusionQuality = "YB_TELEMETRY_ONLY";
@@ -2443,6 +2498,7 @@ void updateImu(uint32_t now) {
       if (ybImuFailureCount >= IMU_FAILURE_LIMIT) {
         ybImuAvailable = false;
         ybHeadingInitialized = false;
+        ybTrackedHeadingInitialized = false;
         lastYbImuSampleMs = 0;
         Serial.println("Yahboom IMU read failed; telemetry disabled");
         SerialBT.println("STATUS;FAULT=YB_IMU_READ_FAILED");
@@ -4795,6 +4851,10 @@ void publishBluetoothStatus(uint32_t now) {
   if (ybHeadingInitialized) {
     SerialBT.print(";YBHDG=");
     SerialBT.print(currentYbHeadingDegrees(), 1);
+    SerialBT.print(";YBRAWHDG=");
+    SerialBT.print(rawYbHeadingDegrees(), 1);
+    SerialBT.print(";YBTRK=");
+    SerialBT.print(ybTrackedHeadingInitialized ? 1 : 0);
   }
   SerialBT.print(";PHDG_AGE=");
   SerialBT.print(phoneHeadingAgeMs(now));

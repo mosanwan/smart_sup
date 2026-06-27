@@ -616,6 +616,7 @@ private fun CenterControlPanel(
                     onEnableHeadingLock = onEnableHeadingLock,
                     onDisableHeadingLock = onDisableHeadingLock,
                 )
+                CompactInfoRow("航向源", state.runtimeHeadingSourceText(usePhoneHeading))
                 TargetHeadingValueRow(
                     state = state,
                     usePhoneHeading = usePhoneHeading,
@@ -640,6 +641,7 @@ private fun CenterControlPanel(
             ) {
                 CompactInfoRow("主控 IMU", state.ybImuModuleText())
                 CompactInfoRow("IMU 航向", state.ybHeadingText())
+                CompactInfoRow("IMU 原始航向", state.ybRawCompassHeadingText())
                 CompactInfoRow("磁偏角", state.magneticDeclinationText())
                 CompactInfoRow("原始 YBY", state.ybRawHeadingText())
                 CompactInfoRow("欧拉角 Yaw", state.telemetry.ybYawDegrees.formatDegrees())
@@ -1475,6 +1477,15 @@ private fun ControlUiState.runtimeHeadingText(
     ).formatDegrees()
 }
 
+private fun ControlUiState.runtimeHeadingSourceText(usePhoneHeading: Boolean): String {
+    return if (usePhoneHeading) {
+        "手机指南针（需固定）"
+    } else {
+        val controllerSource = telemetry.statusFields["HSRC"]?.takeIf { it.isNotBlank() }
+        listOfNotNull("主控 IMU", controllerSource?.let { "HSRC=$it" }).joinToString(" ")
+    }
+}
+
 private fun ControlUiState.targetHeadingText(): String {
     return appHeadingLockTargetDegrees.formatDegrees()
 }
@@ -1556,7 +1567,7 @@ private fun ControlUiState.appHeadingCommandText(): String {
 
 private fun ControlUiState.phoneHeadingStatusText(): String {
     return when {
-        phoneHeadingAvailable -> "在线"
+        phoneHeadingAvailable -> "在线（需固定）"
         phoneHeadingSensorName.isNotBlank() -> "等待读数"
         else -> "不可用"
     }
@@ -1583,6 +1594,10 @@ private fun ControlUiState.ybHeadingText(): String {
         telemetry = telemetry,
         magneticDeclinationDegrees = magneticDeclinationDegrees ?: 0f,
     ).formatDegrees()
+}
+
+private fun ControlUiState.ybRawCompassHeadingText(): String {
+    return telemetry.statusFields["YBRAWHDG"]?.toFloatOrNull().formatDegrees()
 }
 
 private fun ControlUiState.magneticDeclinationText(): String {

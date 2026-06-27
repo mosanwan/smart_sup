@@ -715,7 +715,7 @@ private fun SafetySettingsCard(
                 )
             }
             Text(
-                "只影响船头航向、锁航和导航方向。",
+                "只影响船头航向、锁航和导航方向；手机指南针必须固定在桨板上。",
                 style = MaterialTheme.typography.bodySmall,
                 color = MaterialTheme.colorScheme.onSurfaceVariant,
             )
