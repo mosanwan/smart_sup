@@ -627,6 +627,8 @@ private fun CenterControlPanel(
                 CompactInfoRow("目标方向", state.headingTargetSideText())
                 CompactInfoRow("HERR 原始", state.appHeadingErrorText())
                 CompactInfoRow("推力差", state.thrustBiasText())
+                CompactInfoRow("锁航阶段", state.headingLockPhaseText())
+                CompactInfoRow("补偿", state.headingBoostText())
                 CompactInfoRow("手机指南针", state.phoneHeadingStatusText())
             }
         }
@@ -1399,6 +1401,10 @@ private fun Int.signedPercentText(): String {
     return if (this > 0) "+$this%" else "$this%"
 }
 
+private fun Float.signedPercentFloatText(): String {
+    return if (this > 0f) "+%.1f%%".format(this) else "%.1f%%".format(this)
+}
+
 private fun throttleHeatColor(value: Int, maxThrottlePercent: Int): Color {
     if (value == 0 || maxThrottlePercent <= 0) {
         return Color(0xFF6B7280)
@@ -1528,6 +1534,21 @@ private fun ControlUiState.thrustBiasText(): String {
         delta > 0 -> "右大 ${delta}%"
         delta < 0 -> "左大 ${-delta}%"
         else -> "左右相同"
+    }
+}
+
+private fun ControlUiState.headingLockPhaseText(): String {
+    return telemetry.statusFields["HPHASE"]?.takeIf { it.isNotBlank() } ?: "--"
+}
+
+private fun ControlUiState.headingBoostText(): String {
+    val boost = telemetry.statusFields["HBOOST"]?.toIntOrNull() ?: return "--"
+    val creep = telemetry.statusFields["HCREEP"]?.toFloatOrNull()
+    val boostText = boost.signedPercentText()
+    return if (creep != null && abs(creep) >= 0.1f) {
+        "$boostText，小残差 ${creep.signedPercentFloatText()}"
+    } else {
+        boostText
     }
 }
 

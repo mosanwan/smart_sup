@@ -6755,6 +6755,7 @@ class ControlViewModel(application: Application) : AndroidViewModel(application)
             phase = fields["HPHASE"].orEmpty(),
             correctionPercent = fields["HCORR"]?.toIntOrNull(),
             boostPercent = fields["HBOOST"]?.toIntOrNull(),
+            creepPercent = fields["HCREEP"]?.toFloatOrNull(),
             referenceRateDegS = fields["HREF"]?.toFloatOrNull(),
             rateErrorDegS = fields["HRERR"]?.toFloatOrNull(),
             rateDotDegS2 = fields["HRDOT"]?.toFloatOrNull(),
@@ -6936,6 +6937,7 @@ class ControlViewModel(application: Application) : AndroidViewModel(application)
         val phase: String,
         val correctionPercent: Int?,
         val boostPercent: Int?,
+        val creepPercent: Float?,
         val referenceRateDegS: Float?,
         val rateErrorDegS: Float?,
         val rateDotDegS2: Float?,
@@ -6951,6 +6953,7 @@ class ControlViewModel(application: Application) : AndroidViewModel(application)
                 intDeltaAtLeast(rightUserPercent, previous.rightUserPercent, 5) ||
                 intDeltaAtLeast(correctionPercent, previous.correctionPercent, 5) ||
                 intDeltaAtLeast(boostPercent, previous.boostPercent, 5) ||
+                floatDeltaAtLeast(creepPercent, previous.creepPercent, 2.0f) ||
                 floatDeltaAtLeast(referenceRateDegS, previous.referenceRateDegS, 5.0f) ||
                 floatDeltaAtLeast(disturbancePercent, previous.disturbancePercent, 5.0f)
         }
@@ -6969,6 +6972,10 @@ class ControlViewModel(application: Application) : AndroidViewModel(application)
                 rateDotDegS2?.let { "角加速=${it.signedAccelText()}" },
                 innerPercent?.let { "内环=${it.signedPercentFloatText()}" },
                 disturbancePercent?.let { "扰动=${it.signedPercentFloatText()}" },
+                boostPercent?.let { "补偿=${it.signedPercentText()}" },
+                creepPercent?.takeIf { kotlin.math.abs(it) >= 0.1f }?.let {
+                    "小残差=${it.signedPercentFloatText()}"
+                },
                 correctionPercent?.let { "修正=${it.signedPercentText()}" },
             ).filterNotNull().joinToString("；")
         }
@@ -6992,6 +6999,7 @@ class ControlViewModel(application: Application) : AndroidViewModel(application)
                 "HFHAT=${disturbancePercent.numberText()}",
                 "HCORR=${correctionPercent?.toString() ?: "--"}",
                 "HBOOST=${boostPercent?.toString() ?: "--"}",
+                "HCREEP=${creepPercent.numberText()}",
             ).joinToString(";")
         }
 

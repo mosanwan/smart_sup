@@ -98,6 +98,10 @@ constexpr float HEADING_LOCK_ADAPTIVE_BOOST_DECAY = 0.90f;
 constexpr float HEADING_LOCK_ADAPTIVE_BOOST_HOLD_DECAY = 0.990f;
 constexpr float HEADING_LOCK_ADAPTIVE_BOOST_BRAKE_DECAY = 0.85f;
 constexpr float HEADING_LOCK_ADAPTIVE_BOOST_OPPOSING_DECAY = 0.80f;
+constexpr float HEADING_LOCK_RESIDUAL_CREEP_MAX_PERCENT = 8.0f;
+constexpr float HEADING_LOCK_RESIDUAL_CREEP_RATE_PERCENT_PER_SECOND = 0.45f;
+constexpr float HEADING_LOCK_RESIDUAL_CREEP_MAX_RATE_DEG_S = 1.5f;
+constexpr uint16_t HEADING_LOCK_RESIDUAL_CREEP_DELAY_MS = 1500;
 constexpr float HEADING_LOCK_CORRECT_SLEW_PERCENT_PER_SECOND = 22.0f;
 constexpr float HEADING_LOCK_BRAKE_SLEW_PERCENT_PER_SECOND = 85.0f;
 constexpr int8_t HEADING_LOCK_MIN_NEUTRAL_EFFECTIVE_CORRECTION_PERCENT =
@@ -264,6 +268,7 @@ enum class HeadingLockPhase : uint8_t {
   Correct,
   Brake,
   Settle,
+  Creep,
   Guard,
 };
 
@@ -426,6 +431,7 @@ float lastHeadingLockPdPercent = 0.0f;
 float lastHeadingLockInnerPercent = 0.0f;
 float headingLockDisturbancePercent = 0.0f;
 float headingLockAdaptiveBoostFloatPercent = 0.0f;
+float headingLockResidualCreepFloatPercent = 0.0f;
 float headingLockSlewedCorrectionFloatPercent = 0.0f;
 float lastHeadingLockBrakePercent = 0.0f;
 int8_t headingLockAdaptiveBoostPercent = 0;
@@ -450,6 +456,8 @@ bool previousHeadingLockRateDotValid = false;
 uint32_t headingLockDivergenceStartedMs = 0;
 float headingLockDivergenceStartAbsError = 0.0f;
 float headingLockDivergenceErrorSign = 0.0f;
+uint32_t headingLockResidualCreepStartedMs = 0;
+float headingLockResidualCreepSign = 0.0f;
 uint32_t lastHeadingLockControlMs = 0;
 uint8_t activeVoicePowerLimitPercent = DEFAULT_VOICE_POWER_LIMIT_PERCENT;
 uint32_t gpsByteCount = 0;
@@ -662,6 +670,8 @@ const char* headingLockPhaseName(HeadingLockPhase phase) {
       return "BRAKE";
     case HeadingLockPhase::Settle:
       return "SETTLE";
+    case HeadingLockPhase::Creep:
+      return "CREEP";
     case HeadingLockPhase::Guard:
       return "GUARD";
     case HeadingLockPhase::Correct:
@@ -2592,6 +2602,7 @@ void resetHeadingLockRuntimeState() {
   lastHeadingLockInnerPercent = 0.0f;
   headingLockDisturbancePercent = 0.0f;
   headingLockAdaptiveBoostFloatPercent = 0.0f;
+  headingLockResidualCreepFloatPercent = 0.0f;
   headingLockSlewedCorrectionFloatPercent = 0.0f;
   lastHeadingLockBrakePercent = 0.0f;
   headingLockAdaptiveBoostPercent = 0;
@@ -2612,6 +2623,8 @@ void resetHeadingLockRuntimeState() {
   headingLockDivergenceStartedMs = 0;
   headingLockDivergenceStartAbsError = 0.0f;
   headingLockDivergenceErrorSign = 0.0f;
+  headingLockResidualCreepStartedMs = 0;
+  headingLockResidualCreepSign = 0.0f;
   lastHeadingLockControlMs = 0;
 }
 
@@ -3769,12 +3782,20 @@ void updateHeadingLockControl(uint32_t now) {
     lastHeadingLockInnerPercent = 0.0f;
     headingLockDisturbancePercent *= HEADING_LOCK_OBSERVER_DECAY;
     headingLockAdaptiveBoostFloatPercent *= HEADING_LOCK_ADAPTIVE_BOOST_DECAY;
+    headingLockResidualCreepFloatPercent *= HEADING_LOCK_ADAPTIVE_BOOST_DECAY;
+    headingLockResidualCreepStartedMs = 0;
+    headingLockResidualCreepSign = 0.0f;
     headingLockSlewedCorrectionFloatPercent = 0.0f;
     if (fabs(headingLockAdaptiveBoostFloatPercent) < 0.1f) {
       headingLockAdaptiveBoostFloatPercent = 0.0f;
     }
+    if (fabs(headingLockResidualCreepFloatPercent) < 0.1f) {
+      headingLockResidualCreepFloatPercent = 0.0f;
+    }
     lastHeadingLockBrakePercent = 0.0f;
-    headingLockAdaptiveBoostPercent = static_cast<int8_t>(roundf(headingLockAdaptiveBoostFloatPercent));
+    headingLockAdaptiveBoostPercent = static_cast<int8_t>(roundf(
+      headingLockAdaptiveBoostFloatPercent + headingLockResidualCreepFloatPercent
+    ));
     Serial.println("Heading lock waiting: selected heading source unavailable; keeping heading lock active");
     return;
   }
@@ -4041,14 +4062,68 @@ void updateHeadingLockControl(uint32_t now) {
   if (headingLockDivergenceWarningActive) {
     headingLockAdaptiveBoostFloatPercent = 0.0f;
   }
+  const bool residualCreepBand =
+    absError > toleranceDegrees &&
+    absError <= quietHoldToleranceDegrees;
+  const bool residualCreepCanUpdate =
+    !headingLockDivergenceWarningActive &&
+    !brakeActive &&
+    headingDtSeconds > 0.0f &&
+    headingDtSeconds <= 0.2f &&
+    residualCreepBand &&
+    errorSign != 0.0f &&
+    absRate <= HEADING_LOCK_RESIDUAL_CREEP_MAX_RATE_DEG_S &&
+    fabs(rateDotDegS2) <= HEADING_LOCK_MAX_RATE_DOT_DEG_S2;
+  if (residualCreepCanUpdate) {
+    if (
+      headingLockResidualCreepStartedMs == 0 ||
+      headingLockResidualCreepSign != errorSign
+    ) {
+      headingLockResidualCreepStartedMs = now;
+      headingLockResidualCreepSign = errorSign;
+    }
+    if (now - headingLockResidualCreepStartedMs >= HEADING_LOCK_RESIDUAL_CREEP_DELAY_MS) {
+      const float creepSign = headingLockResidualCreepSign;
+      if (
+        creepSign != 0.0f &&
+        signOrZero(headingLockResidualCreepFloatPercent) != 0.0f &&
+        signOrZero(headingLockResidualCreepFloatPercent) != creepSign
+      ) {
+        headingLockResidualCreepFloatPercent *= HEADING_LOCK_ADAPTIVE_BOOST_OPPOSING_DECAY;
+      }
+      headingLockResidualCreepFloatPercent = constrain(
+        headingLockResidualCreepFloatPercent +
+          creepSign * HEADING_LOCK_RESIDUAL_CREEP_RATE_PERCENT_PER_SECOND * headingDtSeconds,
+        -HEADING_LOCK_RESIDUAL_CREEP_MAX_PERCENT,
+        HEADING_LOCK_RESIDUAL_CREEP_MAX_PERCENT
+      );
+    }
+  } else {
+    headingLockResidualCreepStartedMs = 0;
+    headingLockResidualCreepSign = 0.0f;
+    headingLockResidualCreepFloatPercent *=
+      (absError <= toleranceDegrees || headingLockDivergenceWarningActive || brakeActive)
+        ? HEADING_LOCK_ADAPTIVE_BOOST_DECAY
+        : HEADING_LOCK_ADAPTIVE_BOOST_HOLD_DECAY;
+    if (fabs(headingLockResidualCreepFloatPercent) < 0.1f) {
+      headingLockResidualCreepFloatPercent = 0.0f;
+    }
+  }
+  const float combinedBoostFloatPercent = constrain(
+    headingLockAdaptiveBoostFloatPercent + headingLockResidualCreepFloatPercent,
+    -HEADING_LOCK_ADAPTIVE_BOOST_MAX_PERCENT,
+    HEADING_LOCK_ADAPTIVE_BOOST_MAX_PERCENT
+  );
   headingLockAdaptiveBoostPercent = static_cast<int8_t>(roundf(constrain(
-    headingLockAdaptiveBoostFloatPercent,
+    combinedBoostFloatPercent,
     -HEADING_LOCK_ADAPTIVE_BOOST_MAX_PERCENT,
     HEADING_LOCK_ADAPTIVE_BOOST_MAX_PERCENT
   )));
 
   float correctionFloat = 0.0f;
   lastHeadingLockBrakePercent = 0.0f;
+  const bool residualCreepActive = residualCreepBand &&
+    fabs(headingLockResidualCreepFloatPercent) >= 0.1f;
   if (headingLockDivergenceWarningActive) {
     headingLockPhase = HeadingLockPhase::Guard;
     headingLockBrakeStartedMs = 0;
@@ -4058,12 +4133,15 @@ void updateHeadingLockControl(uint32_t now) {
   } else if (brakeActive) {
     correctionFloat = -headingLockBrakeStartRateSign * brakePercent;
     lastHeadingLockBrakePercent = correctionFloat;
+  } else if (inQuietHoldBand && absRate <= HEADING_LOCK_SETTLE_RATE_DEG_S && residualCreepActive) {
+    headingLockPhase = HeadingLockPhase::Creep;
+    correctionFloat = headingLockResidualCreepFloatPercent;
   } else if (inQuietHoldBand && absRate <= HEADING_LOCK_SETTLE_RATE_DEG_S) {
     headingLockPhase = HeadingLockPhase::Settle;
     correctionFloat = 0.0f;
   } else {
     headingLockPhase = HeadingLockPhase::Correct;
-    correctionFloat = pdPercent + headingLockAdaptiveBoostFloatPercent;
+    correctionFloat = pdPercent + combinedBoostFloatPercent;
   }
 
   int targetCorrectionPercent = 0;
@@ -4969,6 +5047,8 @@ void publishBluetoothStatus(uint32_t now) {
     SerialBT.print(lastHeadingLockBrakePercent, 1);
     SerialBT.print(";HBOOST=");
     SerialBT.print(headingLockAdaptiveBoostPercent);
+    SerialBT.print(";HCREEP=");
+    SerialBT.print(headingLockResidualCreepFloatPercent, 1);
     if (headingLockHeadingUnavailableWarningActive) {
       SerialBT.print(";HWARN=");
       SerialBT.print(

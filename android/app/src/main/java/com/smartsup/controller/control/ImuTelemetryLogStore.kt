@@ -141,6 +141,8 @@ class ImuTelemetryLogStore(context: Context) {
             "HRDOT",
             "HINNER",
             "HFHAT",
+            "HBOOST",
+            "HCREEP",
             "HCORR",
             "HBRK",
             "raw_status",
