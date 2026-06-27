@@ -16,6 +16,8 @@ data class ControlUiState(
     val phoneHeadingDegrees: Float? = null,
     val phoneHeadingAvailable: Boolean = false,
     val phoneHeadingSensorName: String = "",
+    val phoneHeadingUpdatedAtMs: Long = 0L,
+    val phoneHeadingAccuracyText: String = "",
     val magneticDeclinationDegrees: Float? = null,
     val appHeadingLockTargetDegrees: Float? = null,
     val appHeadingLockErrorDegrees: Float? = null,

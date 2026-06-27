@@ -134,6 +134,7 @@ class ControlViewModel(application: Application) : AndroidViewModel(application)
     private val phoneHeadingOrientation = FloatArray(3)
     private var phoneHeadingSensorRegistered = false
     private var phoneHeadingLastUpdateMs = 0L
+    private var phoneHeadingWatchdogJob: Job? = null
     private var phoneGpsRegistered = false
     private var phoneGpsLastUpdateMs = 0L
     private var ybImuHeadingLastUpdateMs = 0L
@@ -183,17 +184,24 @@ class ControlViewModel(application: Application) : AndroidViewModel(application)
             val headingDegrees = normalizeCompassDegrees(
                 Math.toDegrees(phoneHeadingOrientation[0].toDouble()).toFloat(),
             )
-            phoneHeadingLastUpdateMs = System.currentTimeMillis()
+            val nowMs = System.currentTimeMillis()
+            phoneHeadingLastUpdateMs = nowMs
             mutableUiState.update {
                 it.copy(
                     phoneHeadingDegrees = headingDegrees,
                     phoneHeadingAvailable = true,
                     phoneHeadingSensorName = event.sensor.name,
+                    phoneHeadingUpdatedAtMs = nowMs,
+                    phoneHeadingAccuracyText = phoneHeadingAccuracyText(event.accuracy),
                 )
             }
         }
 
-        override fun onAccuracyChanged(sensor: Sensor?, accuracy: Int) = Unit
+        override fun onAccuracyChanged(sensor: Sensor?, accuracy: Int) {
+            mutableUiState.update {
+                it.copy(phoneHeadingAccuracyText = phoneHeadingAccuracyText(accuracy))
+            }
+        }
     }
     private val phoneGpsListener = object : LocationListener {
         override fun onLocationChanged(location: Location) {
@@ -3791,8 +3799,12 @@ class ControlViewModel(application: Application) : AndroidViewModel(application)
     private fun currentPhoneHeadingDegreesOrNull(): Float? {
         val state = mutableUiState.value
         val ageMs = System.currentTimeMillis() - phoneHeadingLastUpdateMs
+        if (ageMs > PHONE_HEADING_STALE_MS) {
+            markPhoneHeadingStaleIfNeeded()
+            return null
+        }
         return state.phoneHeadingDegrees
-            ?.takeIf { state.phoneHeadingAvailable && ageMs <= PHONE_HEADING_STALE_MS }
+            ?.takeIf { state.phoneHeadingAvailable }
             ?.let(::normalizeCompassDegrees)
     }
 
@@ -4003,6 +4015,7 @@ class ControlViewModel(application: Application) : AndroidViewModel(application)
 
     private fun startPhoneHeadingSensor() {
         if (phoneHeadingSensorRegistered) {
+            startPhoneHeadingWatchdog()
             return
         }
         val sensor = sensorManager?.getDefaultSensor(Sensor.TYPE_ROTATION_VECTOR)
@@ -4026,11 +4039,15 @@ class ControlViewModel(application: Application) : AndroidViewModel(application)
             it.copy(
                 phoneHeadingAvailable = false,
                 phoneHeadingSensorName = sensor.name,
+                phoneHeadingAccuracyText = "",
             )
         }
+        startPhoneHeadingWatchdog()
     }
 
     private fun stopPhoneHeadingSensor(clearReading: Boolean) {
+        phoneHeadingWatchdogJob?.cancel()
+        phoneHeadingWatchdogJob = null
         if (phoneHeadingSensorRegistered) {
             sensorManager?.unregisterListener(phoneHeadingListener)
             phoneHeadingSensorRegistered = false
@@ -4042,8 +4059,46 @@ class ControlViewModel(application: Application) : AndroidViewModel(application)
                     phoneHeadingDegrees = null,
                     phoneHeadingAvailable = false,
                     phoneHeadingSensorName = "",
+                    phoneHeadingUpdatedAtMs = 0L,
+                    phoneHeadingAccuracyText = "",
                 )
             }
+        }
+    }
+
+    private fun startPhoneHeadingWatchdog() {
+        if (phoneHeadingWatchdogJob?.isActive == true) {
+            return
+        }
+        phoneHeadingWatchdogJob = viewModelScope.launch {
+            while (phoneHeadingSensorRegistered) {
+                delay(PHONE_HEADING_STALE_MS)
+                markPhoneHeadingStaleIfNeeded()
+            }
+        }
+    }
+
+    private fun markPhoneHeadingStaleIfNeeded() {
+        val lastUpdateMs = phoneHeadingLastUpdateMs
+        if (lastUpdateMs == 0L || System.currentTimeMillis() - lastUpdateMs <= PHONE_HEADING_STALE_MS) {
+            return
+        }
+        mutableUiState.update {
+            if (it.phoneHeadingAvailable && it.phoneHeadingUpdatedAtMs == lastUpdateMs) {
+                it.copy(phoneHeadingAvailable = false)
+            } else {
+                it
+            }
+        }
+    }
+
+    private fun phoneHeadingAccuracyText(accuracy: Int): String {
+        return when (accuracy) {
+            SensorManager.SENSOR_STATUS_UNRELIABLE -> "不可靠"
+            SensorManager.SENSOR_STATUS_ACCURACY_LOW -> "低精度"
+            SensorManager.SENSOR_STATUS_ACCURACY_MEDIUM -> "中精度"
+            SensorManager.SENSOR_STATUS_ACCURACY_HIGH -> "高精度"
+            else -> ""
         }
     }
 

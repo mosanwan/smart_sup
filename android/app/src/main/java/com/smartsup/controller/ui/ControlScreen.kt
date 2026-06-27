@@ -1566,9 +1566,15 @@ private fun ControlUiState.appHeadingCommandText(): String {
 }
 
 private fun ControlUiState.phoneHeadingStatusText(): String {
+    val accuracy = phoneHeadingAccuracyText.takeIf { it.isNotBlank() }
     return when {
-        phoneHeadingAvailable -> "在线（需固定）"
-        phoneHeadingSensorName.isNotBlank() -> "等待读数"
+        phoneHeadingAvailable -> {
+            val details = listOfNotNull(accuracy, "需固定").joinToString("，")
+            "在线（$details）"
+        }
+        phoneHeadingSensorName.isNotBlank() -> {
+            accuracy?.let { "等待读数（$it）" } ?: "等待读数"
+        }
         else -> "不可用"
     }
 }
