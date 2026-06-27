@@ -78,7 +78,6 @@ import com.smartsup.controller.model.NavigationGpsSource
 import com.smartsup.controller.model.NavigationRoute
 import com.smartsup.controller.model.NavigationRoutePoint
 import com.smartsup.controller.model.PhoneGpsState
-import com.smartsup.controller.model.YB_IMU_HEADING_MODE_YBY_INVERTED
 import com.smartsup.controller.model.ybImuHeadingDegrees
 import kotlinx.coroutines.delay
 import org.maplibre.android.MapLibre
@@ -129,9 +128,6 @@ fun NavigationScreen(
     state: ControlUiState,
     navigationGpsSource: NavigationGpsSource,
     usePhoneHeading: Boolean,
-    phoneHeadingOffsetDegrees: Float,
-    ybImuHeadingOffsetDegrees: Float,
-    ybImuHeadingMode: Int,
     modifier: Modifier = Modifier,
     onSyncTrack: () -> Unit,
     onPlaybackIndexChange: (Int) -> Unit,
@@ -175,9 +171,6 @@ fun NavigationScreen(
     val liveLocation = state.liveLatLng(navigationGpsSource)
     val liveHeadingDegrees = state.navigationHeadingDegrees(
         usePhoneHeading,
-        phoneHeadingOffsetDegrees,
-        ybImuHeadingOffsetDegrees,
-        ybImuHeadingMode,
     )
     val liveHeadingSourceText = if (usePhoneHeading) "船头" else "IMU"
     val gpsStatusText = state.gpsFixText(navigationGpsSource)
@@ -483,9 +476,6 @@ fun NavigationScreen(
                 state = state,
                 navigationGpsSource = navigationGpsSource,
                 usePhoneHeading = usePhoneHeading,
-                phoneHeadingOffsetDegrees = phoneHeadingOffsetDegrees,
-                ybImuHeadingOffsetDegrees = ybImuHeadingOffsetDegrees,
-                ybImuHeadingMode = ybImuHeadingMode,
                 onDismiss = { pendingExecuteRoute = null },
                 onConfirm = {
                     pendingExecuteRoute = null
@@ -1298,9 +1288,6 @@ private fun StartAutoNavigationDialog(
     state: ControlUiState,
     navigationGpsSource: NavigationGpsSource,
     usePhoneHeading: Boolean,
-    phoneHeadingOffsetDegrees: Float,
-    ybImuHeadingOffsetDegrees: Float,
-    ybImuHeadingMode: Int,
     onDismiss: () -> Unit,
     onConfirm: () -> Unit,
 ) {
@@ -1315,9 +1302,6 @@ private fun StartAutoNavigationDialog(
     val headingSourceText = if (usePhoneHeading) "手机校准船头" else "IMU"
     val headingReady = state.navigationHeadingDegrees(
         usePhoneHeading,
-        phoneHeadingOffsetDegrees,
-        ybImuHeadingOffsetDegrees,
-        ybImuHeadingMode,
     ) != null
     val connectionReady = state.connectionState == ConnectionState.Connected
     val armedReady = state.armed
@@ -2402,9 +2386,6 @@ private fun NavigationGpsSource.label(): String {
 
 private fun ControlUiState.navigationHeadingDegrees(
     usePhoneHeading: Boolean,
-    phoneHeadingOffsetDegrees: Float,
-    ybImuHeadingOffsetDegrees: Float,
-    ybImuHeadingMode: Int,
 ): Float? {
     return if (usePhoneHeading) {
         phoneHeadingDegrees
@@ -2416,8 +2397,7 @@ private fun ControlUiState.navigationHeadingDegrees(
             ?.let {
                 ybImuHeadingDegrees(
                     telemetry = it,
-                    offsetDegrees = magneticDeclinationDegrees ?: 0f,
-                    modeId = YB_IMU_HEADING_MODE_YBY_INVERTED,
+                    magneticDeclinationDegrees = magneticDeclinationDegrees ?: 0f,
                 )
             }
     }

@@ -19,8 +19,8 @@ BluetoothSerial SerialBT;
 Preferences preferences;
 Adafruit_Mahony imuMahonyFilter;
 
-constexpr uint8_t LEFT_ESC_PIN = 25;
-constexpr uint8_t RIGHT_ESC_PIN = 26;
+constexpr uint8_t LEFT_ESC_PIN = 26;
+constexpr uint8_t RIGHT_ESC_PIN = 25;
 constexpr uint8_t ARM_BUTTON_PIN = 17;
 constexpr uint8_t STATUS_LED_PIN = 2;
 constexpr uint8_t IMU_SDA_PIN = 14;
@@ -38,6 +38,8 @@ constexpr char NVS_MAG_OFFSET_X_KEY[] = "mag_off_x";
 constexpr char NVS_MAG_OFFSET_Y_KEY[] = "mag_off_y";
 constexpr char NVS_MAG_SCALE_X_KEY[] = "mag_scl_x";
 constexpr char NVS_MAG_SCALE_Y_KEY[] = "mag_scl_y";
+constexpr char NVS_ESC_LEFT_REVERSED_KEY[] = "esc_l_rev";
+constexpr char NVS_ESC_RIGHT_REVERSED_KEY[] = "esc_r_rev";
 constexpr uint16_t DEFAULT_UNIT_ID = 0;
 constexpr uint16_t MAX_UNIT_ID = 999;
 #ifndef SMART_SUP_FACTORY_UNIT_ID
@@ -69,26 +71,39 @@ constexpr uint8_t MIN_VOICE_POWER_LIMIT_PERCENT = 5;
 constexpr uint8_t MAX_VOICE_POWER_LIMIT_PERCENT = 100;
 constexpr uint8_t DEFAULT_VOICE_POWER_LIMIT_PERCENT = 70;
 constexpr int8_t VOICE_MAX_TURN_DELTA_PERCENT = 20;
-constexpr int8_t TURN_INNER_PERCENT = 8;
-constexpr int8_t TURN_MIN_OUTER_PERCENT = 14;
-constexpr int8_t TURN_MAX_OUTER_PERCENT = 24;
 constexpr float TURN_DONE_DEGREES = 3.0f;
-constexpr float TURN_SLOWDOWN_DEGREES = 45.0f;
 constexpr int8_t HEADING_LOCK_MIN_CORRECTION_PERCENT = 3;
 constexpr int8_t HEADING_LOCK_MAX_CORRECTION_PERCENT = 70;
-constexpr int8_t VOICE_HEADING_LOCK_MAX_OUTPUT_PERCENT = 70;
-constexpr int8_t APP_HEADING_LOCK_MAX_OUTPUT_PERCENT = 70;
+constexpr int8_t HEADING_LOCK_FORWARD_MAX_OUTPUT_PERCENT = 70;
+constexpr int8_t HEADING_LOCK_REVERSE_MAX_OUTPUT_PERCENT = 60;
 constexpr uint16_t DEFAULT_HEADING_LOCK_TOLERANCE_DEGREES = 2;
 constexpr uint16_t DEFAULT_HEADING_LOCK_FULL_CORRECTION_DEGREES = 45;
-constexpr uint8_t DEFAULT_HEADING_LOCK_NEUTRAL_REVERSE_PERCENT = 70;
+constexpr uint8_t DEFAULT_HEADING_LOCK_NEUTRAL_REVERSE_PERCENT =
+  HEADING_LOCK_REVERSE_MAX_OUTPUT_PERCENT;
 constexpr uint16_t MIN_HEADING_LOCK_TOLERANCE_DEGREES = 1;
 constexpr uint16_t MAX_HEADING_LOCK_TOLERANCE_DEGREES = 20;
 constexpr uint16_t MIN_HEADING_LOCK_FULL_CORRECTION_DEGREES = 5;
 constexpr uint16_t MAX_HEADING_LOCK_FULL_CORRECTION_DEGREES = 180;
 constexpr uint8_t MIN_HEADING_LOCK_NEUTRAL_REVERSE_PERCENT = 0;
 constexpr uint8_t MAX_HEADING_LOCK_NEUTRAL_REVERSE_PERCENT = 100;
-constexpr float HEADING_LOCK_MAX_KP_PERCENT_PER_DEGREE = 3.0f;
-constexpr float HEADING_LOCK_KD_PERCENT_PER_DEGREE_S = 0.75f;
+constexpr float HEADING_LOCK_MAX_TARGET_RATE_DEG_S = 45.0f;
+constexpr float HEADING_LOCK_RATE_KP_PERCENT_PER_DEGREE_S = 0.8f;
+constexpr float HEADING_LOCK_RATE_KI_PERCENT_PER_DEGREE_S_SECOND = 2.5f;
+constexpr float HEADING_LOCK_ACCEL_DAMP_PERCENT_PER_DEGREE_S2 = 0.015f;
+constexpr float HEADING_LOCK_RATE_ERROR_INTEGRAL_DEADBAND_DEG_S = 0.8f;
+constexpr float HEADING_LOCK_ADAPTIVE_BOOST_MAX_PERCENT = 65.0f;
+constexpr float HEADING_LOCK_ADAPTIVE_BOOST_RATE_LIMIT_PERCENT_PER_SECOND = 25.0f;
+constexpr float HEADING_LOCK_ADAPTIVE_BOOST_MIN_RATE_PERCENT_PER_SECOND = 12.0f;
+constexpr float HEADING_LOCK_ADAPTIVE_BOOST_DECAY = 0.90f;
+constexpr float HEADING_LOCK_ADAPTIVE_BOOST_HOLD_DECAY = 0.995f;
+constexpr int8_t HEADING_LOCK_MIN_NEUTRAL_EFFECTIVE_CORRECTION_PERCENT =
+  ESC_MIN_EFFECTIVE_THROTTLE_PERCENT + 1;
+constexpr float HEADING_LOCK_QUIET_HOLD_MARGIN_DEGREES = 1.0f;
+constexpr float HEADING_LOCK_OBSERVER_B0_DEG_S2_PER_PERCENT = 4.0f;
+constexpr float HEADING_LOCK_OBSERVER_ALPHA = 0.10f;
+constexpr float HEADING_LOCK_OBSERVER_DECAY = 0.95f;
+constexpr float HEADING_LOCK_OBSERVER_MAX_PERCENT = 25.0f;
+constexpr float HEADING_LOCK_MAX_RATE_DOT_DEG_S2 = 360.0f;
 constexpr float HEADING_LOCK_LOOKAHEAD_SECONDS = 0.6f;
 constexpr float HEADING_LOCK_BRAKE_WINDOW_DEGREES = 3.0f;
 constexpr float HEADING_LOCK_MIN_BRAKE_RATE_DEG_S = 8.0f;
@@ -100,17 +115,15 @@ constexpr uint16_t HEADING_LOCK_MAX_BRAKE_HOLD_MS = 800;
 constexpr float HEADING_LOCK_SETTLE_RATE_DEG_S = 3.0f;
 constexpr uint32_t HEADING_LOCK_DIVERGENCE_WINDOW_MS = 3000;
 constexpr float HEADING_LOCK_DIVERGENCE_DEGREES = 8.0f;
+constexpr int8_t HEADING_LOCK_STEER_SIGN = 1;
 constexpr uint32_t YB_IMU_HEADING_TIMEOUT_MS = 500;
-constexpr uint16_t MAX_VOICE_TURN_ANGLE_DEGREES = 90;
-constexpr int16_t MIN_HEADING_LOCK_TARGET_OFFSET_DEGREES = -90;
-constexpr int16_t MAX_HEADING_LOCK_TARGET_OFFSET_DEGREES = 90;
+constexpr uint16_t MAX_VOICE_TURN_ANGLE_DEGREES = 180;
 constexpr float ICM20948_GYRO_250DPS_LSB_PER_DPS = 131.0f;
 constexpr float IMU_YAW_SIGN = 1.0f;
 constexpr float RADIANS_TO_DEGREES = 57.2957795f;
 constexpr float MAG_HEADING_OFFSET_DEGREES = 0.0f;
 constexpr float MAG_HEADING_FILTER_ALPHA = 0.22f;
 constexpr uint32_t MAG_HEADING_INTERVAL_MS = 20;
-constexpr uint32_t PHONE_HEADING_TIMEOUT_MS = 1000;
 constexpr float IMU_FUSION_SAMPLE_RATE_HZ = 50.0f;
 constexpr float IMU_FUSION_MAG_ALPHA_MOVING = 0.008f;
 constexpr float IMU_FUSION_MAG_ALPHA_STILL = 0.050f;
@@ -219,6 +232,7 @@ enum class CommandMode : uint8_t {
   Throttle,
   TurnAngle,
   HeadingLock,
+  KeepAlive,
 };
 
 enum class TurnDirection : uint8_t {
@@ -247,6 +261,8 @@ uint16_t leftPulseUs = ESC_NEUTRAL_US;
 uint16_t rightPulseUs = ESC_NEUTRAL_US;
 int8_t requestedLeftPercent = 0;
 int8_t requestedRightPercent = 0;
+int8_t reportedLeftPercent = 0;
+int8_t reportedRightPercent = 0;
 CommandSource lastCommandSource = CommandSource::App;
 CommandMode lastCommandMode = CommandMode::Throttle;
 uint32_t lastTickMs = 0;
@@ -283,6 +299,8 @@ uint16_t unitId = DEFAULT_UNIT_ID;
 char btDeviceName[BT_DEVICE_NAME_SIZE] = {};
 bool unitIdProvisioned = false;
 const char* unitIdSource = "FALLBACK";
+bool escLeftReversed = false;
+bool escRightReversed = false;
 bool imuAvailable = false;
 bool magnetometerAvailable = false;
 bool ybImuAvailable = false;
@@ -290,7 +308,6 @@ bool headingFilterInitialized = false;
 bool imuHeadingFilterInitialized = false;
 bool magCalibrationValid = false;
 bool magCalibrationActive = false;
-bool phoneHeadingEnabled = false;
 uint8_t imuAddress = ICM20948_ADDR_LOW;
 uint8_t imuFailureCount = 0;
 uint8_t ybImuFailureCount = 0;
@@ -303,8 +320,6 @@ uint32_t ybCalibrationLastPollMs = 0;
 uint32_t ybCalibrationMaxMs = 0;
 float headingDegrees = 0.0f;
 float imuHeadingDegrees = 0.0f;
-float phoneHeadingDegrees = 0.0f;
-uint32_t lastPhoneHeadingMs = 0;
 float magOffsetX = 0.0f;
 float magOffsetY = 0.0f;
 float magScaleX = 1.0f;
@@ -371,26 +386,29 @@ uint16_t activeTurnRequestId = 0;
 uint16_t completedTurnRequestId = 0;
 float turnTargetHeadingDegrees = 0.0f;
 uint32_t turnStartedMs = 0;
-bool turnLeftEscReversed = false;
-bool turnRightEscReversed = false;
 bool headingLockActive = false;
 uint16_t activeHeadingLockRequestId = 0;
-bool headingLockOffsetRequestConsumed = false;
-uint16_t consumedHeadingLockOffsetRequestId = 0;
 float headingLockTargetDegrees = 0.0f;
 float lastHeadingLockErrorDegrees = 0.0f;
 float lastHeadingLockRateDegS = 0.0f;
+float lastHeadingLockTargetRateDegS = 0.0f;
+float lastHeadingLockRateErrorDegS = 0.0f;
+float lastHeadingLockRateDotDegS2 = 0.0f;
 float lastHeadingLockPredictedErrorDegrees = 0.0f;
 float lastHeadingLockPdPercent = 0.0f;
+float lastHeadingLockInnerPercent = 0.0f;
+float headingLockDisturbancePercent = 0.0f;
+float headingLockAdaptiveBoostFloatPercent = 0.0f;
 float lastHeadingLockBrakePercent = 0.0f;
+int8_t headingLockAdaptiveBoostPercent = 0;
 int8_t headingLockBasePercent = 0;
 int8_t lastHeadingLockCorrectionPercent = 0;
+bool headingLockDivergenceWarningActive = false;
+bool headingLockHeadingUnavailableWarningActive = false;
 uint16_t headingLockToleranceDegrees = DEFAULT_HEADING_LOCK_TOLERANCE_DEGREES;
 uint16_t headingLockFullCorrectionDegrees = DEFAULT_HEADING_LOCK_FULL_CORRECTION_DEGREES;
 uint8_t headingLockNeutralReversePercent = DEFAULT_HEADING_LOCK_NEUTRAL_REVERSE_PERCENT;
 CommandSource headingLockSource = CommandSource::App;
-bool headingLockLeftEscReversed = false;
-bool headingLockRightEscReversed = false;
 HeadingLockPhase headingLockPhase = HeadingLockPhase::Correct;
 uint32_t headingLockBrakeStartedMs = 0;
 uint16_t headingLockBrakeHoldTargetMs = 0;
@@ -398,9 +416,12 @@ float headingLockBrakeStartRateSign = 0.0f;
 float previousHeadingLockHeadingDegrees = 0.0f;
 uint32_t previousHeadingLockRateMs = 0;
 bool previousHeadingLockRateValid = false;
+float previousHeadingLockRateDegS = 0.0f;
+bool previousHeadingLockRateDotValid = false;
 uint32_t headingLockDivergenceStartedMs = 0;
 float headingLockDivergenceStartAbsError = 0.0f;
 float headingLockDivergenceErrorSign = 0.0f;
+uint32_t lastHeadingLockControlMs = 0;
 uint8_t activeVoicePowerLimitPercent = DEFAULT_VOICE_POWER_LIMIT_PERCENT;
 uint32_t gpsByteCount = 0;
 uint32_t gpsSentenceCount = 0;
@@ -517,6 +538,27 @@ void loadUnitId() {
   applyUnitId(DEFAULT_UNIT_ID, "FALLBACK", false);
 }
 
+void loadEscDirectionConfig() {
+  if (!nvsReady) {
+    escLeftReversed = false;
+    escRightReversed = false;
+    return;
+  }
+  escLeftReversed = preferences.getBool(NVS_ESC_LEFT_REVERSED_KEY, false);
+  escRightReversed = preferences.getBool(NVS_ESC_RIGHT_REVERSED_KEY, false);
+}
+
+bool saveEscDirectionConfig(bool leftReversed, bool rightReversed) {
+  escLeftReversed = leftReversed;
+  escRightReversed = rightReversed;
+  if (!nvsReady) {
+    return false;
+  }
+  preferences.putBool(NVS_ESC_LEFT_REVERSED_KEY, escLeftReversed);
+  preferences.putBool(NVS_ESC_RIGHT_REVERSED_KEY, escRightReversed);
+  return true;
+}
+
 uint32_t pulseUsToDuty(uint16_t pulseUs) {
   const uint32_t maxDuty = (1UL << ESC_PWM_RESOLUTION_BITS) - 1;
   return (static_cast<uint32_t>(pulseUs) * maxDuty) / 20000UL;
@@ -573,6 +615,8 @@ const char* commandModeName(CommandMode mode) {
       return "TURN";
     case CommandMode::HeadingLock:
       return "HEADING_LOCK";
+    case CommandMode::KeepAlive:
+      return "KEEPALIVE";
     case CommandMode::Throttle:
     default:
       return "THROTTLE";
@@ -639,15 +683,13 @@ int8_t clampHeadingLockBasePercent(int value, CommandSource source) {
 }
 
 void applyHeadingLockLimits(int8_t& leftPercent, int8_t& rightPercent) {
-  const int8_t maxOutput = headingLockSource == CommandSource::Voice
-    ? static_cast<int8_t>(activeVoicePowerLimitPercent)
-    : APP_HEADING_LOCK_MAX_OUTPUT_PERCENT;
-  leftPercent = static_cast<int8_t>(
-    constrain(static_cast<int>(leftPercent), -maxOutput, maxOutput)
-  );
-  rightPercent = static_cast<int8_t>(
-    constrain(static_cast<int>(rightPercent), -maxOutput, maxOutput)
-  );
+  const int voiceLimit = headingLockSource == CommandSource::Voice
+    ? static_cast<int>(activeVoicePowerLimitPercent)
+    : 100;
+  const int forwardLimit = min(static_cast<int>(HEADING_LOCK_FORWARD_MAX_OUTPUT_PERCENT), voiceLimit);
+  const int reverseLimit = min(static_cast<int>(HEADING_LOCK_REVERSE_MAX_OUTPUT_PERCENT), voiceLimit);
+  leftPercent = static_cast<int8_t>(constrain(static_cast<int>(leftPercent), -reverseLimit, forwardLimit));
+  rightPercent = static_cast<int8_t>(constrain(static_cast<int>(rightPercent), -reverseLimit, forwardLimit));
 }
 
 float normalizeAngle180(float degrees) {
@@ -682,36 +724,30 @@ float currentYbHeadingRateDegS() {
   return ybGyroZRadS * RADIANS_TO_DEGREES;
 }
 
-bool hasFreshPhoneHeading(uint32_t now) {
-  return phoneHeadingEnabled && lastPhoneHeadingMs != 0 && now - lastPhoneHeadingMs <= PHONE_HEADING_TIMEOUT_MS;
+uint32_t ybHeadingAgeMs(uint32_t now) {
+  if (lastYbImuSampleMs == 0) {
+    return 999999UL;
+  }
+  if (lastYbImuSampleMs > now) {
+    return 0;
+  }
+  return now - lastYbImuSampleMs;
 }
 
 bool hasFreshYbHeading(uint32_t now) {
   return ybImuAvailable &&
     ybHeadingInitialized &&
     lastYbImuSampleMs != 0 &&
-    now - lastYbImuSampleMs <= YB_IMU_HEADING_TIMEOUT_MS;
+    ybHeadingAgeMs(now) <= YB_IMU_HEADING_TIMEOUT_MS;
 }
 
 bool hasUsableFirmwareHeading(uint32_t now) {
   return hasFreshYbHeading(now);
 }
 
-bool hasUsableHeading(uint32_t now) {
-  return hasFreshPhoneHeading(now) ||
-    hasUsableFirmwareHeading(now) ||
-    (!phoneHeadingEnabled && imuAvailable && magnetometerAvailable);
-}
-
 const char* activeHeadingSourceName(uint32_t now) {
-  if (hasFreshPhoneHeading(now)) {
-    return "PHONE";
-  }
   if (hasUsableFirmwareHeading(now)) {
     return "YBIMU";
-  }
-  if (!phoneHeadingEnabled && magnetometerAvailable && imuHeadingFilterInitialized) {
-    return "FUSION";
   }
   return "NONE";
 }
@@ -2284,13 +2320,6 @@ void updateTrackLog(uint32_t now) {
 }
 
 void updateImu(uint32_t now) {
-  if (phoneHeadingEnabled) {
-    if (!hasFreshPhoneHeading(now) && turnControlActive) {
-      forceNeutralAndDisarm();
-      Serial.println("Phone heading timeout; autonomous control disabled");
-      SerialBT.println("STATUS;ARMED=0;FAULT=PHONE_HEADING_TIMEOUT");
-    }
-  }
   if (!ybImuAvailable && now - lastYbImuDetectAttemptMs >= YB_IMU_REDETECT_INTERVAL_MS) {
     lastYbImuDetectAttemptMs = now;
     if (detectYbImu()) {
@@ -2340,12 +2369,8 @@ void updateImu(uint32_t now) {
     if (imuFailureCount >= IMU_FAILURE_LIMIT) {
       imuAvailable = false;
       magnetometerAvailable = false;
-      turnControlActive = false;
-      headingLockActive = false;
-      requestedLeftPercent = 0;
-      requestedRightPercent = 0;
       Serial.println("ICM20948 motion read failed; IMU telemetry disabled");
-      SerialBT.println("STATUS;FAULT=IMU_MOTION_READ_FAILED");
+      SerialBT.println("STATUS;WARN=IMU_MOTION_READ_FAILED");
     }
     return;
   }
@@ -2355,10 +2380,8 @@ void updateImu(uint32_t now) {
     imuFusionQuality = "MAG_UNAVAILABLE";
     if (imuHeadingFilterInitialized) {
       updateImuFusion(imuMagHeadingDegrees, false, dtSeconds, now);
-      if (!phoneHeadingEnabled) {
-        headingDegrees = imuHeadingDegrees;
-        headingFilterInitialized = true;
-      }
+      headingDegrees = imuHeadingDegrees;
+      headingFilterInitialized = true;
     }
     return;
   }
@@ -2369,42 +2392,58 @@ void updateImu(uint32_t now) {
     imuFailureCount += 1;
     if (imuFailureCount >= IMU_FAILURE_LIMIT) {
       magnetometerAvailable = false;
-      turnControlActive = false;
-      headingLockActive = false;
-      requestedLeftPercent = 0;
-      requestedRightPercent = 0;
       Serial.println("IMU magnetometer read failed; ESP32 magnetic heading disabled");
-      SerialBT.println("STATUS;FAULT=IMU_MAG_READ_FAILED");
+      SerialBT.println("STATUS;WARN=IMU_MAG_READ_FAILED");
     }
     return;
   }
 
   imuFailureCount = 0;
   updateImuFusion(nextHeadingDegrees, hasNewHeading, dtSeconds, now);
-  if (!phoneHeadingEnabled && imuHeadingFilterInitialized) {
+  if (imuHeadingFilterInitialized) {
     headingDegrees = imuHeadingDegrees;
     headingFilterInitialized = true;
   }
 }
 
-int8_t applyTurnEscDirection(int8_t percent, bool reversed) {
+// Installation-only ESC direction correction. Keep this out of control loops.
+int8_t applyEscDirectionAtOutputLayer(int8_t percent, bool reversed) {
   return reversed ? static_cast<int8_t>(-percent) : percent;
+}
+
+int8_t leftSemanticPercentToEscPercent(int8_t percent) {
+  return applyEscDirectionAtOutputLayer(percent, escLeftReversed);
+}
+
+int8_t rightSemanticPercentToEscPercent(int8_t percent) {
+  return applyEscDirectionAtOutputLayer(percent, escRightReversed);
 }
 
 void cancelTurnControl() {
   turnControlActive = false;
   requestedLeftPercent = 0;
   requestedRightPercent = 0;
+  reportedLeftPercent = 0;
+  reportedRightPercent = 0;
   lastCommandMode = CommandMode::Throttle;
 }
 
 void resetHeadingLockRuntimeState() {
   lastHeadingLockErrorDegrees = 0.0f;
   lastHeadingLockRateDegS = 0.0f;
+  lastHeadingLockTargetRateDegS = 0.0f;
+  lastHeadingLockRateErrorDegS = 0.0f;
+  lastHeadingLockRateDotDegS2 = 0.0f;
   lastHeadingLockPredictedErrorDegrees = 0.0f;
   lastHeadingLockPdPercent = 0.0f;
+  lastHeadingLockInnerPercent = 0.0f;
+  headingLockDisturbancePercent = 0.0f;
+  headingLockAdaptiveBoostFloatPercent = 0.0f;
   lastHeadingLockBrakePercent = 0.0f;
+  headingLockAdaptiveBoostPercent = 0;
   lastHeadingLockCorrectionPercent = 0;
+  headingLockDivergenceWarningActive = false;
+  headingLockHeadingUnavailableWarningActive = false;
   headingLockPhase = HeadingLockPhase::Correct;
   headingLockBrakeStartedMs = 0;
   headingLockBrakeHoldTargetMs = 0;
@@ -2412,9 +2451,12 @@ void resetHeadingLockRuntimeState() {
   previousHeadingLockHeadingDegrees = ybHeadingInitialized ? currentYbHeadingDegrees() : headingDegrees;
   previousHeadingLockRateMs = millis();
   previousHeadingLockRateValid = false;
+  previousHeadingLockRateDegS = 0.0f;
+  previousHeadingLockRateDotValid = false;
   headingLockDivergenceStartedMs = 0;
   headingLockDivergenceStartAbsError = 0.0f;
   headingLockDivergenceErrorSign = 0.0f;
+  lastHeadingLockControlMs = 0;
 }
 
 void cancelHeadingLockControl() {
@@ -2428,10 +2470,26 @@ void cancelAutonomousControl() {
   cancelHeadingLockControl();
 }
 
+void cancelHeadingLockFaultKeepArmed(const char* faultCode) {
+  cancelHeadingLockControl();
+  requestedLeftPercent = 0;
+  requestedRightPercent = 0;
+  reportedLeftPercent = 0;
+  reportedRightPercent = 0;
+  lastCommandMode = CommandMode::Throttle;
+  SerialBT.print("STATUS;ARMED=");
+  SerialBT.print(armed ? 1 : 0);
+  SerialBT.print(";FAULT=");
+  SerialBT.print(faultCode);
+  SerialBT.println(";HLOCK=OFF");
+}
+
 void forceNeutralAndDisarm() {
   armed = false;
   requestedLeftPercent = 0;
   requestedRightPercent = 0;
+  reportedLeftPercent = 0;
+  reportedRightPercent = 0;
   lastCommandSource = CommandSource::App;
   lastCommandMode = CommandMode::Throttle;
   turnControlActive = false;
@@ -2753,6 +2811,10 @@ bool parseModeToken(const char* token, CommandMode& outMode) {
     outMode = CommandMode::HeadingLock;
     return true;
   }
+  if (strcmp(token, "MODE=KEEPALIVE") == 0) {
+    outMode = CommandMode::KeepAlive;
+    return true;
+  }
   return false;
 }
 
@@ -2768,13 +2830,8 @@ bool parseTurnDirectionToken(const char* token, TurnDirection& outDirection) {
   return false;
 }
 
-bool parseHeadingSourceToken(const char* token, bool& outUsePhoneHeading) {
-  if (strcmp(token, "H_SRC=PHONE") == 0) {
-    outUsePhoneHeading = true;
-    return true;
-  }
+bool parseHeadingSourceToken(const char* token) {
   if (strcmp(token, "H_SRC=IMU") == 0) {
-    outUsePhoneHeading = false;
     return true;
   }
   return false;
@@ -2812,22 +2869,6 @@ bool parseUnsignedToken(const char* token, const char* prefix, uint16_t minValue
   return true;
 }
 
-bool parseSignedToken(const char* token, const char* prefix, int16_t minValue, int16_t maxValue, int16_t& outValue) {
-  const size_t prefixLen = strlen(prefix);
-  if (strncmp(token, prefix, prefixLen) != 0) {
-    return false;
-  }
-
-  char* end = nullptr;
-  const long parsed = strtol(token + prefixLen, &end, 10);
-  if (end == token + prefixLen || *end != '\0' || parsed < minValue || parsed > maxValue) {
-    return false;
-  }
-
-  outValue = static_cast<int16_t>(parsed);
-  return true;
-}
-
 bool parseUint32Token(const char* token, const char* prefix, uint32_t minValue, uint32_t maxValue, uint32_t& outValue) {
   const size_t prefixLen = strlen(prefix);
   if (strncmp(token, prefix, prefixLen) != 0) {
@@ -2858,6 +2899,46 @@ bool parseBoolToken(const char* token, const char* prefix, bool& outValue) {
     return true;
   }
   return false;
+}
+
+bool applyEscConfigLine(char* line, Print& response) {
+  if (strncmp(line, "ESC_CFG", 7) != 0) {
+    return false;
+  }
+
+  bool nextLeftReversed = escLeftReversed;
+  bool nextRightReversed = escRightReversed;
+  bool sawLeft = false;
+  bool sawRight = false;
+  bool badToken = false;
+
+  char* token = strtok(line, ";");
+  while (token != nullptr) {
+    if (strcmp(token, "ESC_CFG") == 0) {
+      // command prefix
+    } else if (parseBoolToken(token, "LREV=", nextLeftReversed)) {
+      sawLeft = true;
+    } else if (parseBoolToken(token, "RREV=", nextRightReversed)) {
+      sawRight = true;
+    } else {
+      badToken = true;
+    }
+    token = strtok(nullptr, ";");
+  }
+
+  if (badToken || (!sawLeft && !sawRight)) {
+    response.println("ESC_CFG;ERR=BAD_COMMAND");
+    return true;
+  }
+
+  const bool saved = saveEscDirectionConfig(nextLeftReversed, nextRightReversed);
+  response.print("ESC_CFG;OK;LREV=");
+  response.print(escLeftReversed ? 1 : 0);
+  response.print(";RREV=");
+  response.print(escRightReversed ? 1 : 0);
+  response.print(";NVS=");
+  response.println(saved ? 1 : 0);
+  return true;
 }
 
 uint32_t updateCrc32(uint32_t crc, const uint8_t* data, size_t length) {
@@ -3289,12 +3370,10 @@ void applyTurnAngleCommand(
   TurnDirection direction,
   uint16_t angleDegrees,
   uint16_t requestId,
-  uint8_t voicePowerLimitPercent,
-  bool leftEscReversed,
-  bool rightEscReversed
+  uint8_t voicePowerLimitPercent
 ) {
   const uint32_t now = millis();
-  if (!hasUsableHeading(now)) {
+  if (!hasUsableFirmwareHeading(now)) {
     SerialBT.println("ERR;HEADING_UNAVAILABLE");
     Serial.println("Turn angle rejected: heading unavailable");
     return;
@@ -3308,8 +3387,6 @@ void applyTurnAngleCommand(
     return;
   }
   if (turnControlCompleted && requestId == completedTurnRequestId) {
-    requestedLeftPercent = 0;
-    requestedRightPercent = 0;
     return;
   }
 
@@ -3317,21 +3394,54 @@ void applyTurnAngleCommand(
     ? -static_cast<float>(angleDegrees)
     : static_cast<float>(angleDegrees);
 
-  turnTargetHeadingDegrees = normalizeAngle180(headingDegrees + signedAngle);
+  if (headingLockActive && !turnControlActive) {
+    turnTargetHeadingDegrees = normalizeCompass360(headingLockTargetDegrees + signedAngle);
+    headingLockTargetDegrees = turnTargetHeadingDegrees;
+    activeTurnRequestId = requestId;
+    completedTurnRequestId = requestId;
+    turnControlCompleted = true;
+    activeVoicePowerLimitPercent = constrain(
+      static_cast<int>(voicePowerLimitPercent),
+      static_cast<int>(MIN_VOICE_POWER_LIMIT_PERCENT),
+      static_cast<int>(MAX_VOICE_POWER_LIMIT_PERCENT)
+    );
+    resetHeadingLockRuntimeState();
+    Serial.print("Turn angle applied to heading lock tid=");
+    Serial.print(requestId);
+    Serial.print(" target=");
+    Serial.println(headingLockTargetDegrees, 1);
+    SerialBT.print("STATUS;TURN=APPLIED;TID=");
+    SerialBT.print(requestId);
+    SerialBT.print(";HLOCK=ACTIVE;HID=");
+    SerialBT.print(activeHeadingLockRequestId);
+    SerialBT.print(";TARGET=");
+    SerialBT.println(headingLockTargetDegrees, 1);
+    return;
+  }
+
+  turnTargetHeadingDegrees = normalizeCompass360(currentYbHeadingDegrees() + signedAngle);
   turnStartedMs = now;
   activeTurnRequestId = requestId;
   turnControlActive = true;
   turnControlCompleted = false;
-  headingLockActive = false;
+  headingLockActive = true;
+  activeHeadingLockRequestId = requestId;
+  headingLockTargetDegrees = turnTargetHeadingDegrees;
+  headingLockBasePercent = 0;
+  headingLockToleranceDegrees = DEFAULT_HEADING_LOCK_TOLERANCE_DEGREES;
+  headingLockFullCorrectionDegrees = DEFAULT_HEADING_LOCK_FULL_CORRECTION_DEGREES;
+  headingLockNeutralReversePercent = DEFAULT_HEADING_LOCK_NEUTRAL_REVERSE_PERCENT;
+  headingLockSource = CommandSource::Voice;
   activeVoicePowerLimitPercent = constrain(
     static_cast<int>(voicePowerLimitPercent),
     static_cast<int>(MIN_VOICE_POWER_LIMIT_PERCENT),
     static_cast<int>(MAX_VOICE_POWER_LIMIT_PERCENT)
   );
-  turnLeftEscReversed = leftEscReversed;
-  turnRightEscReversed = rightEscReversed;
   requestedLeftPercent = 0;
   requestedRightPercent = 0;
+  reportedLeftPercent = 0;
+  reportedRightPercent = 0;
+  resetHeadingLockRuntimeState();
 
   Serial.print("Turn angle start tid=");
   Serial.print(requestId);
@@ -3340,69 +3450,13 @@ void applyTurnAngleCommand(
   Serial.print(" angle=");
   Serial.print(angleDegrees);
   Serial.print(" current=");
-  Serial.print(headingDegrees, 1);
+  Serial.print(currentYbHeadingDegrees(), 1);
   Serial.print(" target=");
   Serial.println(turnTargetHeadingDegrees, 1);
   SerialBT.print("STATUS;TURN=START;TID=");
   SerialBT.print(requestId);
   SerialBT.print(";TARGET=");
   SerialBT.println(turnTargetHeadingDegrees, 1);
-}
-
-void updateTurnControl(uint32_t now) {
-  if (!turnControlActive) {
-    return;
-  }
-
-  const bool freshCommand = lastValidBtCommandMs != 0 && now - lastValidBtCommandMs <= BT_COMMAND_TIMEOUT_MS;
-  if (!armed || !freshCommand) {
-    cancelTurnControl();
-    return;
-  }
-
-  if (!hasUsableHeading(now)) {
-    forceNeutralAndDisarm();
-    SerialBT.println("STATUS;ARMED=0;FAULT=HEADING_UNAVAILABLE");
-    return;
-  }
-
-  if (now - turnStartedMs > TURN_CONTROL_TIMEOUT_MS) {
-    cancelTurnControl();
-    turnControlCompleted = true;
-    completedTurnRequestId = activeTurnRequestId;
-    SerialBT.print("STATUS;TURN=TIMEOUT;TID=");
-    SerialBT.println(activeTurnRequestId);
-    return;
-  }
-
-  const float errorDegrees = shortestAngleError(turnTargetHeadingDegrees, headingDegrees);
-  lastTurnErrorDegrees = errorDegrees;
-  const float absError = fabs(errorDegrees);
-  if (absError <= TURN_DONE_DEGREES) {
-    cancelTurnControl();
-    turnControlCompleted = true;
-    completedTurnRequestId = activeTurnRequestId;
-    SerialBT.print("STATUS;TURN=DONE;TID=");
-    SerialBT.print(activeTurnRequestId);
-    SerialBT.print(";ERR=");
-    SerialBT.println(errorDegrees, 1);
-    return;
-  }
-
-  const float speedRatio = min(absError, TURN_SLOWDOWN_DEGREES) / TURN_SLOWDOWN_DEGREES;
-  const int8_t outerPercent = static_cast<int8_t>(
-    TURN_MIN_OUTER_PERCENT + (TURN_MAX_OUTER_PERCENT - TURN_MIN_OUTER_PERCENT) * speedRatio
-  );
-  int8_t rawLeft = TURN_INNER_PERCENT;
-  int8_t rawRight = outerPercent;
-  if (errorDegrees > 0.0f) {
-    rawLeft = outerPercent;
-    rawRight = TURN_INNER_PERCENT;
-  }
-
-  requestedLeftPercent = applyTurnEscDirection(rawLeft, turnLeftEscReversed);
-  requestedRightPercent = applyTurnEscDirection(rawRight, turnRightEscReversed);
-  applyVoiceLimits(requestedLeftPercent, requestedRightPercent);
 }
 
 void applyHeadingLockCommand(
@@ -3415,10 +3469,6 @@ void applyHeadingLockCommand(
   uint16_t requestId,
   bool hasTargetHeading,
   float targetHeadingDegrees,
-  bool hasTargetOffset,
-  int16_t targetOffsetDegrees,
-  bool leftEscReversed,
-  bool rightEscReversed,
   CommandSource source
 ) {
   const uint32_t now = millis();
@@ -3429,13 +3479,27 @@ void applyHeadingLockCommand(
     cancelHeadingLockControl();
     requestedLeftPercent = 0;
     requestedRightPercent = 0;
+    reportedLeftPercent = 0;
+    reportedRightPercent = 0;
     Serial.println("Heading lock cancelled by command");
     SerialBT.println("STATUS;HLOCK=OFF");
     return;
   }
 
   if (!hasUsableFirmwareHeading(now)) {
-    SerialBT.println("ERR;YB_HEADING_UNAVAILABLE");
+    SerialBT.print("ERR;YB_HEADING_UNAVAILABLE;YBIMU=");
+    SerialBT.print(ybImuAvailable ? 1 : 0);
+    SerialBT.print(";YBINIT=");
+    SerialBT.print(ybHeadingInitialized ? 1 : 0);
+    SerialBT.print(";YBAGE=");
+    SerialBT.print(ybHeadingAgeMs(now));
+    SerialBT.print(";HSRC=");
+    SerialBT.print(activeHeadingSourceName(now));
+    if (ybHeadingInitialized) {
+      SerialBT.print(";YBHDG=");
+      SerialBT.print(currentYbHeadingDegrees(), 1);
+    }
+    SerialBT.println();
     Serial.println("Heading lock rejected: Yahboom heading unavailable");
     return;
   }
@@ -3451,34 +3515,22 @@ void applyHeadingLockCommand(
   headingLockBasePercent = clampHeadingLockBasePercent(basePercent, source);
   headingLockToleranceDegrees = toleranceDegrees;
   headingLockFullCorrectionDegrees = fullCorrectionDegrees;
-  headingLockNeutralReversePercent = neutralReversePercent;
-  headingLockLeftEscReversed = leftEscReversed;
-  headingLockRightEscReversed = rightEscReversed;
+  headingLockNeutralReversePercent = HEADING_LOCK_REVERSE_MAX_OUTPUT_PERCENT;
 
-  if (headingLockActive && requestId == activeHeadingLockRequestId && !hasTargetHeading && !hasTargetOffset) {
+  const bool sameActiveHeadingLockRequest = headingLockActive && requestId == activeHeadingLockRequestId;
+  if (sameActiveHeadingLockRequest && !hasTargetHeading) {
     return;
   }
-
-  const bool duplicateConsumedOffset =
-    hasTargetOffset &&
-    headingLockOffsetRequestConsumed &&
-    requestId == consumedHeadingLockOffsetRequestId;
-  const bool shouldApplyTargetOffset = hasTargetOffset && !duplicateConsumedOffset;
 
   activeHeadingLockRequestId = requestId;
   if (hasTargetHeading) {
     headingLockTargetDegrees = normalizeCompass360(targetHeadingDegrees);
-  } else if (shouldApplyTargetOffset) {
-    const float offsetBase = headingLockActive ? headingLockTargetDegrees : currentYbHeadingDegrees();
-    headingLockTargetDegrees = normalizeCompass360(offsetBase + static_cast<float>(targetOffsetDegrees));
   } else if (!headingLockActive) {
     headingLockTargetDegrees = currentYbHeadingDegrees();
   }
-  if (shouldApplyTargetOffset) {
-    headingLockOffsetRequestConsumed = true;
-    consumedHeadingLockOffsetRequestId = requestId;
+  if (!sameActiveHeadingLockRequest) {
+    resetHeadingLockRuntimeState();
   }
-  resetHeadingLockRuntimeState();
   headingLockActive = true;
 
   Serial.print("Heading lock start hid=");
@@ -3487,14 +3539,8 @@ void applyHeadingLockCommand(
   Serial.print(headingLockBasePercent);
   Serial.print(" target=");
   Serial.print(headingLockTargetDegrees, 1);
-  if (shouldApplyTargetOffset) {
-    Serial.print(" offset=");
-    Serial.print(targetOffsetDegrees);
-  } else if (hasTargetHeading) {
+  if (hasTargetHeading) {
     Serial.print(" explicit_target=1");
-  } else if (duplicateConsumedOffset) {
-    Serial.print(" stale_offset_ignored=");
-    Serial.print(targetOffsetDegrees);
   }
   Serial.print(" tolerance=");
   Serial.print(headingLockToleranceDegrees);
@@ -3506,14 +3552,8 @@ void applyHeadingLockCommand(
   SerialBT.print(requestId);
   SerialBT.print(";TARGET=");
   SerialBT.print(headingLockTargetDegrees, 1);
-  if (shouldApplyTargetOffset) {
-    SerialBT.print(";HOFF=");
-    SerialBT.print(targetOffsetDegrees);
-  } else if (hasTargetHeading) {
+  if (hasTargetHeading) {
     SerialBT.print(";TARGET_SRC=CMD");
-  } else if (duplicateConsumedOffset) {
-    SerialBT.print(";HOFF_IGNORED=");
-    SerialBT.print(targetOffsetDegrees);
   }
   SerialBT.print(";HTOL=");
   SerialBT.print(headingLockToleranceDegrees);
@@ -3528,19 +3568,45 @@ void updateHeadingLockControl(uint32_t now) {
     return;
   }
 
+  const int8_t previousCorrectionPercent = lastHeadingLockCorrectionPercent;
   const bool freshCommand = lastValidBtCommandMs != 0 && now - lastValidBtCommandMs <= BT_COMMAND_TIMEOUT_MS;
   if (!armed || !freshCommand) {
     cancelHeadingLockControl();
     requestedLeftPercent = 0;
     requestedRightPercent = 0;
+    reportedLeftPercent = 0;
+    reportedRightPercent = 0;
     return;
   }
 
-  if (!hasUsableFirmwareHeading(now)) {
-    forceNeutralAndDisarm();
-    SerialBT.println("STATUS;ARMED=0;FAULT=YB_HEADING_UNAVAILABLE");
+  if (lastHeadingLockControlMs != 0 && now - lastHeadingLockControlMs < CONTROL_TICK_MS) {
     return;
   }
+  lastHeadingLockControlMs = now;
+
+  if (!hasUsableFirmwareHeading(now)) {
+    headingLockHeadingUnavailableWarningActive = true;
+    requestedLeftPercent = 0;
+    requestedRightPercent = 0;
+    reportedLeftPercent = 0;
+    reportedRightPercent = 0;
+    lastHeadingLockCorrectionPercent = 0;
+    lastHeadingLockPdPercent = 0.0f;
+    lastHeadingLockTargetRateDegS = 0.0f;
+    lastHeadingLockRateErrorDegS = 0.0f;
+    lastHeadingLockRateDotDegS2 = 0.0f;
+    lastHeadingLockInnerPercent = 0.0f;
+    headingLockDisturbancePercent *= HEADING_LOCK_OBSERVER_DECAY;
+    headingLockAdaptiveBoostFloatPercent *= HEADING_LOCK_ADAPTIVE_BOOST_DECAY;
+    if (fabs(headingLockAdaptiveBoostFloatPercent) < 0.1f) {
+      headingLockAdaptiveBoostFloatPercent = 0.0f;
+    }
+    lastHeadingLockBrakePercent = 0.0f;
+    headingLockAdaptiveBoostPercent = static_cast<int8_t>(roundf(headingLockAdaptiveBoostFloatPercent));
+    Serial.println("Heading lock waiting: Yahboom heading unavailable; keeping heading lock active");
+    return;
+  }
+  headingLockHeadingUnavailableWarningActive = false;
 
   const float currentHeadingDegrees = currentYbHeadingDegrees();
   const float errorDegrees = shortestAngleError(headingLockTargetDegrees, currentHeadingDegrees);
@@ -3548,27 +3614,99 @@ void updateHeadingLockControl(uint32_t now) {
   const float absError = fabs(errorDegrees);
   const float errorSign = signOrZero(errorDegrees);
   const float toleranceDegrees = static_cast<float>(headingLockToleranceDegrees);
+  const float quietHoldToleranceDegrees =
+    toleranceDegrees + HEADING_LOCK_QUIET_HOLD_MARGIN_DEGREES;
+  const bool inQuietHoldBand = absError <= quietHoldToleranceDegrees;
+
+  if (turnControlActive) {
+    lastTurnErrorDegrees = errorDegrees;
+    if (now - turnStartedMs > TURN_CONTROL_TIMEOUT_MS) {
+      const uint16_t timedOutRequestId = activeTurnRequestId;
+      cancelHeadingLockControl();
+      turnControlActive = false;
+      turnControlCompleted = true;
+      completedTurnRequestId = timedOutRequestId;
+      requestedLeftPercent = 0;
+      requestedRightPercent = 0;
+      reportedLeftPercent = 0;
+      reportedRightPercent = 0;
+      SerialBT.print("STATUS;TURN=TIMEOUT;TID=");
+      SerialBT.print(timedOutRequestId);
+      SerialBT.print(";ERR=");
+      SerialBT.println(errorDegrees, 1);
+      return;
+    }
+    if (absError <= TURN_DONE_DEGREES) {
+      const uint16_t doneRequestId = activeTurnRequestId;
+      cancelHeadingLockControl();
+      turnControlActive = false;
+      turnControlCompleted = true;
+      completedTurnRequestId = doneRequestId;
+      requestedLeftPercent = 0;
+      requestedRightPercent = 0;
+      reportedLeftPercent = 0;
+      reportedRightPercent = 0;
+      SerialBT.print("STATUS;TURN=DONE;TID=");
+      SerialBT.print(doneRequestId);
+      SerialBT.print(";ERR=");
+      SerialBT.println(errorDegrees, 1);
+      return;
+    }
+  }
 
   float headingRateDegS = currentYbHeadingRateDegS();
   if (!isfinite(headingRateDegS)) {
     headingRateDegS = 0.0f;
   }
+  float headingDtSeconds = 0.0f;
   if (previousHeadingLockRateValid && previousHeadingLockRateMs != now) {
-    const float dtSeconds = static_cast<float>(now - previousHeadingLockRateMs) / 1000.0f;
-    if (dtSeconds > 0.0f && dtSeconds <= 0.2f) {
-      const float diffRateDegS = shortestAngleError(currentHeadingDegrees, previousHeadingLockHeadingDegrees) / dtSeconds;
+    headingDtSeconds = static_cast<float>(now - previousHeadingLockRateMs) / 1000.0f;
+    if (headingDtSeconds > 0.0f && headingDtSeconds <= 0.2f) {
+      const float diffRateDegS = shortestAngleError(currentHeadingDegrees, previousHeadingLockHeadingDegrees) / headingDtSeconds;
       if (isfinite(diffRateDegS) && fabs(headingRateDegS) < 0.5f) {
         headingRateDegS = diffRateDegS;
       }
     }
   }
+  float rateDotDegS2 = 0.0f;
+  if (previousHeadingLockRateDotValid && headingDtSeconds > 0.0f && headingDtSeconds <= 0.2f) {
+    const float observedRateDotDegS2 = (headingRateDegS - previousHeadingLockRateDegS) / headingDtSeconds;
+    if (isfinite(observedRateDotDegS2) && fabs(observedRateDotDegS2) <= HEADING_LOCK_MAX_RATE_DOT_DEG_S2) {
+      rateDotDegS2 = observedRateDotDegS2;
+    }
+  }
   previousHeadingLockHeadingDegrees = currentHeadingDegrees;
   previousHeadingLockRateMs = now;
   previousHeadingLockRateValid = true;
+  previousHeadingLockRateDegS = headingRateDegS;
+  previousHeadingLockRateDotValid = true;
   lastHeadingLockRateDegS = headingRateDegS;
+  lastHeadingLockRateDotDegS2 = rateDotDegS2;
   const float absRate = fabs(headingRateDegS);
+  const float rateSign = signOrZero(headingRateDegS);
 
-  if (absError <= toleranceDegrees) {
+  const float fullCorrectionDegrees = max(
+    static_cast<float>(headingLockFullCorrectionDegrees),
+    toleranceDegrees + 1.0f
+  );
+  const float activeRange = fullCorrectionDegrees - toleranceDegrees;
+  const float targetRateGain = activeRange > 0.0f
+    ? HEADING_LOCK_MAX_TARGET_RATE_DEG_S / activeRange
+    : 0.0f;
+  const float targetRateDegS = inQuietHoldBand
+    ? 0.0f
+    : constrain(errorDegrees * targetRateGain, -HEADING_LOCK_MAX_TARGET_RATE_DEG_S, HEADING_LOCK_MAX_TARGET_RATE_DEG_S);
+  const float rateErrorDegS = targetRateDegS - headingRateDegS;
+  const float innerPercent =
+    HEADING_LOCK_RATE_KP_PERCENT_PER_DEGREE_S * rateErrorDegS -
+    HEADING_LOCK_ACCEL_DAMP_PERCENT_PER_DEGREE_S2 * rateDotDegS2;
+  lastHeadingLockTargetRateDegS = targetRateDegS;
+  lastHeadingLockRateErrorDegS = rateErrorDegS;
+  lastHeadingLockInnerPercent = innerPercent;
+  lastHeadingLockPdPercent = innerPercent;
+
+  if (inQuietHoldBand) {
+    headingLockDivergenceWarningActive = false;
     headingLockDivergenceStartedMs = 0;
     headingLockDivergenceStartAbsError = 0.0f;
     headingLockDivergenceErrorSign = 0.0f;
@@ -3583,30 +3721,17 @@ void updateHeadingLockControl(uint32_t now) {
     now - headingLockDivergenceStartedMs >= HEADING_LOCK_DIVERGENCE_WINDOW_MS &&
     absError >= headingLockDivergenceStartAbsError + HEADING_LOCK_DIVERGENCE_DEGREES
   ) {
-    forceNeutralAndDisarm();
-    SerialBT.println("STATUS;ARMED=0;FAULT=HEADING_LOCK_DIVERGED");
-    Serial.println("Heading lock diverged; disarmed");
-    return;
+    headingLockDivergenceWarningActive = true;
+    headingLockDivergenceStartedMs = now;
+    headingLockDivergenceStartAbsError = absError;
+    Serial.println("Heading lock diverged; warning only, continuing heading lock");
   }
 
-  const float fullCorrectionDegrees = max(
-    static_cast<float>(headingLockFullCorrectionDegrees),
-    toleranceDegrees + 1.0f
-  );
-  const float activeRange = fullCorrectionDegrees - toleranceDegrees;
-  const float kp = min(
-    HEADING_LOCK_MAX_KP_PERCENT_PER_DEGREE,
-    activeRange > 0.0f
-      ? static_cast<float>(HEADING_LOCK_MAX_CORRECTION_PERCENT) / activeRange
-      : HEADING_LOCK_MAX_KP_PERCENT_PER_DEGREE
-  );
-  const float pdPercent = kp * errorDegrees - HEADING_LOCK_KD_PERCENT_PER_DEGREE_S * headingRateDegS;
-  lastHeadingLockPdPercent = pdPercent;
+  const float pdPercent = innerPercent;
 
   const float predictedErrorDegrees = errorDegrees - headingRateDegS * HEADING_LOCK_LOOKAHEAD_SECONDS;
   lastHeadingLockPredictedErrorDegrees = predictedErrorDegrees;
   const float predictedSign = signOrZero(predictedErrorDegrees);
-  const float rateSign = signOrZero(headingRateDegS);
   const bool movingTowardTarget = errorSign != 0.0f && errorSign == rateSign;
   const bool willOvershoot = movingTowardTarget && predictedSign != 0.0f && predictedSign != errorSign;
   const bool nearStopLine = fabs(predictedErrorDegrees) <= HEADING_LOCK_BRAKE_WINDOW_DEGREES;
@@ -3654,17 +3779,81 @@ void updateHeadingLockControl(uint32_t now) {
     }
   }
 
+  const bool observerCanUpdate =
+    !brakeActive &&
+    headingDtSeconds > 0.0f &&
+    fabs(rateDotDegS2) <= HEADING_LOCK_MAX_RATE_DOT_DEG_S2 &&
+    abs(previousCorrectionPercent) >= ESC_MIN_EFFECTIVE_THROTTLE_PERCENT &&
+    abs(previousCorrectionPercent) < HEADING_LOCK_MAX_CORRECTION_PERCENT;
+  if (observerCanUpdate) {
+    const float observedDisturbancePercent = constrain(
+      rateDotDegS2 / HEADING_LOCK_OBSERVER_B0_DEG_S2_PER_PERCENT -
+        static_cast<float>(previousCorrectionPercent),
+      -HEADING_LOCK_OBSERVER_MAX_PERCENT,
+      HEADING_LOCK_OBSERVER_MAX_PERCENT
+    );
+    headingLockDisturbancePercent +=
+      (observedDisturbancePercent - headingLockDisturbancePercent) * HEADING_LOCK_OBSERVER_ALPHA;
+  } else {
+    headingLockDisturbancePercent *= HEADING_LOCK_OBSERVER_DECAY;
+    if (fabs(headingLockDisturbancePercent) < 0.1f) {
+      headingLockDisturbancePercent = 0.0f;
+    }
+  }
+
+  const bool boostCanUpdate =
+    !brakeActive &&
+    headingDtSeconds > 0.0f &&
+    headingDtSeconds <= 0.2f &&
+    absError > quietHoldToleranceDegrees &&
+    fabs(rateErrorDegS) > HEADING_LOCK_RATE_ERROR_INTEGRAL_DEADBAND_DEG_S &&
+    fabs(rateDotDegS2) <= HEADING_LOCK_MAX_RATE_DOT_DEG_S2;
+  if (boostCanUpdate) {
+    const float rateErrorSign = signOrZero(rateErrorDegS);
+    const float integralInputDegS =
+      rateErrorDegS - rateErrorSign * HEADING_LOCK_RATE_ERROR_INTEGRAL_DEADBAND_DEG_S;
+    const float maxStep = HEADING_LOCK_ADAPTIVE_BOOST_RATE_LIMIT_PERCENT_PER_SECOND * headingDtSeconds;
+    const float minStep = HEADING_LOCK_ADAPTIVE_BOOST_MIN_RATE_PERCENT_PER_SECOND * headingDtSeconds;
+    float boostStep = HEADING_LOCK_RATE_KI_PERCENT_PER_DEGREE_S_SECOND * integralInputDegS * headingDtSeconds;
+    if (fabs(boostStep) < minStep) {
+      boostStep = rateErrorSign * minStep;
+    }
+    boostStep = constrain(boostStep, -maxStep, maxStep);
+    headingLockAdaptiveBoostFloatPercent = constrain(
+      headingLockAdaptiveBoostFloatPercent + boostStep,
+      -HEADING_LOCK_ADAPTIVE_BOOST_MAX_PERCENT,
+      HEADING_LOCK_ADAPTIVE_BOOST_MAX_PERCENT
+    );
+  } else {
+    const bool shouldClearBoost =
+      inQuietHoldBand && absRate <= HEADING_LOCK_SETTLE_RATE_DEG_S;
+    headingLockAdaptiveBoostFloatPercent *= shouldClearBoost
+      ? HEADING_LOCK_ADAPTIVE_BOOST_DECAY
+      : HEADING_LOCK_ADAPTIVE_BOOST_HOLD_DECAY;
+    if (fabs(headingLockAdaptiveBoostFloatPercent) < 0.1f) {
+      headingLockAdaptiveBoostFloatPercent = 0.0f;
+    }
+  }
+  if (inQuietHoldBand && absRate <= HEADING_LOCK_SETTLE_RATE_DEG_S) {
+    headingLockAdaptiveBoostFloatPercent = 0.0f;
+  }
+  headingLockAdaptiveBoostPercent = static_cast<int8_t>(roundf(constrain(
+    headingLockAdaptiveBoostFloatPercent,
+    -HEADING_LOCK_ADAPTIVE_BOOST_MAX_PERCENT,
+    HEADING_LOCK_ADAPTIVE_BOOST_MAX_PERCENT
+  )));
+
   float correctionFloat = 0.0f;
   lastHeadingLockBrakePercent = 0.0f;
   if (brakeActive) {
     correctionFloat = -headingLockBrakeStartRateSign * brakePercent;
     lastHeadingLockBrakePercent = correctionFloat;
-  } else if (absError <= toleranceDegrees && absRate <= HEADING_LOCK_SETTLE_RATE_DEG_S) {
+  } else if (inQuietHoldBand && absRate <= HEADING_LOCK_SETTLE_RATE_DEG_S) {
     headingLockPhase = HeadingLockPhase::Settle;
     correctionFloat = 0.0f;
   } else {
     headingLockPhase = HeadingLockPhase::Correct;
-    correctionFloat = pdPercent;
+    correctionFloat = pdPercent + headingLockAdaptiveBoostFloatPercent;
   }
 
   int8_t correction = 0;
@@ -3674,15 +3863,34 @@ void updateHeadingLockControl(uint32_t now) {
       -static_cast<float>(HEADING_LOCK_MAX_CORRECTION_PERCENT),
       static_cast<float>(HEADING_LOCK_MAX_CORRECTION_PERCENT)
     )));
+    const bool neutralEffectiveMinimumAllowed =
+      headingLockBasePercent == 0 && absError > quietHoldToleranceDegrees;
+    const bool minimumCorrectionAllowed =
+      headingLockBasePercent != 0 || neutralEffectiveMinimumAllowed;
     if (
+      headingLockBasePercent == 0 &&
+      !neutralEffectiveMinimumAllowed &&
+      abs(correctionPercent) < HEADING_LOCK_MIN_NEUTRAL_EFFECTIVE_CORRECTION_PERCENT
+    ) {
+      correctionPercent = 0;
+    }
+    if (
+      minimumCorrectionAllowed &&
       headingLockPhase == HeadingLockPhase::Correct &&
       absError > toleranceDegrees &&
-      correctionPercent != 0 &&
-      abs(correctionPercent) < HEADING_LOCK_MIN_CORRECTION_PERCENT
+      fabs(correctionFloat) > 0.1f &&
+      abs(correctionPercent) < (
+        neutralEffectiveMinimumAllowed
+          ? HEADING_LOCK_MIN_NEUTRAL_EFFECTIVE_CORRECTION_PERCENT
+          : HEADING_LOCK_MIN_CORRECTION_PERCENT
+      )
     ) {
-      correctionPercent = correctionPercent > 0
-        ? HEADING_LOCK_MIN_CORRECTION_PERCENT
-        : -HEADING_LOCK_MIN_CORRECTION_PERCENT;
+      const int minCorrectionPercent = neutralEffectiveMinimumAllowed
+        ? HEADING_LOCK_MIN_NEUTRAL_EFFECTIVE_CORRECTION_PERCENT
+        : HEADING_LOCK_MIN_CORRECTION_PERCENT;
+      correctionPercent = correctionFloat > 0.0f
+        ? minCorrectionPercent
+        : -minCorrectionPercent;
     }
     correction = static_cast<int8_t>(constrain(
       correctionPercent,
@@ -3692,8 +3900,9 @@ void updateHeadingLockControl(uint32_t now) {
   }
   lastHeadingLockCorrectionPercent = correction;
 
-  int rawLeft = headingLockBasePercent + correction;
-  int rawRight = headingLockBasePercent - correction;
+  const int signedCorrection = static_cast<int>(correction) * static_cast<int>(HEADING_LOCK_STEER_SIGN);
+  int rawLeft = headingLockBasePercent + signedCorrection;
+  int rawRight = headingLockBasePercent - signedCorrection;
   if (headingLockBasePercent >= 70) {
     rawLeft = max(0, rawLeft);
     rawRight = max(0, rawRight);
@@ -3710,10 +3919,10 @@ void updateHeadingLockControl(uint32_t now) {
 
   int8_t nextLeft = static_cast<int8_t>(constrain(rawLeft, -100, 100));
   int8_t nextRight = static_cast<int8_t>(constrain(rawRight, -100, 100));
-  nextLeft = applyTurnEscDirection(nextLeft, headingLockLeftEscReversed);
-  nextRight = applyTurnEscDirection(nextRight, headingLockRightEscReversed);
   applyHeadingLockLimits(nextLeft, nextRight);
 
+  reportedLeftPercent = nextLeft;
+  reportedRightPercent = nextRight;
   requestedLeftPercent = nextLeft;
   requestedRightPercent = nextRight;
 }
@@ -3868,6 +4077,9 @@ void applyBluetoothLine(char* line) {
   if (applyTrackLogLine(line, SerialBT)) {
     return;
   }
+  if (applyEscConfigLine(line, SerialBT)) {
+    return;
+  }
 
   bool sawArm = false;
   bool sawLeft = false;
@@ -3883,16 +4095,14 @@ void applyBluetoothLine(char* line) {
   bool sawHeadingLockFullCorrection = false;
   bool sawHeadingLockNeutralReverse = false;
   bool sawHeadingLockTarget = false;
-  bool sawHeadingLockTargetOffset = false;
   bool sawVoicePowerLimit = false;
-  bool sawHeadingSource = false;
-  bool sawPhoneHeading = false;
   bool badSource = false;
   bool badMode = false;
   bool badTurnToken = false;
   bool badHeadingLockToken = false;
   bool badVoiceLimitToken = false;
   bool badHeadingSourceToken = false;
+  bool badEscConfigToken = false;
   bool nextArmed = false;
   int8_t nextLeftPercent = 0;
   int8_t nextRightPercent = 0;
@@ -3908,12 +4118,7 @@ void applyBluetoothLine(char* line) {
   uint16_t nextHeadingLockFullCorrectionDegrees = DEFAULT_HEADING_LOCK_FULL_CORRECTION_DEGREES;
   uint16_t nextHeadingLockNeutralReversePercent = DEFAULT_HEADING_LOCK_NEUTRAL_REVERSE_PERCENT;
   float nextHeadingLockTargetDegrees = 0.0f;
-  int16_t nextHeadingLockTargetOffsetDegrees = 0;
-  float nextPhoneHeadingDegrees = 0.0f;
   bool nextHeadingLockEnabled = false;
-  bool nextUsePhoneHeading = false;
-  bool nextLeftEscReversed = false;
-  bool nextRightEscReversed = false;
 
   char* token = strtok(line, ";");
   while (token != nullptr) {
@@ -3985,17 +4190,6 @@ void applyBluetoothLine(char* line) {
       badHeadingLockToken = badHeadingLockToken || sawHeadingLockTarget;
       sawHeadingLockTarget = true;
     } else if (
-      parseSignedToken(
-        token,
-        "HOFF=",
-        MIN_HEADING_LOCK_TARGET_OFFSET_DEGREES,
-        MAX_HEADING_LOCK_TARGET_OFFSET_DEGREES,
-        nextHeadingLockTargetOffsetDegrees
-      )
-    ) {
-      badHeadingLockToken = badHeadingLockToken || sawHeadingLockTargetOffset;
-      sawHeadingLockTargetOffset = true;
-    } else if (
       parseUnsignedToken(
         token,
         "VMAX=",
@@ -4006,16 +4200,10 @@ void applyBluetoothLine(char* line) {
     ) {
       badVoiceLimitToken = badVoiceLimitToken || sawVoicePowerLimit;
       sawVoicePowerLimit = true;
-    } else if (parseHeadingSourceToken(token, nextUsePhoneHeading)) {
-      badHeadingSourceToken = badHeadingSourceToken || sawHeadingSource;
-      sawHeadingSource = true;
-    } else if (parseHeadingDegreesToken(token, "PHDG=", nextPhoneHeadingDegrees)) {
-      badHeadingSourceToken = badHeadingSourceToken || sawPhoneHeading;
-      sawPhoneHeading = true;
-    } else if (parseBoolToken(token, "LREV=", nextLeftEscReversed)) {
-      // Optional Android-side ESC direction setting for autonomous angle turns.
-    } else if (parseBoolToken(token, "RREV=", nextRightEscReversed)) {
-      // Optional Android-side ESC direction setting for autonomous angle turns.
+    } else if (parseHeadingSourceToken(token)) {
+      // H_SRC=IMU is accepted for protocol compatibility; control always uses YB IMU.
+    } else if (strncmp(token, "LREV=", 5) == 0 || strncmp(token, "RREV=", 5) == 0) {
+      badEscConfigToken = true;
     } else if (strncmp(token, "SRC=", 4) == 0) {
       badSource = true;
     } else if (strncmp(token, "MODE=", 5) == 0) {
@@ -4023,9 +4211,7 @@ void applyBluetoothLine(char* line) {
     } else if (
       strncmp(token, "DIR=", 4) == 0 ||
       strncmp(token, "ANGLE=", 6) == 0 ||
-      strncmp(token, "TID=", 4) == 0 ||
-      strncmp(token, "LREV=", 5) == 0 ||
-      strncmp(token, "RREV=", 5) == 0
+      strncmp(token, "TID=", 4) == 0
     ) {
       badTurnToken = true;
     } else if (
@@ -4035,8 +4221,7 @@ void applyBluetoothLine(char* line) {
       strncmp(token, "HTOL=", 5) == 0 ||
       strncmp(token, "HFULL=", 6) == 0 ||
       strncmp(token, "HREV=", 5) == 0 ||
-      strncmp(token, "TARGET=", 7) == 0 ||
-      strncmp(token, "HOFF=", 5) == 0
+      strncmp(token, "TARGET=", 7) == 0
     ) {
       badHeadingLockToken = true;
     } else if (strncmp(token, "VMAX=", 5) == 0) {
@@ -4077,18 +4262,29 @@ void applyBluetoothLine(char* line) {
     return;
   }
 
-  const uint32_t commandNow = millis();
-  if (sawHeadingSource) {
-    phoneHeadingEnabled = nextUsePhoneHeading;
-    if (!phoneHeadingEnabled) {
-      lastPhoneHeadingMs = 0;
-    }
+  if (badEscConfigToken) {
+    SerialBT.println("ERR;ESC_CONFIG_REQUIRES_ESC_CFG");
+    Serial.println("Bluetooth command rejected: ESC config token outside ESC_CFG");
+    return;
   }
-  if (phoneHeadingEnabled && sawPhoneHeading) {
-    phoneHeadingDegrees = nextPhoneHeadingDegrees;
-    headingDegrees = normalizeAngle180(nextPhoneHeadingDegrees);
-    headingFilterInitialized = true;
-    lastPhoneHeadingMs = commandNow;
+
+  if (nextMode == CommandMode::KeepAlive) {
+    if (!sawArm || !nextArmed) {
+      SerialBT.println("ERR;KEEPALIVE_REQUIRES_ARM");
+      Serial.println("Keepalive rejected: missing ARM=1");
+      return;
+    }
+    if (!armed) {
+      SerialBT.println("ERR;VOICE_CANNOT_ARM");
+      Serial.println("Keepalive rejected: cannot arm from locked state");
+      return;
+    }
+    lastValidBtCommandMs = millis();
+    lastCommandSource = nextSource;
+    if (!headingLockActive && !turnControlActive) {
+      lastCommandMode = CommandMode::KeepAlive;
+    }
+    return;
   }
 
   if (nextMode == CommandMode::TurnAngle) {
@@ -4116,9 +4312,7 @@ void applyBluetoothLine(char* line) {
       nextDirection,
       nextAngleDegrees,
       nextTurnRequestId,
-      static_cast<uint8_t>(nextVoicePowerLimitPercent),
-      nextLeftEscReversed,
-      nextRightEscReversed
+      static_cast<uint8_t>(nextVoicePowerLimitPercent)
     );
     return;
   }
@@ -4144,11 +4338,6 @@ void applyBluetoothLine(char* line) {
       Serial.println("Heading lock rejected: missing HID");
       return;
     }
-    if (sawHeadingLockTarget && sawHeadingLockTargetOffset) {
-      SerialBT.println("ERR;BAD_HEADING_LOCK_COMMAND");
-      Serial.println("Heading lock rejected: TARGET and HOFF conflict");
-      return;
-    }
     if (nextHeadingLockFullCorrectionDegrees <= nextHeadingLockToleranceDegrees) {
       SerialBT.println("ERR;BAD_HEADING_LOCK_COMMAND");
       Serial.println("Heading lock rejected: full correction angle must exceed tolerance");
@@ -4164,10 +4353,6 @@ void applyBluetoothLine(char* line) {
       nextHeadingLockRequestId,
       sawHeadingLockTarget,
       nextHeadingLockTargetDegrees,
-      sawHeadingLockTargetOffset,
-      nextHeadingLockTargetOffsetDegrees,
-      nextLeftEscReversed,
-      nextRightEscReversed,
       nextSource
     );
     return;
@@ -4192,6 +4377,8 @@ void applyBluetoothLine(char* line) {
 
   cancelAutonomousControl();
   armed = nextArmed;
+  reportedLeftPercent = nextArmed ? nextLeftPercent : 0;
+  reportedRightPercent = nextArmed ? nextRightPercent : 0;
   requestedLeftPercent = nextArmed ? nextLeftPercent : 0;
   requestedRightPercent = nextArmed ? nextRightPercent : 0;
   lastCommandSource = nextSource;
@@ -4203,8 +4390,12 @@ void applyBluetoothLine(char* line) {
   Serial.print(" src=");
   Serial.print(commandSourceName(lastCommandSource));
   Serial.print(" left=");
-  Serial.print(requestedLeftPercent);
+  Serial.print(reportedLeftPercent);
   Serial.print(" right=");
+  Serial.print(reportedRightPercent);
+  Serial.print(" requested_left=");
+  Serial.print(requestedLeftPercent);
+  Serial.print(" requested_right=");
   Serial.println(requestedRightPercent);
 }
 
@@ -4219,6 +4410,9 @@ void applySerialLine(char* line) {
     return;
   }
   if (applyTrackLogLine(line, Serial)) {
+    return;
+  }
+  if (applyEscConfigLine(line, Serial)) {
     return;
   }
 
@@ -4291,6 +4485,8 @@ void applyCommandTimeout(uint32_t now) {
     armed = false;
     requestedLeftPercent = 0;
     requestedRightPercent = 0;
+    reportedLeftPercent = 0;
+    reportedRightPercent = 0;
     cancelAutonomousControl();
     Serial.println("Bluetooth command timeout; state=DISARMED; throttle=NEUTRAL");
     SerialBT.println("STATUS;ARMED=0;FAULT=BT_TIMEOUT");
@@ -4314,9 +4510,9 @@ void publishBluetoothStatus(uint32_t now) {
   SerialBT.print(";FW=");
   SerialBT.print(FIRMWARE_VERSION);
   SerialBT.print(";L=");
-  SerialBT.print(requestedLeftPercent);
+  SerialBT.print(reportedLeftPercent);
   SerialBT.print(";R=");
-  SerialBT.print(requestedRightPercent);
+  SerialBT.print(reportedRightPercent);
   SerialBT.print(";CMD_SRC=");
   SerialBT.print(commandSourceName(lastCommandSource));
   SerialBT.print(";MODE=");
@@ -4393,14 +4589,16 @@ void publishBluetoothStatus(uint32_t now) {
   }
   SerialBT.print(";IGZB=");
   SerialBT.print(gyroZBiasDps, 3);
+  SerialBT.print(";YBINIT=");
+  SerialBT.print(ybHeadingInitialized ? 1 : 0);
+  SerialBT.print(";YBAGE=");
+  SerialBT.print(ybHeadingAgeMs(now));
+  if (ybHeadingInitialized) {
+    SerialBT.print(";YBHDG=");
+    SerialBT.print(currentYbHeadingDegrees(), 1);
+  }
   SerialBT.print(";HSRC=");
   SerialBT.print(activeHeadingSourceName(now));
-  if (phoneHeadingEnabled) {
-    SerialBT.print(";PHDG=");
-    SerialBT.print(phoneHeadingDegrees, 1);
-    SerialBT.print(";PHDG_AGE=");
-    SerialBT.print(lastPhoneHeadingMs == 0 ? 9999 : now - lastPhoneHeadingMs);
-  }
   SerialBT.print(";MCAL=");
   SerialBT.print(magCalibrationStateName());
   SerialBT.print(";MCNT=");
@@ -4488,12 +4686,29 @@ void publishBluetoothStatus(uint32_t now) {
     SerialBT.print(headingLockPhaseName(headingLockPhase));
     SerialBT.print(";HRATE=");
     SerialBT.print(lastHeadingLockRateDegS, 1);
+    SerialBT.print(";HREF=");
+    SerialBT.print(lastHeadingLockTargetRateDegS, 1);
+    SerialBT.print(";HRERR=");
+    SerialBT.print(lastHeadingLockRateErrorDegS, 1);
+    SerialBT.print(";HRDOT=");
+    SerialBT.print(lastHeadingLockRateDotDegS2, 1);
     SerialBT.print(";HPRED=");
     SerialBT.print(lastHeadingLockPredictedErrorDegrees, 1);
     SerialBT.print(";HPD=");
     SerialBT.print(lastHeadingLockPdPercent, 1);
+    SerialBT.print(";HINNER=");
+    SerialBT.print(lastHeadingLockInnerPercent, 1);
+    SerialBT.print(";HFHAT=");
+    SerialBT.print(headingLockDisturbancePercent, 1);
     SerialBT.print(";HBRK=");
     SerialBT.print(lastHeadingLockBrakePercent, 1);
+    SerialBT.print(";HBOOST=");
+    SerialBT.print(headingLockAdaptiveBoostPercent);
+    if (headingLockHeadingUnavailableWarningActive) {
+      SerialBT.print(";HWARN=YB_HEADING_UNAVAILABLE");
+    } else if (headingLockDivergenceWarningActive) {
+      SerialBT.print(";HWARN=HEADING_LOCK_DIVERGED");
+    }
     SerialBT.print(";BMS=");
     if (headingLockPhase == HeadingLockPhase::Brake && headingLockBrakeStartedMs != 0) {
       const uint32_t elapsedMs = millis() - headingLockBrakeStartedMs;
@@ -4522,6 +4737,7 @@ void publishBluetoothStatus(uint32_t now) {
 void setup() {
   Serial.begin(115200);
   loadUnitId();
+  loadEscDirectionConfig();
   pinMode(ARM_BUTTON_PIN, INPUT_PULLUP);
   pinMode(STATUS_LED_PIN, OUTPUT);
 
@@ -4572,7 +4788,6 @@ void loop() {
   updateTrackLog(now);
   updateArmState();
   applyCommandTimeout(now);
-  updateTurnControl(now);
   updateHeadingLockControl(now);
   publishBluetoothStatus(now);
 
@@ -4582,8 +4797,10 @@ void loop() {
   lastTickMs = now;
 
   const bool canApplyBluetoothThrottle = armed && hasFreshBluetoothCommand(now);
-  const uint16_t leftTarget = canApplyBluetoothThrottle ? signedPercentToPulseUs(requestedLeftPercent) : ESC_NEUTRAL_US;
-  const uint16_t rightTarget = canApplyBluetoothThrottle ? signedPercentToPulseUs(requestedRightPercent) : ESC_NEUTRAL_US;
+  const int8_t leftEscOutputPercent = leftSemanticPercentToEscPercent(requestedLeftPercent);
+  const int8_t rightEscOutputPercent = rightSemanticPercentToEscPercent(requestedRightPercent);
+  const uint16_t leftTarget = canApplyBluetoothThrottle ? signedPercentToPulseUs(leftEscOutputPercent) : ESC_NEUTRAL_US;
+  const uint16_t rightTarget = canApplyBluetoothThrottle ? signedPercentToPulseUs(rightEscOutputPercent) : ESC_NEUTRAL_US;
 
   leftPulseUs = rampToward(leftPulseUs, constrain(leftTarget, ESC_REVERSE_US, ESC_FORWARD_US));
   rightPulseUs = rampToward(rightPulseUs, constrain(rightTarget, ESC_REVERSE_US, ESC_FORWARD_US));

@@ -668,22 +668,22 @@ private fun VoiceCommandListCard() {
             VoiceCommandItem(
                 name = "左转",
                 examples = "左转、左拐、往左、向左",
-                command = "SRC=VOICE;ARM=1;L=10;R=25",
+                command = "SRC=VOICE;ARM=1;MODE=TURN;DIR=LEFT;ANGLE=15",
             ),
             VoiceCommandItem(
                 name = "右转",
                 examples = "右转、右拐、往右、向右",
-                command = "SRC=VOICE;ARM=1;L=25;R=10",
+                command = "SRC=VOICE;ARM=1;MODE=TURN;DIR=RIGHT;ANGLE=15",
             ),
             VoiceCommandItem(
                 name = "角度转向",
                 examples = "左转30度、右转十五度、往左90度",
-                command = "App 用手机指南针本地计算目标航向，发送普通 L/R 心跳",
+                command = "App 发送 MODE=TURN，主控执行角度转向",
             ),
             VoiceCommandItem(
                 name = "保持航向",
                 examples = "保持航向、锁定当前航向、方向锁定、开启航向锁定",
-                command = "App 记录手机当前航向为目标，发送普通 L/R 心跳",
+                command = "App 发送 MODE=HEADING_LOCK，主控取当前 YB IMU 航向",
             ),
             VoiceCommandItem(
                 name = "取消航向锁定",

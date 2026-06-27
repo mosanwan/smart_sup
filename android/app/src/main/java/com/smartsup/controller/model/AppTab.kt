@@ -4,5 +4,6 @@ enum class AppTab(val title: String) {
     Navigation("导航"),
     Control("控制"),
     Voice("语音"),
+    Log("日志"),
     Settings("设置"),
 }

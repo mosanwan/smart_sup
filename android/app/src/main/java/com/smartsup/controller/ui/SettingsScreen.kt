@@ -25,8 +25,10 @@ import androidx.compose.material3.ExposedDropdownMenuDefaults
 import androidx.compose.material3.HorizontalDivider
 import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.outlined.Bluetooth
+import androidx.compose.material.icons.outlined.Check
 import androidx.compose.material.icons.outlined.CloudQueue
 import androidx.compose.material.icons.outlined.Download
+import androidx.compose.material.icons.outlined.Edit
 import androidx.compose.material.icons.outlined.Explore
 import androidx.compose.material.icons.outlined.KeyboardArrowDown
 import androidx.compose.material.icons.outlined.KeyboardArrowUp
@@ -75,7 +77,6 @@ import com.smartsup.controller.model.NavigationGpsSource
 import com.smartsup.controller.model.SettingsUiState
 import com.smartsup.controller.model.ThrottleGear
 import com.smartsup.controller.model.UpdateUiState
-import com.smartsup.controller.model.ybImuUncalibratedHeadingDegrees
 import kotlin.math.atan2
 import kotlin.math.roundToInt
 
@@ -766,7 +767,7 @@ private fun SafetySettingsCard(
             )
 
             ExpandToggleRow(
-                title = "高级控制参数",
+                title = "高级与安装配置",
                 expanded = showAdvanced,
                 onClick = { showAdvanced = !showAdvanced },
             )
@@ -782,12 +783,12 @@ private fun SafetySettingsCard(
                     onCheckedChange = onRampLimitChange,
                 )
                 SwitchRow(
-                    label = "左 ESC 方向反转",
+                    label = "左 ESC 安装反向",
                     checked = settingsState.leftEscReversed,
                     onCheckedChange = onLeftEscReversedChange,
                 )
                 SwitchRow(
-                    label = "右 ESC 方向反转",
+                    label = "右 ESC 安装反向",
                     checked = settingsState.rightEscReversed,
                     onCheckedChange = onRightEscReversedChange,
                 )
@@ -824,10 +825,10 @@ private fun SafetySettingsCard(
                     onValueChange = onHeadingLockNeutralPivotMinDifferenceChange,
                 )
                 PercentStepperRow(
-                    label = "空档最大转向差",
+                    label = "空档最大反推",
                     value = settingsState.headingLockNeutralPivotMaxDifferencePercent,
-                    minValue = 0,
-                    maxValue = 100,
+                    minValue = 20,
+                    maxValue = 60,
                     step = 5,
                     onValueChange = onHeadingLockNeutralPivotMaxDifferenceChange,
                 )
@@ -1051,6 +1052,13 @@ private fun GearPercentSettingsCard(
     settingsState: SettingsUiState,
     onGearThrottleChange: (ThrottleGear, Int) -> Unit,
 ) {
+    val gears = remember { ThrottleGear.entries.filterNot { it == ThrottleGear.Neutral } }
+    var editing by remember { mutableStateOf(false) }
+    var draftPercents by remember(settingsState.gearPercents) {
+        mutableStateOf(settingsState.gearPercents)
+    }
+    val displayedPercents = if (editing) draftPercents else settingsState.gearPercents
+
     Card(
         colors = CardDefaults.cardColors(containerColor = MaterialTheme.colorScheme.surface),
         modifier = Modifier.fillMaxWidth(),
@@ -1059,14 +1067,47 @@ private fun GearPercentSettingsCard(
             modifier = Modifier.padding(16.dp),
             verticalArrangement = Arrangement.spacedBy(12.dp),
         ) {
-            SettingsSectionHeader(
-                title = "档位百分比",
-                icon = Icons.Outlined.Speed,
-                color = Color(0xFF2E7D32),
-            )
+            Row(
+                modifier = Modifier.fillMaxWidth(),
+                horizontalArrangement = Arrangement.SpaceBetween,
+                verticalAlignment = Alignment.CenterVertically,
+            ) {
+                SettingsSectionHeader(
+                    title = "档位百分比",
+                    icon = Icons.Outlined.Speed,
+                    color = Color(0xFF2E7D32),
+                )
+                TextButton(
+                    onClick = {
+                        if (editing) {
+                            gears.forEach { gear ->
+                                val nextValue = draftPercents[gear] ?: gear.defaultThrottlePercent
+                                val currentValue = settingsState.gearPercents[gear] ?: gear.defaultThrottlePercent
+                                if (nextValue != currentValue) {
+                                    onGearThrottleChange(gear, nextValue)
+                                }
+                            }
+                            editing = false
+                        } else {
+                            draftPercents = settingsState.gearPercents
+                            editing = true
+                        }
+                    },
+                ) {
+                    Icon(
+                        imageVector = if (editing) Icons.Outlined.Check else Icons.Outlined.Edit,
+                        contentDescription = null,
+                        modifier = Modifier.size(18.dp),
+                    )
+                    Text(if (editing) "确认" else "修改")
+                }
+            }
             GearPercentMultiSlider(
-                gearPercents = settingsState.gearPercents,
-                onGearThrottleChange = onGearThrottleChange,
+                gearPercents = displayedPercents,
+                editing = editing,
+                onGearThrottleDraftChange = { gear, value ->
+                    draftPercents = draftPercents + (gear to value)
+                },
             )
         }
     }
@@ -1075,7 +1116,8 @@ private fun GearPercentSettingsCard(
 @Composable
 private fun GearPercentMultiSlider(
     gearPercents: Map<ThrottleGear, Int>,
-    onGearThrottleChange: (ThrottleGear, Int) -> Unit,
+    editing: Boolean,
+    onGearThrottleDraftChange: (ThrottleGear, Int) -> Unit,
 ) {
     val gears = remember { ThrottleGear.entries.filterNot { it == ThrottleGear.Neutral } }
     var activeGear by remember { mutableStateOf<ThrottleGear?>(null) }
@@ -1083,6 +1125,7 @@ private fun GearPercentMultiSlider(
     val displayPercents = gearPercents + draftValues
     val latestDisplayPercents = rememberUpdatedState(displayPercents)
     val latestDraftValues = rememberUpdatedState(draftValues)
+    val latestOnGearThrottleDraftChange = rememberUpdatedState(onGearThrottleDraftChange)
     val reverseColor = Color(0xFF1E88E5)
     val forwardColor = Color(0xFF2E7D32)
     val neutralColor = MaterialTheme.colorScheme.onSurfaceVariant
@@ -1110,7 +1153,10 @@ private fun GearPercentMultiSlider(
         modifier = Modifier
             .fillMaxWidth()
             .height(220.dp)
-            .pointerInput(gearPercents) {
+            .pointerInput(gearPercents, editing) {
+                if (!editing) {
+                    return@pointerInput
+                }
                 var draggingGear: ThrottleGear? = null
 
                 fun valueFromX(x: Float, width: Float): Int {
@@ -1141,7 +1187,7 @@ private fun GearPercentMultiSlider(
                         val gear = draggingGear
                         val value = gear?.let { latestDraftValues.value[it] }
                         if (gear != null && value != null) {
-                            onGearThrottleChange(gear, value)
+                            latestOnGearThrottleDraftChange.value(gear, value)
                         }
                         draggingGear = null
                         activeGear = null

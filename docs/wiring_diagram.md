@@ -12,8 +12,8 @@
 
 | 功能 | ESP32 引脚 |
 | --- | --- |
-| 左 ESC PWM | GPIO25 |
-| 右 ESC PWM | GPIO26 |
+| 左 ESC PWM | GPIO26 |
+| 右 ESC PWM | GPIO25 |
 | 电池电压 ADC | GPIO34 |
 | 左电流 ADC | GPIO36 |
 | 右电流 ADC | GPIO39 |
@@ -30,6 +30,8 @@
 | 状态 LED | GPIO2 |
 
 ## 接线重点
+
+当前线束接法下，固件最低 PWM 输出层已把逻辑左/右 ESC GPIO 对调：逻辑左通道走 `GPIO26`，逻辑右通道走 `GPIO25`。这只修正左右通道映射，不等同于 `LREV/RREV` 前后方向反转。
 
 - ESP32 只能由 DC-DC 的 5V 输出供电，接 `5V` 或 `VIN`，不要把 7S 电池直接接到 ESP32。
 - 所有低压模块的 `GND` 必须与电池负极、ESC 信号地共地。

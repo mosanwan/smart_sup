@@ -28,7 +28,8 @@ class MockControlTransport : ControlTransport {
             escTemperature = 0f,
             imuAvailable = true,
             ybImuAvailable = true,
-            headingDegrees = 0f,
+            headingDegrees = 31f,
+            ybHeadingDegrees = 31f,
             targetHeadingDegrees = null,
             ybAccelXG = 0.10f,
             ybAccelYG = -0.10f,
@@ -45,7 +46,7 @@ class MockControlTransport : ControlTransport {
             ybQuatZ = 0.27f,
             ybRollDegrees = -5.6f,
             ybPitchDegrees = -5.7f,
-            ybYawDegrees = 31.0f,
+            ybYawDegrees = -149.0f,
             leftOutputPercent = 0,
             rightOutputPercent = 0,
             statusFields = mapOf(
@@ -74,9 +75,13 @@ class MockControlTransport : ControlTransport {
                 "YBQZ" to "0.2700",
                 "YBR" to "-5.6",
                 "YBP" to "-5.7",
-                "YBY" to "31.0",
+                "YBY" to "-149.0",
+                "YBINIT" to "1",
+                "YBAGE" to "0",
+                "YBHDG" to "31.0",
                 "IQUAL" to "YB_TELEMETRY_ONLY",
-                "HDG" to "0.0",
+                "HDG" to "31.0",
+                "HSRC" to "YBIMU",
                 "GPS" to "1",
                 "PPS" to "0",
                 "GPS_SENT" to "0",
@@ -126,6 +131,9 @@ class MockControlTransport : ControlTransport {
     }
 
     override suspend fun sendRawLine(line: String) {
+        if (line.startsWith("ESC_CFG;") || line == "ESC_CFG") {
+            return
+        }
         telemetryState.value = telemetryState.value.copy(
             controllerMessage = "模拟原始命令：$line",
             lastSentCommand = line,

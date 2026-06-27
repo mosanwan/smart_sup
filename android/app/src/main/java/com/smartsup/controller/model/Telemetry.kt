@@ -8,6 +8,7 @@ data class Telemetry(
     val imuAvailable: Boolean? = null,
     val ybImuAvailable: Boolean? = null,
     val headingDegrees: Float? = null,
+    val ybHeadingDegrees: Float? = null,
     val targetHeadingDegrees: Float? = null,
     val ybAccelXG: Float? = null,
     val ybAccelYG: Float? = null,

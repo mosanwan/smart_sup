@@ -35,6 +35,8 @@ import com.smartsup.controller.model.CommandSource
 import com.smartsup.controller.model.ConnectionState
 import com.smartsup.controller.model.ControlCommand
 import com.smartsup.controller.model.ControlCommandMode
+import com.smartsup.controller.model.ControlLogEntry
+import com.smartsup.controller.model.ControlLogLevel
 import com.smartsup.controller.model.ControlUiState
 import com.smartsup.controller.model.FirmwareReleaseManifest
 import com.smartsup.controller.model.GpsTrackPoint
@@ -45,19 +47,14 @@ import com.smartsup.controller.model.ReleaseInfo
 import com.smartsup.controller.model.RealtimeVoiceMode
 import com.smartsup.controller.model.RealtimeTtsMode
 import com.smartsup.controller.model.SettingsUiState
+import com.smartsup.controller.model.Telemetry
 import com.smartsup.controller.model.ThrottleGear
 import com.smartsup.controller.model.TrackLogEvent
+import com.smartsup.controller.model.TurnDirection
 import com.smartsup.controller.model.UpdateUiState
 import com.smartsup.controller.model.VoiceAsrState
-import com.smartsup.controller.model.YB_IMU_HEADING_MODE_DEFAULT
-import com.smartsup.controller.model.YB_IMU_HEADING_MODE_YBY
-import com.smartsup.controller.model.YB_IMU_HEADING_MODE_YBY_INVERTED
-import com.smartsup.controller.model.calibrateYbImuHeadingToNorth
-import com.smartsup.controller.model.calibrateYbImuHeadingToPhone
-import com.smartsup.controller.model.coerceYbImuHeadingModeId
-import com.smartsup.controller.model.ybImuHeadingAlgorithmLabel
 import com.smartsup.controller.model.ybImuHeadingDegrees
-import com.smartsup.controller.model.ybImuHeadingModeLabel
+import com.smartsup.controller.model.ybImuControllerHeadingDegrees
 import com.smartsup.controller.transport.BluetoothClassicTransport
 import com.smartsup.controller.transport.ControlTransport
 import com.smartsup.controller.update.AppUpdateInstaller
@@ -106,10 +103,26 @@ class ControlViewModel(application: Application) : AndroidViewModel(application)
     private var autoReconnectAttempted = false
     private var discoveryReceiverRegistered = false
     private var lastHandledControllerErrorLine: String? = null
+    private var lastHandledControllerFaultLine: String? = null
+    private var nextControlLogId = 1L
+    private var lastLoggedSentCommand: String? = null
+    private var lastLoggedReceivedLine: String? = null
+    private var lastLoggedArmedState: Boolean? = null
+    private var lastLoggedHeadingLockState: String? = null
+    private var lastLoggedHeadingSource: String? = null
+    private var lastLoggedHeadingLockWarning: String? = null
+    private var lastHeadingLockSampleLogMs = 0L
+    private var lastHeadingLockSample: HeadingLockSample? = null
+    private var lastUnrequestedControllerLockLogMs = 0L
+    private var lastUnrequestedControllerUnlockLogMs = 0L
+    private var lastUnrequestedHeadingLockOffLogMs = 0L
+    private var pendingControllerArmedRequest: Boolean? = null
+    private var pendingControllerArmedRequestUntilMs = 0L
     private val releaseClient = GitHubReleaseClient(BuildConfig.GITHUB_REPOSITORY) {
         preferences.getString(KEY_GITHUB_TOKEN, null)
     }
     private val gpsTrackStore = GpsTrackStore(application)
+    private val controlLogFileStore by lazy { ControlLogFileStore(application) }
     private val imuTelemetryLogStore by lazy { ImuTelemetryLogStore(application) }
     private val stationKeepingLogStore by lazy { StationKeepingLogStore(application) }
     private val autoNavigationRouteStore = AutoNavigationRouteStore(application)
@@ -135,10 +148,10 @@ class ControlViewModel(application: Application) : AndroidViewModel(application)
     private var lastBluetoothDisconnectMessage: String? = null
     private var activeTurnCommand: ControlCommand? = null
     private var activeHeadingLockCommand: ControlCommand? = null
+    private var activeHeadingLockStartPending = false
+    private var activeHeadingLockOwnedByAutoNavigation = false
     private var appHeadingControlTargetDegrees: Float? = null
     private var appHeadingControlStartedAtMs = 0L
-    private val appHeadingErrorSamples = ArrayDeque<AppHeadingErrorSample>()
-    private var appHeadingAdaptiveBoostPercent = 0
     private var autoNavigationFilteredPoint: NavigationRoutePoint? = null
     private var autoNavigationLastRawPoint: NavigationRoutePoint? = null
     private var autoNavigationGpsInvalidSinceMs = 0L
@@ -215,16 +228,16 @@ class ControlViewModel(application: Application) : AndroidViewModel(application)
         VoiceSampleTarget("前进三档", "前进三档", "SRC=VOICE;ARM=1;L=60;R=60"),
         VoiceSampleTarget("前进四档", "前进四档", "SRC=VOICE;ARM=1;L=80;R=80"),
         VoiceSampleTarget("后退一档", "后退一档", "SRC=VOICE;ARM=1;L=-15;R=-15"),
-        VoiceSampleTarget("左转", "左转", "SRC=VOICE;ARM=1;L=10;R=25"),
-        VoiceSampleTarget("右转", "右转", "SRC=VOICE;ARM=1;L=25;R=10"),
-        VoiceSampleTarget("左转 15 度", "左转十五度", "App 本地左转 15 度，发送普通 L/R 心跳"),
-        VoiceSampleTarget("左转 30 度", "左转三十度", "App 本地左转 30 度，发送普通 L/R 心跳"),
-        VoiceSampleTarget("左转 60 度", "左转六十度", "App 本地左转 60 度，发送普通 L/R 心跳"),
-        VoiceSampleTarget("右转 15 度", "右转十五度", "App 本地右转 15 度，发送普通 L/R 心跳"),
-        VoiceSampleTarget("右转 30 度", "右转三十度", "App 本地右转 30 度，发送普通 L/R 心跳"),
-        VoiceSampleTarget("右转 60 度", "右转六十度", "App 本地右转 60 度，发送普通 L/R 心跳"),
-        VoiceSampleTarget("保持航向", "保持航向", "固件航向锁定，发送 MODE=HEADING_LOCK 心跳"),
-        VoiceSampleTarget("锁定当前航向", "锁定当前航向", "固件航向锁定，发送 MODE=HEADING_LOCK 心跳"),
+        VoiceSampleTarget("左转", "左转", "SRC=VOICE;ARM=1;MODE=TURN;DIR=LEFT;ANGLE=15"),
+        VoiceSampleTarget("右转", "右转", "SRC=VOICE;ARM=1;MODE=TURN;DIR=RIGHT;ANGLE=15"),
+        VoiceSampleTarget("左转 15 度", "左转十五度", "主控角度转向：MODE=TURN;DIR=LEFT;ANGLE=15"),
+        VoiceSampleTarget("左转 30 度", "左转三十度", "主控角度转向：MODE=TURN;DIR=LEFT;ANGLE=30"),
+        VoiceSampleTarget("左转 60 度", "左转六十度", "主控角度转向：MODE=TURN;DIR=LEFT;ANGLE=60"),
+        VoiceSampleTarget("右转 15 度", "右转十五度", "主控角度转向：MODE=TURN;DIR=RIGHT;ANGLE=15"),
+        VoiceSampleTarget("右转 30 度", "右转三十度", "主控角度转向：MODE=TURN;DIR=RIGHT;ANGLE=30"),
+        VoiceSampleTarget("右转 60 度", "右转六十度", "主控角度转向：MODE=TURN;DIR=RIGHT;ANGLE=60"),
+        VoiceSampleTarget("保持航向", "保持航向", "固件航向锁定，启动后发送 KEEPALIVE 保活"),
+        VoiceSampleTarget("锁定当前航向", "锁定当前航向", "固件航向锁定，启动后发送 KEEPALIVE 保活"),
         VoiceSampleTarget("取消航向锁定", "取消航向锁定", "退出航向锁定"),
     )
 
@@ -270,11 +283,6 @@ class ControlViewModel(application: Application) : AndroidViewModel(application)
     private val mutableUpdateState = MutableStateFlow(UpdateUiState())
     val updateState: StateFlow<UpdateUiState> = mutableUpdateState.asStateFlow()
 
-    private data class AppHeadingErrorSample(
-        val timeMs: Long,
-        val errorDegrees: Float,
-    )
-
     init {
         refreshGpsTrackState("已加载手机本地轨迹")
         refreshAutoNavigationRoutes("已加载本地路线")
@@ -286,6 +294,7 @@ class ControlViewModel(application: Application) : AndroidViewModel(application)
                 voiceSampleExpectedCommand = voiceSampleTargets.first().expectedCommand,
                 voiceSampleDirectory = VoiceSampleStore.samplesDir(application).absolutePath,
                 voiceSampleSavedCount = savedVoiceSampleCount,
+                controlLogFilePath = controlLogFileStore.filePath,
             )
         }
         initializeVoiceReplyEngine()
@@ -297,6 +306,21 @@ class ControlViewModel(application: Application) : AndroidViewModel(application)
 
     fun connect() {
         connectSavedBluetooth()
+    }
+
+    fun clearControlLog() {
+        mutableUiState.update { it.copy(controlLog = emptyList()) }
+        viewModelScope.launch(Dispatchers.IO) {
+            controlLogFileStore.clear()
+        }
+        lastLoggedSentCommand = null
+        lastLoggedReceivedLine = null
+        lastLoggedArmedState = null
+        lastLoggedHeadingLockState = null
+        lastLoggedHeadingSource = null
+        lastLoggedHeadingLockWarning = null
+        lastHeadingLockSampleLogMs = 0L
+        lastHeadingLockSample = null
     }
 
     fun connectSavedBluetooth() {
@@ -315,6 +339,7 @@ class ControlViewModel(application: Application) : AndroidViewModel(application)
         bluetoothConnectJob?.cancel()
         bluetoothConnectJob = viewModelScope.launch {
             stopBluetoothDiscovery()
+            clearPendingControllerArmedRequest()
             val otaReconnectPending = esp32OtaExclusive && esp32OtaAccepted
             val pendingVersionAtStart = pendingEsp32FirmwareVersion
             mutableUiState.update {
@@ -451,30 +476,51 @@ class ControlViewModel(application: Application) : AndroidViewModel(application)
             esp32OtaExclusive = false
             esp32OtaAccepted = false
             pendingEsp32FirmwareVersion = null
+            clearPendingControllerArmedRequest()
             clearAutonomousCommands()
+            val existingLog = mutableUiState.value.controlLog
+            val controlLogFilePath = mutableUiState.value.controlLogFilePath
             mutableUiState.value = ControlUiState(
                 realtimeWakeWordRequired = preferences.getBoolean(KEY_REALTIME_WAKE_WORD_REQUIRED, false),
+                controlLog = existingLog,
+                controlLogFilePath = controlLogFilePath,
                 statusMessage = "已断开，推进输出保持空闲",
+            )
+            appendControlLog(
+                level = ControlLogLevel.Info,
+                title = "蓝牙断开",
+                message = "用户断开主控连接，推进输出保持空闲",
             )
             mutableSettingsState.update { it.copy(message = "已断开主控连接") }
         }
     }
 
     fun setArmed(armed: Boolean) {
-        val canArm = armed && mutableUiState.value.connectionState == ConnectionState.Connected
-        val replyText = when {
-            canArm -> "主控已解锁"
-            armed -> replyWithDetail("未连接，不能解锁")
-            else -> replyWithDetail("已锁定")
+        val connected = mutableUiState.value.connectionState == ConnectionState.Connected
+        if (armed && !connected) {
+            mutableUiState.update { it.copy(statusMessage = "解锁拒绝：未连接主控") }
+            speakVoiceReply(replyWithDetail("未连接，不能解锁"))
+            return
         }
+
         clearAutonomousCommands()
+        pendingControllerArmedRequest = armed
+        pendingControllerArmedRequestUntilMs = System.currentTimeMillis() + CONTROLLER_ARM_CONFIRM_TIMEOUT_MS
+        appendControlLog(
+            level = ControlLogLevel.Info,
+            title = if (armed) "请求解锁" else "请求锁定",
+            message = if (armed) {
+                "已发送空挡解锁请求，等待主控回传 ARMED=1"
+            } else {
+                "已发送锁定请求，等待主控回传 ARMED=0"
+            },
+        )
         mutableUiState.update {
-            if (canArm) {
+            if (armed) {
                 it.copy(
-                    armed = true,
                     commandSource = CommandSource.App,
                     headingLockEnabled = false,
-                    statusMessage = "已解锁，请保持低功率测试",
+                    statusMessage = "正在请求主控解锁，等待 ARMED=1 回传",
                 )
             } else {
                 it.copy(
@@ -485,13 +531,11 @@ class ControlViewModel(application: Application) : AndroidViewModel(application)
                     headingLockEnabled = false,
                     selectedGear = ThrottleGear.Neutral,
                     throttleTrimPercent = 0,
-                    statusMessage = "已锁定，油门回空挡",
+                    statusMessage = "正在请求主控锁定，油门回空挡，等待 ARMED=0 回传",
                 )
             }
         }
-        sendCurrentCommand {
-            speakVoiceReply(replyText)
-        }
+        sendCurrentCommand()
     }
 
     private fun rejectManualThrottleWhenLocked(action: String): Boolean {
@@ -509,8 +553,13 @@ class ControlViewModel(application: Application) : AndroidViewModel(application)
         if (rejectManualThrottleWhenLocked("左推进")) {
             return
         }
+        val state = mutableUiState.value
         val constrained = coerceSignedThrottle(percent)
-        val lockKept = updateActiveHeadingLockSource(CommandSource.App)
+        val lockKept = updateActiveHeadingLockBaseFromThrottle(
+            leftPercent = constrained,
+            rightPercent = state.rightThrottlePercent,
+            source = CommandSource.App,
+        )
         if (!lockKept) {
             clearAutonomousCommands()
         }
@@ -528,8 +577,13 @@ class ControlViewModel(application: Application) : AndroidViewModel(application)
         if (rejectManualThrottleWhenLocked("右推进")) {
             return
         }
+        val state = mutableUiState.value
         val constrained = coerceSignedThrottle(percent)
-        val lockKept = updateActiveHeadingLockSource(CommandSource.App)
+        val lockKept = updateActiveHeadingLockBaseFromThrottle(
+            leftPercent = state.leftThrottlePercent,
+            rightPercent = constrained,
+            source = CommandSource.App,
+        )
         if (!lockKept) {
             clearAutonomousCommands()
         }
@@ -547,10 +601,15 @@ class ControlViewModel(application: Application) : AndroidViewModel(application)
         if (rejectManualThrottleWhenLocked("左推进回档")) {
             return
         }
+        val state = mutableUiState.value
         val gearThrottle = coerceSignedThrottle(
-            selectedGearThrottle(mutableUiState.value.selectedGear, mutableUiState.value.throttleTrimPercent),
+            selectedGearThrottle(state.selectedGear, state.throttleTrimPercent),
         )
-        val lockKept = updateActiveHeadingLockSource(CommandSource.App)
+        val lockKept = updateActiveHeadingLockBaseFromThrottle(
+            leftPercent = gearThrottle,
+            rightPercent = state.rightThrottlePercent,
+            source = CommandSource.App,
+        )
         if (!lockKept) {
             clearAutonomousCommands()
         }
@@ -568,10 +627,15 @@ class ControlViewModel(application: Application) : AndroidViewModel(application)
         if (rejectManualThrottleWhenLocked("右推进回档")) {
             return
         }
+        val state = mutableUiState.value
         val gearThrottle = coerceSignedThrottle(
-            selectedGearThrottle(mutableUiState.value.selectedGear, mutableUiState.value.throttleTrimPercent),
+            selectedGearThrottle(state.selectedGear, state.throttleTrimPercent),
         )
-        val lockKept = updateActiveHeadingLockSource(CommandSource.App)
+        val lockKept = updateActiveHeadingLockBaseFromThrottle(
+            leftPercent = state.leftThrottlePercent,
+            rightPercent = gearThrottle,
+            source = CommandSource.App,
+        )
         if (!lockKept) {
             clearAutonomousCommands()
         }
@@ -590,7 +654,11 @@ class ControlViewModel(application: Application) : AndroidViewModel(application)
             return
         }
         val gearThrottle = coerceSignedThrottle(gearPercent(gear))
-        val updatedHeadingLockBase = updateActiveHeadingLockSource(CommandSource.App)
+        val updatedHeadingLockBase = updateActiveHeadingLockBaseFromThrottle(
+            leftPercent = gearThrottle,
+            rightPercent = gearThrottle,
+            source = CommandSource.App,
+        )
         if (!updatedHeadingLockBase) {
             clearAutonomousCommands()
         }
@@ -625,7 +693,11 @@ class ControlViewModel(application: Application) : AndroidViewModel(application)
         }
         if (mutableUiState.value.selectedGear == gear) {
             val gearThrottle = coerceSignedThrottle(constrained)
-            val updatedHeadingLockBase = updateActiveHeadingLockSource(CommandSource.App)
+            val updatedHeadingLockBase = updateActiveHeadingLockBaseFromThrottle(
+                leftPercent = gearThrottle,
+                rightPercent = gearThrottle,
+                source = CommandSource.App,
+            )
             if (!updatedHeadingLockBase) {
                 clearAutonomousCommands()
             }
@@ -651,6 +723,11 @@ class ControlViewModel(application: Application) : AndroidViewModel(application)
         clearAutonomousCommands()
         autoNavigationFilteredPoint = null
         autoNavigationLastRawPoint = null
+        appendControlLog(
+            level = ControlLogLevel.Error,
+            title = "急停",
+            message = "用户触发急停，App 下发空闲命令",
+        )
         mutableUiState.update {
             it.copy(
                 armed = false,
@@ -886,7 +963,7 @@ class ControlViewModel(application: Application) : AndroidViewModel(application)
             it.copy(
                 commandSource = CommandSource.App,
                 headingLockEnabled = false,
-                statusMessage = "空档最大转向差已设置为 ${constrained}%，已取消当前航向锁定",
+                statusMessage = "空档最大反推已设置为 ${constrained}%，已取消当前航向锁定",
             )
         }
         sendCurrentCommand()
@@ -949,137 +1026,18 @@ class ControlViewModel(application: Application) : AndroidViewModel(application)
     }
 
     fun setUsePhoneHeading(enabled: Boolean) {
-        preferences.edit().putBoolean(KEY_USE_PHONE_HEADING, enabled).apply()
-        clearAutonomousCommands()
-        mutableSettingsState.update { it.copy(usePhoneHeading = enabled) }
+        preferences.edit().putBoolean(KEY_USE_PHONE_HEADING, false).apply()
+        mutableSettingsState.update { it.copy(usePhoneHeading = false) }
         updatePhoneHeadingSensorRegistration()
         mutableUiState.update {
             it.copy(
-                leftThrottlePercent = 0,
-                rightThrottlePercent = 0,
-                commandSource = CommandSource.App,
-                headingLockEnabled = false,
-                selectedGear = ThrottleGear.Neutral,
-                throttleTrimPercent = 0,
                 statusMessage = if (enabled) {
-                    "航向锁定来源已切换为手机指南针，已取消当前锁航"
+                    "控制航向来源已统一为主控 IMU；手机指南针只用于显示和调试"
                 } else {
-                    "航向锁定来源已切换为主控 IMU 测试模式，已取消当前锁航"
+                    "控制航向来源保持主控 IMU"
                 },
             )
         }
-        sendCurrentCommand()
-    }
-
-    fun setYbImuHeadingMode(modeId: Int) {
-        val actualMode = coerceYbImuHeadingModeId(modeId)
-        preferences.edit().putInt(KEY_YB_IMU_HEADING_MODE, actualMode).apply()
-        clearAutonomousCommands()
-        mutableSettingsState.update { it.copy(ybImuHeadingMode = actualMode) }
-        mutableUiState.update {
-            it.copy(
-                leftThrottlePercent = 0,
-                rightThrottlePercent = 0,
-                commandSource = CommandSource.App,
-                headingLockEnabled = false,
-                selectedGear = ThrottleGear.Neutral,
-                throttleTrimPercent = 0,
-                statusMessage = "IMU 航向算法已切换为 ${ybImuHeadingModeLabel(actualMode)}，已取消当前锁航",
-            )
-        }
-        sendCurrentCommand()
-    }
-
-    fun calibrateYbImuHeadingToPhone() {
-        val phoneHeading = currentPhoneHeadingDegreesOrNull()
-        if (phoneHeading == null) {
-            mutableUiState.update { it.copy(statusMessage = "IMU 校准失败：手机航向暂无有效读数") }
-            return
-        }
-        val telemetry = currentYbImuHeadingTelemetryOrNull()
-        if (telemetry == null) {
-            mutableUiState.update { it.copy(statusMessage = "IMU 校准失败：主控 IMU 航向暂无有效读数") }
-            return
-        }
-        val settings = mutableSettingsState.value
-        val result = calibrateYbImuHeadingToPhone(
-            phoneHeadingDegrees = phoneHeading,
-            telemetry = telemetry,
-            modeId = settings.ybImuHeadingMode,
-        )
-        if (result == null) {
-            mutableUiState.update {
-                it.copy(
-                    statusMessage = "IMU 校准失败：YBY 暂无有效读数",
-                )
-            }
-            return
-        }
-        preferences.edit()
-            .putFloat(KEY_YB_IMU_HEADING_OFFSET_CHIP_DOWN_DEGREES, result.offsetDegrees)
-            .apply()
-        clearAutonomousCommands()
-        mutableSettingsState.update {
-            it.copy(ybImuHeadingOffsetDegrees = result.offsetDegrees)
-        }
-        mutableUiState.update {
-            it.copy(
-                leftThrottlePercent = 0,
-                rightThrottlePercent = 0,
-                commandSource = CommandSource.App,
-                headingLockEnabled = false,
-                selectedGear = ThrottleGear.Neutral,
-                throttleTrimPercent = 0,
-                statusMessage = "IMU 航向已对齐手机：${ybImuHeadingAlgorithmLabel(telemetry, settings.ybImuHeadingMode)}，偏置 ${result.offsetDegrees.roundToInt()}°，已取消当前锁航",
-            )
-        }
-        sendCurrentCommand()
-    }
-
-    fun calibrateYbImuHeadingToNorth() {
-        val telemetry = currentYbImuHeadingTelemetryOrNull()
-        if (telemetry == null) {
-            mutableUiState.update { it.copy(statusMessage = "IMU 北向校准失败：主控 IMU YBY 暂无有效读数") }
-            return
-        }
-        val settings = mutableSettingsState.value
-        val result = calibrateYbImuHeadingToNorth(
-            telemetry = telemetry,
-            modeId = settings.ybImuHeadingMode,
-        )
-        if (result == null) {
-            mutableUiState.update {
-                it.copy(
-                    statusMessage = "IMU 北向校准失败：YBY 暂无有效读数",
-                )
-            }
-            return
-        }
-        val calibratedHeading = ybImuHeadingDegrees(
-            telemetry = telemetry,
-            offsetDegrees = result.offsetDegrees,
-            modeId = settings.ybImuHeadingMode,
-        )
-
-        preferences.edit()
-            .putFloat(KEY_YB_IMU_HEADING_OFFSET_CHIP_DOWN_DEGREES, result.offsetDegrees)
-            .apply()
-        clearAutonomousCommands()
-        mutableSettingsState.update {
-            it.copy(ybImuHeadingOffsetDegrees = result.offsetDegrees)
-        }
-        mutableUiState.update {
-            it.copy(
-                leftThrottlePercent = 0,
-                rightThrottlePercent = 0,
-                commandSource = CommandSource.App,
-                headingLockEnabled = false,
-                selectedGear = ThrottleGear.Neutral,
-                throttleTrimPercent = 0,
-                statusMessage = "IMU 已设为正北 0°：${ybImuHeadingModeLabel(settings.ybImuHeadingMode)}，偏置 ${result.offsetDegrees.roundToInt()}°，当前 ${calibratedHeading?.roundToInt() ?: 0}°，已取消当前锁航",
-            )
-        }
-        sendCurrentCommand()
     }
 
     fun setRealtimeVoiceEndpoint(value: String) {
@@ -1142,13 +1100,14 @@ class ControlViewModel(application: Application) : AndroidViewModel(application)
             mutableUiState.update { it.copy(statusMessage = "航向锁定拒绝：请先手动解锁") }
             return
         }
-        val currentHeading = currentHeadingForLockOrNull()
-        if (currentHeading == null) {
-            mutableUiState.update { it.copy(statusMessage = "航向锁定拒绝：${headingSourceUnavailableText()}") }
+        val firmwareHeading = currentFirmwareHeadingForLockOrNull()
+        if (firmwareHeading == null) {
+            mutableUiState.update { it.copy(statusMessage = "航向锁定拒绝：主控 IMU 航向暂无有效读数，导航页手机航向不能用于固件锁航") }
             return
         }
 
         clearActiveTurnCommand()
+        val basePercent = currentAverageThrottlePercent()
         val command = prepareRuntimeCommand(
             command = ControlCommand(
                 armed = true,
@@ -1156,15 +1115,21 @@ class ControlViewModel(application: Application) : AndroidViewModel(application)
                 mode = ControlCommandMode.HeadingLock,
                 headingLockEnabled = true,
                 headingLockRequestId = 1,
+                headingLockBaseThrottlePercent = basePercent,
             ),
             allocateHeadingLockRequestId = true,
         )
-        startAppHeadingLock(command, currentHeading)
+        startAppHeadingLock(command, firmwareHeading)
+        appendControlLog(
+            level = ControlLogLevel.Info,
+            title = "用户操作",
+            message = "点击锁航；目标为主控当前航向 ${firmwareHeading.roundToInt()}°，基础油门 ${basePercent.signedPercentText()}",
+        )
         mutableUiState.update {
             it.copy(
                 commandSource = CommandSource.App,
                 headingLockEnabled = true,
-                statusMessage = "航向锁定已开启，目标 ${currentHeading.roundToInt()}°",
+                statusMessage = "航向锁定已发送，目标 ${firmwareHeading.roundToInt()}°，基础油门 ${basePercent.signedPercentText()}",
             )
         }
         sendCurrentCommand()
@@ -1172,6 +1137,11 @@ class ControlViewModel(application: Application) : AndroidViewModel(application)
 
     fun cancelHeadingLock() {
         clearActiveHeadingLockCommand()
+        appendControlLog(
+            level = ControlLogLevel.Warning,
+            title = "用户操作",
+            message = "取消航向锁定，回到手动控制",
+        )
         mutableUiState.update {
             it.copy(
                 commandSource = CommandSource.App,
@@ -1192,10 +1162,6 @@ class ControlViewModel(application: Application) : AndroidViewModel(application)
             mutableUiState.update { it.copy(statusMessage = "目标航向拒绝：请先手动解锁") }
             return
         }
-        if (currentHeadingForLockOrNull() == null) {
-            mutableUiState.update { it.copy(statusMessage = "目标航向拒绝：${headingSourceUnavailableText()}") }
-            return
-        }
 
         val normalizedTarget = normalizeCompassDegrees(targetHeadingDegrees)
         clearActiveTurnCommand()
@@ -1208,10 +1174,16 @@ class ControlViewModel(application: Application) : AndroidViewModel(application)
                 headingLockEnabled = true,
                 headingLockRequestId = 1,
                 headingLockBaseThrottlePercent = currentAverageThrottlePercent(),
+                headingLockTargetDegrees = normalizedTarget,
             ),
             allocateHeadingLockRequestId = true,
         )
         startAppHeadingLock(command, normalizedTarget)
+        appendControlLog(
+            level = ControlLogLevel.Info,
+            title = "用户操作",
+            message = "设置锁航目标 ${normalizedTarget.roundToInt()}°；下发主控绝对目标航向",
+        )
         mutableUiState.update {
             it.copy(
                 commandSource = CommandSource.App,
@@ -1763,51 +1735,48 @@ class ControlViewModel(application: Application) : AndroidViewModel(application)
         clearAutoNavigationExecution("航迹线锁定已停止")
         mutableUiState.update {
             it.copy(
-                armed = false,
                 leftThrottlePercent = 0,
                 rightThrottlePercent = 0,
                 commandSource = CommandSource.App,
                 headingLockEnabled = false,
                 selectedGear = ThrottleGear.Neutral,
                 throttleTrimPercent = 0,
-                statusMessage = "航迹线锁定已停止，已锁定并回空挡",
+                statusMessage = "航迹线锁定已停止，已回空挡，主控保持当前解锁状态",
             )
         }
-        sendIdle()
+        sendCurrentCommand()
     }
 
     fun stopStationKeeping() {
         clearAutoNavigationExecution("定点保持已停止")
         mutableUiState.update {
             it.copy(
-                armed = false,
                 leftThrottlePercent = 0,
                 rightThrottlePercent = 0,
                 commandSource = CommandSource.App,
                 headingLockEnabled = false,
                 selectedGear = ThrottleGear.Neutral,
                 throttleTrimPercent = 0,
-                statusMessage = "定点保持已停止，已锁定并回空挡",
+                statusMessage = "定点保持已停止，已回空挡，主控保持当前解锁状态",
             )
         }
-        sendIdle()
+        sendCurrentCommand()
     }
 
     fun stopAutoNavigation() {
         clearAutoNavigationExecution("自动导航已停止")
         mutableUiState.update {
             it.copy(
-                armed = false,
                 leftThrottlePercent = 0,
                 rightThrottlePercent = 0,
                 commandSource = CommandSource.App,
                 headingLockEnabled = false,
                 selectedGear = ThrottleGear.Neutral,
                 throttleTrimPercent = 0,
-                statusMessage = "自动导航已停止，已锁定并回空挡",
+                statusMessage = "自动导航已停止，已回空挡，主控保持当前解锁状态",
             )
         }
-        sendIdle()
+        sendCurrentCommand()
     }
 
     fun toggleVoiceControl() {
@@ -2258,17 +2227,17 @@ class ControlViewModel(application: Application) : AndroidViewModel(application)
     }
 
     fun setLeftEscReversed(enabled: Boolean) {
-        preferences.edit().putBoolean(KEY_LEFT_ESC_REVERSED, enabled).apply()
-        mutableSettingsState.update { it.copy(leftEscReversed = enabled) }
-        clearAutonomousCommands()
-        lockForDirectionChange("左 ESC 方向${if (enabled) "已反转" else "已恢复"}")
+        updateEscDirectionConfig(
+            leftReversed = enabled,
+            neutralMessage = "左 ESC 方向${if (enabled) "已反转" else "已恢复"}",
+        )
     }
 
     fun setRightEscReversed(enabled: Boolean) {
-        preferences.edit().putBoolean(KEY_RIGHT_ESC_REVERSED, enabled).apply()
-        mutableSettingsState.update { it.copy(rightEscReversed = enabled) }
-        clearAutonomousCommands()
-        lockForDirectionChange("右 ESC 方向${if (enabled) "已反转" else "已恢复"}")
+        updateEscDirectionConfig(
+            rightReversed = enabled,
+            neutralMessage = "右 ESC 方向${if (enabled) "已反转" else "已恢复"}",
+        )
     }
 
     fun setGitHubToken(token: String) {
@@ -2734,23 +2703,11 @@ class ControlViewModel(application: Application) : AndroidViewModel(application)
         if (!state.armed) {
             return rejectRealtimeVoiceEvent("语音不能解锁，请先手动解锁", "pivot_turn：不发送")
         }
-        val currentHeading = currentHeadingForLockOrNull()
-        if (currentHeading == null) {
-            return rejectRealtimeVoiceEvent(headingSourceUnavailableText(), "pivot_turn：不发送")
-        }
 
         clearRealtimeVoiceActionTimeout()
         val headingLockWasActive = isHeadingLockActiveForState(state)
-        val startHeading = if (headingLockWasActive) {
-            appHeadingControlTargetDegrees ?: currentHeading
-        } else {
-            currentHeading
-        }
         val directionText = if (event.direction == "left") "左" else "右"
-        val targetHeading = normalizeCompassDegrees(
-            startHeading + if (event.direction == "left") -179f else 179f,
-        )
-        clearAutonomousCommands()
+        val turnDirection = if (event.direction == "left") TurnDirection.Left else TurnDirection.Right
         val neutralCommandLine = formatCommandLine(
             prepareRuntimeCommand(
                 ControlCommand(
@@ -2790,36 +2747,33 @@ class ControlViewModel(application: Application) : AndroidViewModel(application)
                 }
                 return@launch
             }
-            if (currentHeadingForLockOrNull() == null) {
-                mutableUiState.update {
-                    it.copy(statusMessage = "实时语音${directionText}原地掉头取消：${headingSourceUnavailableText()}")
-                }
-                return@launch
-            }
             val runtimeCommand = prepareRuntimeCommand(
                 command = ControlCommand(
                     armed = true,
                     source = CommandSource.Voice,
-                    mode = ControlCommandMode.HeadingLock,
-                    headingLockEnabled = true,
-                    headingLockRequestId = 1,
-                    headingLockBaseThrottlePercent = 0,
+                    mode = ControlCommandMode.TurnAngle,
+                    turnDirection = turnDirection,
+                    turnAngleDegrees = 179,
+                    turnRequestId = 1,
                 ),
-                allocateHeadingLockRequestId = true,
+                allocateTurnRequestId = true,
             )
-            startAppHeadingLock(runtimeCommand, targetHeading)
+            if (!headingLockWasActive) {
+                clearActiveHeadingLockCommand()
+            }
+            startAppTurn(runtimeCommand)
             val commandLine = formatCommandLine(runtimeCommand)
             mutableUiState.update {
                 it.copy(
                     leftThrottlePercent = 0,
                     rightThrottlePercent = 0,
                     commandSource = CommandSource.Voice,
-                    headingLockEnabled = true,
+                    headingLockEnabled = headingLockWasActive,
                     selectedGear = ThrottleGear.Neutral,
                     throttleTrimPercent = 0,
                     realtimeVoiceReply = "已开始${directionText}原地掉头",
                     voiceCommandPreview = commandLine,
-                    statusMessage = "实时语音${directionText}原地掉头：空挡锁航目标 ${targetHeading.roundToInt()}°",
+                    statusMessage = "实时语音${directionText}原地掉头：已下发主控执行 179° 转向",
                 )
             }
             sendCurrentCommand()
@@ -2953,70 +2907,55 @@ class ControlViewModel(application: Application) : AndroidViewModel(application)
         if (!state.armed) {
             return rejectRealtimeVoiceEvent("语音不能解锁，请先手动解锁", "adjust_heading_target：不发送")
         }
-        val currentHeading = currentHeadingForLockOrNull()
-        if (currentHeading == null) {
-            return rejectRealtimeVoiceEvent(headingSourceUnavailableText(), "adjust_heading_target：不发送")
-        }
         val headingLockWasActive = isHeadingLockActiveForState(state)
         val deltaDegrees = correctedRealtimeHeadingDelta(event)
+        val direction = if (deltaDegrees < 0) TurnDirection.Left else TurnDirection.Right
+        val angleDegrees = kotlin.math.abs(deltaDegrees).coerceIn(1, 90)
         clearActiveTurnCommand()
         if (headingLockWasActive) {
             clearRealtimeVoiceActionTimeout()
         }
-        val basePercent = if (headingLockWasActive) {
-            coerceCommandPercentForSource(
-                activeHeadingLockCommand?.headingLockBaseThrottlePercent ?: currentAverageThrottlePercent(),
-                CommandSource.Voice,
-            )
-        } else {
-            coerceCommandPercentForSource(event.basePowerPercent, CommandSource.Voice)
-        }
-        val targetStartHeading = if (headingLockWasActive) {
-            appHeadingControlTargetDegrees ?: currentHeading
-        } else {
-            currentHeading
-        }
-        val targetHeading = normalizeCompassDegrees(targetStartHeading + deltaDegrees)
         val runtimeCommand = prepareRuntimeCommand(
             command = ControlCommand(
                 armed = true,
                 source = CommandSource.Voice,
-                mode = ControlCommandMode.HeadingLock,
-                headingLockEnabled = true,
-                headingLockRequestId = 1,
-                headingLockBaseThrottlePercent = basePercent,
+                mode = ControlCommandMode.TurnAngle,
+                turnDirection = direction,
+                turnAngleDegrees = angleDegrees,
+                turnRequestId = 1,
             ),
-            allocateHeadingLockRequestId = true,
+            allocateTurnRequestId = true,
         )
-        startAppHeadingLock(runtimeCommand, targetHeading)
+        if (!headingLockWasActive) {
+            clearActiveHeadingLockCommand()
+        }
+        startAppTurn(runtimeCommand)
         val commandLine = formatCommandLine(runtimeCommand)
+        val directionText = if (direction == TurnDirection.Left) "左" else "右"
         val resultText = if (headingLockWasActive) {
-            "已保持航向锁定，目标调整到 ${targetHeading.roundToInt()} 度"
+            "已保持航向锁定，交给主控${directionText}转 $angleDegrees 度"
         } else {
-            "已调整航向目标 ${targetHeading.roundToInt()} 度"
+            "已交给主控${directionText}转 $angleDegrees 度"
         }
         mutableUiState.update {
             it.copy(
-                leftThrottlePercent = basePercent,
-                rightThrottlePercent = basePercent,
+                leftThrottlePercent = if (headingLockWasActive) it.leftThrottlePercent else 0,
+                rightThrottlePercent = if (headingLockWasActive) it.rightThrottlePercent else 0,
                 commandSource = CommandSource.Voice,
-                headingLockEnabled = true,
+                headingLockEnabled = headingLockWasActive,
                 selectedGear = ThrottleGear.Neutral,
                 throttleTrimPercent = 0,
                 voiceResultMessage = "实时语音：已调整航向目标",
                 realtimeVoiceReply = resultText,
                 voiceCommandPreview = commandLine,
                 statusMessage = if (headingLockWasActive) {
-                    "实时语音锁航目标 ${targetHeading.roundToInt()}°，航向锁定保持"
+                    "实时语音相对转向：锁航保持，主控执行${directionText}转 $angleDegrees°"
                 } else {
-                    "实时语音锁航目标 ${targetHeading.roundToInt()}°，持续 ${event.durationMs}ms"
+                    "实时语音相对转向：主控执行${directionText}转 $angleDegrees°"
                 },
             )
         }
         sendCurrentCommand()
-        if (!headingLockWasActive) {
-            scheduleRealtimeVoiceNeutral(event.durationMs, "实时语音锁航动作已到期，回空挡")
-        }
         return resultText
     }
 
@@ -3169,25 +3108,12 @@ class ControlViewModel(application: Application) : AndroidViewModel(application)
     }
 
     private fun prepareVoicePreviewCommand(command: ControlCommand): ControlCommand {
-        val state = mutableUiState.value
         return when {
-            shouldAdjustHeadingLockTarget(command, state) -> {
-                prepareHeadingLockOffsetCommand(command, allocateHeadingLockRequestId = false)
-            }
-            shouldApplyThrottleToHeadingLock(command, state) -> {
+            shouldApplyThrottleToHeadingLock(command, mutableUiState.value) -> {
                 prepareHeadingLockBaseCommandFromThrottle(command)
             }
             else -> prepareRuntimeCommand(command)
         }
-    }
-
-    private fun shouldAdjustHeadingLockTarget(
-        command: ControlCommand,
-        state: ControlUiState,
-    ): Boolean {
-        return command.mode == ControlCommandMode.TurnAngle &&
-            command.armed &&
-            isHeadingLockActiveForState(state)
     }
 
     private fun shouldApplyThrottleToHeadingLock(
@@ -3202,25 +3128,6 @@ class ControlViewModel(application: Application) : AndroidViewModel(application)
 
     private fun isHeadingLockActiveForState(state: ControlUiState): Boolean {
         return state.headingLockEnabled && activeHeadingLockCommand?.headingLockEnabled == true
-    }
-
-    private fun prepareHeadingLockOffsetCommand(
-        turnCommand: ControlCommand,
-        allocateHeadingLockRequestId: Boolean,
-    ): ControlCommand {
-        val offsetDegrees = headingLockOffsetDegrees(turnCommand)
-        return prepareRuntimeCommand(
-            command = ControlCommand(
-                armed = true,
-                source = CommandSource.Voice,
-                mode = ControlCommandMode.HeadingLock,
-                headingLockEnabled = true,
-                headingLockRequestId = 1,
-                headingLockBaseThrottlePercent = currentAverageThrottlePercent(),
-                headingLockTargetOffsetDegrees = offsetDegrees,
-            ),
-            allocateHeadingLockRequestId = allocateHeadingLockRequestId,
-        )
     }
 
     private fun prepareHeadingLockBaseCommandFromThrottle(command: ControlCommand): ControlCommand {
@@ -3239,20 +3146,8 @@ class ControlViewModel(application: Application) : AndroidViewModel(application)
             headingLockFullCorrectionDegrees = settings.headingLockFullCorrectionDegrees,
             headingLockNeutralPivotMinDifferencePercent = settings.headingLockNeutralPivotMinDifferencePercent,
             headingLockNeutralPivotMaxDifferencePercent = settings.headingLockNeutralPivotMaxDifferencePercent,
-            headingLockTargetOffsetDegrees = null,
             voicePowerLimitPercent = settings.voicePowerLimitPercent,
-            leftEscReversed = settings.leftEscReversed,
-            rightEscReversed = settings.rightEscReversed,
         )
-    }
-
-    private fun headingLockOffsetDegrees(turnCommand: ControlCommand): Int {
-        val angle = turnCommand.turnAngleDegrees ?: 0
-        return when (turnCommand.turnDirection) {
-            com.smartsup.controller.model.TurnDirection.Left -> -angle
-            com.smartsup.controller.model.TurnDirection.Right -> angle
-            null -> 0
-        }.coerceIn(-90, 90)
     }
 
     private fun formatCandidatePreview(evaluation: VoiceCommandEvaluation): String {
@@ -3392,11 +3287,8 @@ class ControlViewModel(application: Application) : AndroidViewModel(application)
         val command = result.command?.let { commandWithConfiguredVoiceGear(result, it) } ?: return
         val voiceGear = voiceGearFor(result)
         val state = mutableUiState.value
-        val turnWithinHeadingLock = shouldAdjustHeadingLockTarget(command, state)
         val throttleWithinHeadingLock = shouldApplyThrottleToHeadingLock(command, state)
-        val runtimeCommand = if (turnWithinHeadingLock) {
-            prepareHeadingLockOffsetCommand(command, allocateHeadingLockRequestId = true)
-        } else if (throttleWithinHeadingLock) {
+        val runtimeCommand = if (throttleWithinHeadingLock) {
             prepareHeadingLockBaseCommandFromThrottle(command)
         } else {
             prepareRuntimeCommand(
@@ -3431,45 +3323,9 @@ class ControlViewModel(application: Application) : AndroidViewModel(application)
             return
         }
 
-        if (turnWithinHeadingLock) {
-            val currentHeading = currentHeadingForLockOrNull()
-            if (currentHeading == null) {
-                val unavailableText = headingSourceUnavailableText()
-                mutableUiState.update {
-                    it.copy(
-                        voiceResultMessage = unavailableText,
-                        voiceCandidatePreview = candidateLine,
-                        voiceCommandPreview = commandLine,
-                        statusMessage = "语音转向拒绝：$unavailableText",
-                    )
-                }
-                return
-            }
-            val targetHeading = normalizeCompassDegrees(currentHeading + headingLockOffsetDegrees(command))
-            clearActiveTurnCommand()
-            startAppHeadingLock(runtimeCommand, targetHeading)
-            mutableUiState.update {
-                it.copy(
-                    commandSource = CommandSource.Voice,
-                    headingLockEnabled = true,
-                    selectedGear = voiceGear ?: ThrottleGear.Neutral,
-                    throttleTrimPercent = voiceGear?.let { gear ->
-                        fineTuneTrimFor(gear, command.leftThrottlePercent, command.rightThrottlePercent)
-                    } ?: 0,
-                    voiceResultMessage = "已执行：${result.label}",
-                    voiceCandidatePreview = candidateLine,
-                    voiceCommandPreview = commandLine,
-                    statusMessage = "语音控制：锁航目标 ${targetHeading.roundToInt()}°",
-                )
-            }
-            sendCurrentCommand {
-                speakVoiceCommandReply(result, command)
-            }
-            return
-        }
-
         if (throttleWithinHeadingLock) {
             clearActiveTurnCommand()
+            activeHeadingLockStartPending = true
             activeHeadingLockCommand = runtimeCommand
             val basePercent = ((command.leftThrottlePercent + command.rightThrottlePercent) / 2)
                 .coerceIn(-100, 100)
@@ -3496,32 +3352,20 @@ class ControlViewModel(application: Application) : AndroidViewModel(application)
         }
 
         if (command.mode == ControlCommandMode.TurnAngle) {
-            val currentHeading = currentHeadingForLockOrNull()
-            if (currentHeading == null) {
-                val unavailableText = headingSourceUnavailableText()
-                mutableUiState.update {
-                    it.copy(
-                        voiceResultMessage = unavailableText,
-                        voiceCandidatePreview = candidateLine,
-                        voiceCommandPreview = commandLine,
-                        statusMessage = "语音转向拒绝：$unavailableText",
-                    )
-                }
-                return
+            if (!isHeadingLockActiveForState(state)) {
+                clearActiveHeadingLockCommand()
             }
-            val targetHeading = normalizeCompassDegrees(currentHeading + headingLockOffsetDegrees(command))
-            clearActiveHeadingLockCommand()
-            startAppTurn(runtimeCommand, targetHeading)
+            startAppTurn(runtimeCommand)
             mutableUiState.update {
                 it.copy(
                         commandSource = CommandSource.Voice,
-                        headingLockEnabled = false,
+                        headingLockEnabled = isHeadingLockActiveForState(state),
                         selectedGear = ThrottleGear.Neutral,
                         throttleTrimPercent = 0,
                         voiceResultMessage = "已执行：${result.label}",
                     voiceCandidatePreview = candidateLine,
                     voiceCommandPreview = commandLine,
-                    statusMessage = "语音控制：${result.label}，目标 ${targetHeading.roundToInt()}°",
+                    statusMessage = "语音控制：${result.label}，已下发给主控执行",
                 )
             }
             sendCurrentCommand {
@@ -3749,6 +3593,72 @@ class ControlViewModel(application: Application) : AndroidViewModel(application)
         }
     }
 
+    private fun escDirectionConfigLine(settings: SettingsUiState): String {
+        return "ESC_CFG;LREV=${if (settings.leftEscReversed) 1 else 0};RREV=${if (settings.rightEscReversed) 1 else 0}"
+    }
+
+    private suspend fun sendEscDirectionConfig(
+        nextTransport: ControlTransport,
+        settings: SettingsUiState,
+    ): Boolean {
+        val line = escDirectionConfigLine(settings)
+        return runCatching {
+            nextTransport.sendRawLine(line)
+        }.onSuccess {
+            mutableSettingsState.update { it.copy(message = "ESC 安装方向配置已同步到主控") }
+        }.onFailure { error ->
+            mutableSettingsState.update {
+                it.copy(message = "ESC 方向配置下发失败：${error.message ?: "未知错误"}")
+            }
+        }.isSuccess
+    }
+
+    private fun updateEscDirectionConfig(
+        leftReversed: Boolean? = null,
+        rightReversed: Boolean? = null,
+        neutralMessage: String,
+    ) {
+        val nextTransport = transport
+        if (
+            nextTransport == null ||
+            mutableUiState.value.connectionState != ConnectionState.Connected ||
+            esp32OtaExclusive
+        ) {
+            mutableSettingsState.update { it.copy(message = "请先连接主控，再修改 ESC 安装方向") }
+            return
+        }
+        val currentSettings = mutableSettingsState.value
+        val nextSettings = currentSettings.copy(
+            leftEscReversed = leftReversed ?: currentSettings.leftEscReversed,
+            rightEscReversed = rightReversed ?: currentSettings.rightEscReversed,
+        )
+        if (
+            nextSettings.leftEscReversed == currentSettings.leftEscReversed &&
+            nextSettings.rightEscReversed == currentSettings.rightEscReversed
+        ) {
+            return
+        }
+
+        clearAutonomousCommands()
+        lockForDirectionChange(neutralMessage) {
+            viewModelScope.launch {
+                if (sendEscDirectionConfig(nextTransport, nextSettings)) {
+                    preferences.edit()
+                        .putBoolean(KEY_LEFT_ESC_REVERSED, nextSettings.leftEscReversed)
+                        .putBoolean(KEY_RIGHT_ESC_REVERSED, nextSettings.rightEscReversed)
+                        .apply()
+                    mutableSettingsState.update {
+                        it.copy(
+                            leftEscReversed = nextSettings.leftEscReversed,
+                            rightEscReversed = nextSettings.rightEscReversed,
+                            message = "ESC 安装方向配置已同步到主控",
+                        )
+                    }
+                }
+            }
+        }
+    }
+
     private fun sendMagCalibrationAction(
         action: String,
         requestedMessage: String,
@@ -3840,7 +3750,7 @@ class ControlViewModel(application: Application) : AndroidViewModel(application)
     }
 
     private fun ControlCommand.withRuntimeHeadingSource(): ControlCommand {
-        return copy(usePhoneHeading = false, phoneHeadingDegrees = null)
+        return this
     }
 
     private fun currentPhoneHeadingDegreesOrNull(): Float? {
@@ -3855,8 +3765,7 @@ class ControlViewModel(application: Application) : AndroidViewModel(application)
         val telemetry = currentYbImuHeadingTelemetryOrNull() ?: return null
         return ybImuHeadingDegrees(
             telemetry = telemetry,
-            offsetDegrees = currentMagneticDeclinationDegreesOrNull() ?: 0f,
-            modeId = YB_IMU_HEADING_MODE_YBY_INVERTED,
+            magneticDeclinationDegrees = currentMagneticDeclinationDegreesOrNull() ?: 0f,
         )
     }
 
@@ -3880,26 +3789,28 @@ class ControlViewModel(application: Application) : AndroidViewModel(application)
         val state = mutableUiState.value
         val ageMs = System.currentTimeMillis() - ybImuHeadingLastUpdateMs
         return state.telemetry.takeIf {
+            val fields = it.statusFields
+            val firmwareAgeMs = fields["YBAGE"]?.toLongOrNull()
             it.ybImuAvailable == true &&
-                it.ybYawDegrees != null &&
+                it.ybHeadingDegrees != null &&
+                fields["HSRC"] == "YBIMU" &&
+                fields["YBINIT"] != "0" &&
+                (firmwareAgeMs == null || firmwareAgeMs <= YB_IMU_HEADING_STALE_MS) &&
                 ageMs <= YB_IMU_HEADING_STALE_MS
         }
     }
 
     private fun currentHeadingForLockOrNull(): Float? {
-        return if (mutableSettingsState.value.usePhoneHeading) {
-            currentPhoneHeadingDegreesOrNull()
-        } else {
-            currentYbImuHeadingDegreesOrNull()
-        }
+        return currentYbImuHeadingDegreesOrNull()
+    }
+
+    private fun currentFirmwareHeadingForLockOrNull(): Float? {
+        val telemetry = currentYbImuHeadingTelemetryOrNull() ?: return null
+        return ybImuControllerHeadingDegrees(telemetry)
     }
 
     private fun headingSourceUnavailableText(): String {
-        return if (mutableSettingsState.value.usePhoneHeading) {
-            "手机指南针暂无有效读数"
-        } else {
-            "主控 IMU 航向暂无有效读数"
-        }
+        return "主控 IMU 航向暂无有效读数"
     }
 
     private fun updatePhoneHeadingSensorRegistration() {
@@ -4215,10 +4126,17 @@ class ControlViewModel(application: Application) : AndroidViewModel(application)
 
     private fun buildCurrentCommand(): ControlCommand {
         val state = mutableUiState.value
-        if (state.voiceSamplingEnabled) {
-            return ControlCommand.Idle
-        }
         val settings = mutableSettingsState.value
+        if (state.voiceSamplingEnabled) {
+            return if (state.armed) {
+                neutralArmedCommand(state.commandSource, settings)
+            } else {
+                ControlCommand.Idle
+            }
+        }
+        pendingControllerAuthorityCommandOrNull(settings)?.let { pendingCommand ->
+            return pendingCommand
+        }
         val source = state.commandSource
         if (state.canSendThrottle && state.autoNavigation.stationKeepingEnabled) {
             return buildStationKeepingCommand(state, settings)
@@ -4242,14 +4160,8 @@ class ControlViewModel(application: Application) : AndroidViewModel(application)
                 source = source,
             )
             ControlCommand(
-                leftThrottlePercent = applyEscDirection(
-                    percent = leftPercent,
-                    reversed = settings.leftEscReversed,
-                ),
-                rightThrottlePercent = applyEscDirection(
-                    percent = rightPercent,
-                    reversed = settings.rightEscReversed,
-                ),
+                leftThrottlePercent = leftPercent,
+                rightThrottlePercent = rightPercent,
                 armed = true,
                 source = source,
                 voicePowerLimitPercent = settings.voicePowerLimitPercent,
@@ -4262,6 +4174,22 @@ class ControlViewModel(application: Application) : AndroidViewModel(application)
         }
     }
 
+    private fun pendingControllerAuthorityCommandOrNull(settings: SettingsUiState): ControlCommand? {
+        val requestedArmed = pendingControllerArmedRequest ?: return null
+        if (System.currentTimeMillis() > pendingControllerArmedRequestUntilMs) {
+            pendingControllerArmedRequest = null
+            pendingControllerArmedRequestUntilMs = 0L
+            return null
+        }
+        return ControlCommand(
+            armed = requestedArmed,
+            source = CommandSource.App,
+            leftThrottlePercent = 0,
+            rightThrottlePercent = 0,
+            voicePowerLimitPercent = settings.voicePowerLimitPercent,
+        )
+    }
+
     private fun buildAutoNavigationCommand(
         state: ControlUiState,
         settings: SettingsUiState,
@@ -4270,7 +4198,7 @@ class ControlViewModel(application: Application) : AndroidViewModel(application)
         val route = autoState.routes.firstOrNull { it.id == autoState.executingRouteId }
         if (route == null || route.points.size < 2) {
             failAutoNavigation("自动导航停止：路线无效")
-            return ControlCommand.Idle
+            return neutralArmedCommand(CommandSource.App, settings)
         }
         val currentPoint = currentAutoNavigationPointOrNull(settings.autoNavigationGpsJumpResetMeters.toDouble())
         if (currentPoint == null || gpsSatelliteCount() < AUTO_NAVIGATION_MIN_SATELLITES) {
@@ -4282,14 +4210,11 @@ class ControlViewModel(application: Application) : AndroidViewModel(application)
         }
         autoNavigationGpsInvalidSinceMs = 0L
         val currentHeading = currentHeadingForLockOrNull()
-        if (currentHeading == null) {
-            val message = "自动导航暂停：${headingSourceUnavailableText()}"
-            if (autoNavigationHeadingInvalidSinceMs == 0L) {
-                autoNavigationHeadingInvalidSinceMs = System.currentTimeMillis()
-            }
-            return pauseAutoNavigationCommand(message, settings)
+        autoNavigationHeadingInvalidSinceMs = if (currentHeading == null) {
+            if (autoNavigationHeadingInvalidSinceMs == 0L) System.currentTimeMillis() else autoNavigationHeadingInvalidSinceMs
+        } else {
+            0L
         }
-        autoNavigationHeadingInvalidSinceMs = 0L
 
         var targetIndex = autoState.targetPointIndex.coerceIn(0, route.points.lastIndex)
         var targetPoint = route.points[targetIndex]
@@ -4303,80 +4228,52 @@ class ControlViewModel(application: Application) : AndroidViewModel(application)
             clearAutoNavigationExecution("自动导航完成")
             mutableUiState.update {
                 it.copy(
-                    armed = false,
                     leftThrottlePercent = 0,
                     rightThrottlePercent = 0,
                     commandSource = CommandSource.App,
                     selectedGear = ThrottleGear.Neutral,
                     throttleTrimPercent = 0,
-                    statusMessage = "自动导航完成，已锁定并回空挡",
+                    statusMessage = "自动导航完成，已回空挡，主控保持当前解锁状态",
                 )
             }
-            return ControlCommand.Idle
+            return neutralArmedCommand(CommandSource.App, settings)
         }
 
-        val targetBearing = bearingBetween(currentPoint, targetPoint)
-        val errorDegrees = shortestCompassError(targetBearing.toFloat(), currentHeading)
-        val absError = abs(errorDegrees)
+        val targetHeading = normalizeCompassDegrees(bearingBetween(currentPoint, targetPoint).toFloat())
+        val errorDegrees = currentHeading?.let { shortestCompassError(targetHeading, it) }
         val gearIndex = autoState.gearIndex.coerceIn(0, AUTO_NAVIGATION_GEAR_PERCENTS.lastIndex)
         val outputLimitPercent = minOf(
             settings.maxThrottlePercent,
             AUTO_NAVIGATION_MAX_OUTPUT_PERCENT,
         ).coerceIn(0, 100)
-        val pivoting = absError > AUTO_NAVIGATION_PIVOT_HEADING_DEGREES
-        val basePercent = if (pivoting) {
-            0
-        } else {
-            AUTO_NAVIGATION_GEAR_PERCENTS[gearIndex].coerceAtMost(outputLimitPercent)
-        }
-        val correction = if (pivoting) {
-            (if (errorDegrees >= 0f) 1 else -1) *
-                minOf(AUTO_NAVIGATION_PIVOT_PERCENT, outputLimitPercent)
-        } else {
-            (errorDegrees / AUTO_NAVIGATION_FULL_CORRECTION_DEGREES)
-                .coerceIn(-1f, 1f)
-                .let { it * AUTO_NAVIGATION_MAX_CORRECTION_PERCENT }
-                .roundToInt()
-        }
-        val leftPercent = if (pivoting) {
-            correction.coerceIn(-outputLimitPercent, outputLimitPercent)
-        } else {
-            (basePercent + correction).coerceIn(0, outputLimitPercent)
-        }
-        val rightPercent = if (pivoting) {
-            (-correction).coerceIn(-outputLimitPercent, outputLimitPercent)
-        } else {
-            (basePercent - correction).coerceIn(0, outputLimitPercent)
-        }
+        val basePercent = AUTO_NAVIGATION_GEAR_PERCENTS[gearIndex].coerceAtMost(outputLimitPercent)
+        val statusFields = state.telemetry.statusFields
+        val telemetryLeft = state.telemetry.leftOutputPercent ?: 0
+        val telemetryRight = state.telemetry.rightOutputPercent ?: 0
 
         mutableUiState.update {
             it.copy(
-                leftThrottlePercent = leftPercent,
-                rightThrottlePercent = rightPercent,
+                leftThrottlePercent = basePercent,
+                rightThrottlePercent = basePercent,
                 commandSource = CommandSource.App,
-                headingLockEnabled = false,
+                headingLockEnabled = true,
                 autoNavigation = it.autoNavigation.copy(
                     targetPointIndex = targetIndex,
                     gearIndex = gearIndex,
                     distanceToTargetMeters = distanceMeters,
                     headingErrorDegrees = errorDegrees,
-                    leftOutputPercent = leftPercent,
-                    rightOutputPercent = rightPercent,
-                    message = if (pivoting) {
-                        "自动导航转向中：目标偏差 ${absError.roundToInt()}°"
-                    } else {
-                        "自动导航执行中"
-                    },
+                    leftOutputPercent = telemetryLeft,
+                    rightOutputPercent = telemetryRight,
+                    message = "自动导航执行中：目标航向 ${targetHeading.roundToInt()}°",
                 ),
             )
         }
 
-        return ControlCommand(
-            leftThrottlePercent = applyEscDirection(leftPercent, settings.leftEscReversed),
-            rightThrottlePercent = applyEscDirection(rightPercent, settings.rightEscReversed),
-            armed = true,
-            source = CommandSource.App,
-            voicePowerLimitPercent = settings.voicePowerLimitPercent,
+        return firmwareHeadingIntentCommand(
+            targetHeadingDegrees = targetHeading,
+            basePercent = basePercent,
+            settings = settings,
+            fullCorrectionDegrees = settings.headingLockFullCorrectionDegrees,
         )
     }
 
@@ -4384,6 +4281,7 @@ class ControlViewModel(application: Application) : AndroidViewModel(application)
         message: String,
         settings: SettingsUiState,
     ): ControlCommand {
+        clearActiveHeadingLockCommand()
         mutableUiState.update {
             it.copy(
                 leftThrottlePercent = 0,
@@ -4416,18 +4314,14 @@ class ControlViewModel(application: Application) : AndroidViewModel(application)
         val lineBearing = autoState.trackLineBearingDegrees
         if (origin == null || lineBearing == null) {
             failAutoNavigation("航迹线锁定停止：目标线无效")
-            return ControlCommand.Idle
+            return neutralArmedCommand(CommandSource.App, settings)
         }
         val currentPoint = currentAutoNavigationPointOrNull(settings.autoNavigationGpsJumpResetMeters.toDouble())
         if (currentPoint == null || gpsSatelliteCount() < AUTO_NAVIGATION_MIN_SATELLITES) {
             failAutoNavigation("航迹线锁定停止：GPS 定位不足")
-            return ControlCommand.Idle
+            return neutralArmedCommand(CommandSource.App, settings)
         }
         val currentHeading = currentHeadingForLockOrNull()
-        if (currentHeading == null) {
-            failAutoNavigation("航迹线锁定停止：${headingSourceUnavailableText()}")
-            return ControlCommand.Idle
-        }
 
         val lineError = trackLineError(
             origin = origin,
@@ -4437,7 +4331,7 @@ class ControlViewModel(application: Application) : AndroidViewModel(application)
         val crossTrackAbs = abs(lineError.crossTrackMeters)
         if (crossTrackAbs > TRACK_LINE_MAX_CROSS_TRACK_METERS) {
             failAutoNavigation("航迹线锁定停止：偏离航迹 ${crossTrackAbs.roundToInt()}m")
-            return ControlCommand.Idle
+            return neutralArmedCommand(CommandSource.App, settings)
         }
 
         val targetCorrectionDegrees = Math.toDegrees(
@@ -4447,35 +4341,22 @@ class ControlViewModel(application: Application) : AndroidViewModel(application)
             TRACK_LINE_MAX_CORRECTION_DEGREES.toDouble(),
         )
         val targetHeading = normalizeCompassDegrees((lineBearing + targetCorrectionDegrees).toFloat())
-        val errorDegrees = shortestCompassError(targetHeading, currentHeading)
-        val absError = abs(errorDegrees)
+        val errorDegrees = currentHeading?.let { shortestCompassError(targetHeading, it) }
         val gearIndex = autoState.gearIndex.coerceIn(0, AUTO_NAVIGATION_GEAR_PERCENTS.lastIndex)
         val outputLimitPercent = minOf(
             settings.maxThrottlePercent,
             AUTO_NAVIGATION_MAX_OUTPUT_PERCENT,
         ).coerceIn(0, 100)
-        val basePercent = if (absError > AUTO_NAVIGATION_PIVOT_HEADING_DEGREES) {
-            0
-        } else {
-            AUTO_NAVIGATION_GEAR_PERCENTS[gearIndex].coerceAtMost(outputLimitPercent)
-        }
-        val correction = if (basePercent == 0) {
-            0
-        } else {
-            (errorDegrees / AUTO_NAVIGATION_FULL_CORRECTION_DEGREES)
-                .coerceIn(-1f, 1f)
-                .let { it * AUTO_NAVIGATION_MAX_CORRECTION_PERCENT }
-                .roundToInt()
-        }
-        val leftPercent = (basePercent + correction).coerceIn(0, outputLimitPercent)
-        val rightPercent = (basePercent - correction).coerceIn(0, outputLimitPercent)
+        val basePercent = AUTO_NAVIGATION_GEAR_PERCENTS[gearIndex].coerceAtMost(outputLimitPercent)
+        val telemetryLeft = state.telemetry.leftOutputPercent ?: 0
+        val telemetryRight = state.telemetry.rightOutputPercent ?: 0
 
         mutableUiState.update {
             it.copy(
-                leftThrottlePercent = leftPercent,
-                rightThrottlePercent = rightPercent,
+                leftThrottlePercent = basePercent,
+                rightThrottlePercent = basePercent,
                 commandSource = CommandSource.App,
-                headingLockEnabled = false,
+                headingLockEnabled = true,
                 autoNavigation = it.autoNavigation.copy(
                     gearIndex = gearIndex,
                     distanceToTargetMeters = crossTrackAbs,
@@ -4483,23 +4364,18 @@ class ControlViewModel(application: Application) : AndroidViewModel(application)
                     trackLineTargetHeadingDegrees = targetHeading,
                     trackLineCrossTrackErrorMeters = lineError.crossTrackMeters,
                     trackLineAlongTrackMeters = lineError.alongTrackMeters,
-                    leftOutputPercent = leftPercent,
-                    rightOutputPercent = rightPercent,
-                    message = if (basePercent == 0) {
-                        "目标航向偏差过大，航迹线锁定暂停推进"
-                    } else {
-                        "航迹线锁定执行中"
-                    },
+                    leftOutputPercent = telemetryLeft,
+                    rightOutputPercent = telemetryRight,
+                    message = "航迹线锁定执行中：目标航向 ${targetHeading.roundToInt()}°",
                 ),
             )
         }
 
-        return ControlCommand(
-            leftThrottlePercent = applyEscDirection(leftPercent, settings.leftEscReversed),
-            rightThrottlePercent = applyEscDirection(rightPercent, settings.rightEscReversed),
-            armed = true,
-            source = CommandSource.App,
-            voicePowerLimitPercent = settings.voicePowerLimitPercent,
+        return firmwareHeadingIntentCommand(
+            targetHeadingDegrees = targetHeading,
+            basePercent = basePercent,
+            settings = settings,
+            fullCorrectionDegrees = settings.headingLockFullCorrectionDegrees,
         )
     }
 
@@ -4512,7 +4388,7 @@ class ControlViewModel(application: Application) : AndroidViewModel(application)
         val targetHeading = autoState.stationKeepingTargetHeadingDegrees
         if (targetPoint == null || targetHeading == null) {
             failAutoNavigation("定点保持停止：目标点无效")
-            return ControlCommand.Idle
+            return neutralArmedCommand(CommandSource.App, settings)
         }
         val fusionSample = stationKeepingFusionSampleOrNull(
             state = state,
@@ -4527,9 +4403,9 @@ class ControlViewModel(application: Application) : AndroidViewModel(application)
         }
         autoNavigationGpsInvalidSinceMs = 0L
         val currentPoint = fusionSample.filteredPoint
-        val currentHeading = currentPhoneHeadingDegreesOrNull()
+        val currentHeading = currentHeadingForLockOrNull()
         if (currentHeading == null) {
-            val message = "定点保持暂停：手机指南针暂无有效读数"
+            val message = "定点保持暂停：${headingSourceUnavailableText()}"
             if (autoNavigationHeadingInvalidSinceMs == 0L) {
                 autoNavigationHeadingInvalidSinceMs = System.currentTimeMillis()
             }
@@ -4587,31 +4463,12 @@ class ControlViewModel(application: Application) : AndroidViewModel(application)
             0
         }
         val basePercent = if (movingReverse) -requestedBaseMagnitude else requestedBaseMagnitude
-        val baseCorrection = headingCorrectionPercent(
-            errorDegrees = errorDegrees,
-            toleranceDegrees = settings.headingLockToleranceDegrees,
-            fullCorrectionDegrees = STATION_KEEPING_FULL_CORRECTION_DEGREES,
-            baseMagnitudePercent = abs(basePercent),
-        )
-        val rawLeftRight = headingCorrectedThrottle(
-            leftBasePercent = basePercent,
-            rightBasePercent = basePercent,
-            errorDegrees = errorDegrees,
-            correction = baseCorrection,
-            adaptiveBoost = 0,
-            toleranceDegrees = settings.headingLockToleranceDegrees,
-            fullCorrectionDegrees = STATION_KEEPING_FULL_CORRECTION_DEGREES,
-            neutralPivotMinDifferencePercent = settings.headingLockNeutralPivotMinDifferencePercent,
-            neutralPivotMaxDifferencePercent = minOf(
-                settings.headingLockNeutralPivotMaxDifferencePercent,
-                STATION_KEEPING_MAX_PIVOT_DIFFERENCE_PERCENT,
-            ),
-            outputLimitPercent = outputLimitPercent,
-        )
-        val leftPercent = rawLeftRight.first.coerceIn(-outputLimitPercent, outputLimitPercent)
-        val rightPercent = rawLeftRight.second.coerceIn(-outputLimitPercent, outputLimitPercent)
-        val leftCommandPercent = applyEscDirection(leftPercent, settings.leftEscReversed)
-        val rightCommandPercent = applyEscDirection(rightPercent, settings.rightEscReversed)
+        val statusFields = state.telemetry.statusFields
+        val telemetryLeft = state.telemetry.leftOutputPercent ?: 0
+        val telemetryRight = state.telemetry.rightOutputPercent ?: 0
+        val firmwareCorrection = statusFields["HCORR"]?.toIntOrNull() ?: 0
+        val leftCommandPercent = state.telemetry.leftOutputPercent ?: 0
+        val rightCommandPercent = state.telemetry.rightOutputPercent ?: 0
         val decisionMessage = stationKeepingMessage(
             positionActive = positionActive,
             movingReverse = movingReverse,
@@ -4619,7 +4476,6 @@ class ControlViewModel(application: Application) : AndroidViewModel(application)
             absErrorDegrees = absError,
             finalHeadingSuppressed = finalHeadingSuppressed,
         )
-        val statusFields = state.telemetry.statusFields
         val logSnapshot = stationKeepingLogStore.append(
             StationKeepingLogEntry(
                 phoneTimeMs = System.currentTimeMillis(),
@@ -4658,9 +4514,9 @@ class ControlViewModel(application: Application) : AndroidViewModel(application)
                 outputLimitPercent = outputLimitPercent,
                 requestedBasePercent = requestedBaseMagnitude,
                 basePercent = basePercent,
-                baseCorrectionPercent = baseCorrection,
-                leftOutputPercent = leftPercent,
-                rightOutputPercent = rightPercent,
+                baseCorrectionPercent = firmwareCorrection,
+                leftOutputPercent = telemetryLeft,
+                rightOutputPercent = telemetryRight,
                 leftCommandPercent = leftCommandPercent,
                 rightCommandPercent = rightCommandPercent,
                 statusArmed = statusFields["ARMED"].orEmpty(),
@@ -4674,10 +4530,10 @@ class ControlViewModel(application: Application) : AndroidViewModel(application)
 
         mutableUiState.update {
             it.copy(
-                leftThrottlePercent = leftPercent,
-                rightThrottlePercent = rightPercent,
+                leftThrottlePercent = basePercent,
+                rightThrottlePercent = basePercent,
                 commandSource = CommandSource.App,
-                headingLockEnabled = false,
+                headingLockEnabled = true,
                 autoNavigation = it.autoNavigation.copy(
                     gearIndex = gearIndex,
                     distanceToTargetMeters = stationError.distanceMeters,
@@ -4686,8 +4542,8 @@ class ControlViewModel(application: Application) : AndroidViewModel(application)
                     stationKeepingLateralErrorMeters = stationError.lateralMeters,
                     stationKeepingPositionActive = positionActive,
                     stationKeepingMovingReverse = movingReverse,
-                    leftOutputPercent = leftPercent,
-                    rightOutputPercent = rightPercent,
+                    leftOutputPercent = telemetryLeft,
+                    rightOutputPercent = telemetryRight,
                     message = decisionMessage,
                 ),
                 stationKeepingLogPath = logSnapshot.filePath,
@@ -4695,12 +4551,15 @@ class ControlViewModel(application: Application) : AndroidViewModel(application)
             )
         }
 
-        return ControlCommand(
-            leftThrottlePercent = leftCommandPercent,
-            rightThrottlePercent = rightCommandPercent,
-            armed = true,
-            source = CommandSource.App,
-            voicePowerLimitPercent = settings.voicePowerLimitPercent,
+        return firmwareHeadingIntentCommand(
+            targetHeadingDegrees = desiredHeading,
+            basePercent = basePercent,
+            settings = settings,
+            fullCorrectionDegrees = STATION_KEEPING_FULL_CORRECTION_DEGREES,
+            maxPivotDifferencePercent = minOf(
+                settings.headingLockNeutralPivotMaxDifferencePercent,
+                STATION_KEEPING_MAX_PIVOT_DIFFERENCE_PERCENT,
+            ),
         )
     }
 
@@ -4708,21 +4567,43 @@ class ControlViewModel(application: Application) : AndroidViewModel(application)
         state: ControlUiState,
         settings: SettingsUiState,
     ): ControlCommand {
+        activeTurnCommand?.let { command ->
+            val configuredCommand = command.copy(
+                voicePowerLimitPercent = settings.voicePowerLimitPercent,
+            )
+            mutableUiState.update {
+                it.copy(
+                    commandSource = configuredCommand.source,
+                    appHeadingLockTargetDegrees = null,
+                    appHeadingLockErrorDegrees = it.telemetry.statusFields["TERR"]?.toFloatOrNull(),
+                    appHeadingLeftOutputPercent = it.telemetry.leftOutputPercent,
+                    appHeadingRightOutputPercent = it.telemetry.rightOutputPercent,
+                    appHeadingLeftCommandPercent = null,
+                    appHeadingRightCommandPercent = null,
+                )
+            }
+            return configuredCommand
+        }
         activeHeadingLockCommand?.let { command ->
-            val heartbeat = command.copy(
+            val configuredCommand = command.copy(
                 headingLockToleranceDegrees = settings.headingLockToleranceDegrees,
                 headingLockFullCorrectionDegrees = settings.headingLockFullCorrectionDegrees,
                 headingLockNeutralPivotMinDifferencePercent = settings.headingLockNeutralPivotMinDifferencePercent,
                 headingLockNeutralPivotMaxDifferencePercent = settings.headingLockNeutralPivotMaxDifferencePercent,
                 voicePowerLimitPercent = settings.voicePowerLimitPercent,
-                leftEscReversed = settings.leftEscReversed,
-                rightEscReversed = settings.rightEscReversed,
             )
-            activeHeadingLockCommand = heartbeat
+            val heartbeat = configuredCommand.asHeadingLockHeartbeat()
+            val outgoingCommand = if (activeHeadingLockStartPending) {
+                configuredCommand
+            } else {
+                heartbeat
+            }
+            activeHeadingLockStartPending = false
+            activeHeadingLockCommand = configuredCommand
             mutableUiState.update {
                 it.copy(
-                    commandSource = heartbeat.source,
-                    headingLockEnabled = heartbeat.headingLockEnabled,
+                    commandSource = outgoingCommand.source,
+                    headingLockEnabled = configuredCommand.headingLockEnabled,
                     appHeadingLockTargetDegrees = it.telemetry.targetHeadingDegrees ?: appHeadingControlTargetDegrees,
                     appHeadingLockErrorDegrees = it.telemetry.statusFields["HERR"]?.toFloatOrNull(),
                     appHeadingLockCorrectionPercent = it.telemetry.statusFields["HCORR"]?.toIntOrNull() ?: 0,
@@ -4732,548 +4613,9 @@ class ControlViewModel(application: Application) : AndroidViewModel(application)
                     appHeadingRightCommandPercent = null,
                 )
             }
-            return heartbeat
+            return outgoingCommand
         }
-        val activeCommand = activeHeadingLockCommand ?: activeTurnCommand
-        if (activeCommand == null) {
-            return ControlCommand.Idle
-        }
-        val currentHeading = currentHeadingForLockOrNull()
-        if (currentHeading == null) {
-            failAppHeadingControl("${headingSourceUnavailableText()}，已锁定并回空挡")
-            return ControlCommand.Idle
-        }
-        val targetHeading = appHeadingControlTargetDegrees ?: currentHeading.also {
-            appHeadingControlTargetDegrees = it
-        }
-        val errorDegrees = shortestCompassError(targetHeading, currentHeading)
-        val absError = abs(errorDegrees)
-        val isOneShotTurn = activeTurnCommand != null && activeHeadingLockCommand == null
-        val now = System.currentTimeMillis()
-        if (isOneShotTurn && absError <= APP_TURN_DONE_DEGREES) {
-            clearActiveTurnCommand()
-            mutableUiState.update {
-                it.copy(
-                    leftThrottlePercent = 0,
-                    rightThrottlePercent = 0,
-                    commandSource = activeCommand.source,
-                    selectedGear = ThrottleGear.Neutral,
-                    throttleTrimPercent = 0,
-                    appHeadingLockErrorDegrees = errorDegrees,
-                    appHeadingLockCorrectionPercent = 0,
-                    appHeadingLeftOutputPercent = 0,
-                    appHeadingRightOutputPercent = 0,
-                    appHeadingLeftCommandPercent = 0,
-                    appHeadingRightCommandPercent = 0,
-                    statusMessage = "角度转向完成，误差 ${errorDegrees.roundToInt()}°",
-                )
-            }
-            return ControlCommand(
-                armed = true,
-                source = CommandSource.App,
-                voicePowerLimitPercent = settings.voicePowerLimitPercent,
-            )
-        }
-        if (isOneShotTurn && now - appHeadingControlStartedAtMs > APP_TURN_TIMEOUT_MS) {
-            clearActiveTurnCommand()
-            mutableUiState.update {
-                it.copy(
-                    leftThrottlePercent = 0,
-                    rightThrottlePercent = 0,
-                    commandSource = activeCommand.source,
-                    selectedGear = ThrottleGear.Neutral,
-                    throttleTrimPercent = 0,
-                    appHeadingLockErrorDegrees = errorDegrees,
-                    appHeadingLockCorrectionPercent = 0,
-                    appHeadingLeftOutputPercent = 0,
-                    appHeadingRightOutputPercent = 0,
-                    appHeadingLeftCommandPercent = 0,
-                    appHeadingRightCommandPercent = 0,
-                    statusMessage = "角度转向超时，已回空挡",
-                )
-            }
-            return ControlCommand(
-                armed = true,
-                source = CommandSource.App,
-                voicePowerLimitPercent = settings.voicePowerLimitPercent,
-            )
-        }
-
-        if (
-            !isOneShotTurn &&
-            recordAppHeadingErrorAndDetectDivergence(
-                now = now,
-                errorDegrees = errorDegrees,
-                toleranceDegrees = activeCommand.headingLockToleranceDegrees,
-            )
-        ) {
-            failAppHeadingControl("航向锁定停止：航向误差持续扩大，已锁定并回空挡；请检查左右电机方向和航向源")
-            return ControlCommand.Idle
-        }
-
-        val baseLeftPercent = if (isOneShotTurn) 0 else state.leftThrottlePercent
-        val baseRightPercent = if (isOneShotTurn) 0 else state.rightThrottlePercent
-        val outputLimitPercent = headingOutputLimitPercent(activeCommand.source, settings)
-        val baseCorrection = headingCorrectionPercent(
-            errorDegrees = errorDegrees,
-            toleranceDegrees = activeCommand.headingLockToleranceDegrees,
-            fullCorrectionDegrees = activeCommand.headingLockFullCorrectionDegrees,
-            baseMagnitudePercent = headingBaseMagnitudePercent(baseLeftPercent, baseRightPercent),
-        )
-        val adaptiveBoost = if (isOneShotTurn) {
-            resetAppHeadingAdaptiveBoost()
-            0
-        } else {
-            updateAppHeadingAdaptiveBoost(
-                now = now,
-                errorDegrees = errorDegrees,
-                toleranceDegrees = activeCommand.headingLockToleranceDegrees,
-            )
-        }
-        val correction = (baseCorrection + adaptiveBoost).coerceIn(
-            -outputLimitPercent,
-            outputLimitPercent,
-        )
-        val rawLeftRight = headingCorrectedThrottle(
-            leftBasePercent = baseLeftPercent,
-            rightBasePercent = baseRightPercent,
-            errorDegrees = errorDegrees,
-            correction = correction,
-            adaptiveBoost = adaptiveBoost,
-            toleranceDegrees = activeCommand.headingLockToleranceDegrees,
-            fullCorrectionDegrees = activeCommand.headingLockFullCorrectionDegrees,
-            neutralPivotMinDifferencePercent = activeCommand.headingLockNeutralPivotMinDifferencePercent,
-            neutralPivotMaxDifferencePercent = activeCommand.headingLockNeutralPivotMaxDifferencePercent,
-            outputLimitPercent = outputLimitPercent,
-        )
-        val leftPercent = coerceCommandPercentForSource(rawLeftRight.first, activeCommand.source)
-        val rightPercent = coerceCommandPercentForSource(rawLeftRight.second, activeCommand.source)
-        val leftCommandPercent = applyEscDirection(leftPercent, settings.leftEscReversed)
-        val rightCommandPercent = applyEscDirection(rightPercent, settings.rightEscReversed)
-        val displayedCorrection = if (baseLeftPercent == 0 && baseRightPercent == 0) {
-            (leftPercent - rightPercent).coerceIn(-100, 100)
-        } else {
-            appliedHeadingCorrectionPercent(
-                leftBasePercent = baseLeftPercent,
-                rightBasePercent = baseRightPercent,
-                leftPercent = leftPercent,
-                rightPercent = rightPercent,
-            )
-        }
-        mutableUiState.update {
-            it.copy(
-                leftThrottlePercent = if (isOneShotTurn) it.leftThrottlePercent else baseLeftPercent,
-                rightThrottlePercent = if (isOneShotTurn) it.rightThrottlePercent else baseRightPercent,
-                commandSource = activeCommand.source,
-                headingLockEnabled = !isOneShotTurn,
-                appHeadingLockTargetDegrees = targetHeading,
-                appHeadingLockErrorDegrees = errorDegrees,
-                appHeadingLockCorrectionPercent = displayedCorrection,
-                appHeadingLeftOutputPercent = leftPercent,
-                appHeadingRightOutputPercent = rightPercent,
-                appHeadingLeftCommandPercent = leftCommandPercent,
-                appHeadingRightCommandPercent = rightCommandPercent,
-            )
-        }
-        return ControlCommand(
-            leftThrottlePercent = leftCommandPercent,
-            rightThrottlePercent = rightCommandPercent,
-            armed = true,
-            source = CommandSource.App,
-            voicePowerLimitPercent = settings.voicePowerLimitPercent,
-        )
-    }
-
-    private fun headingCorrectionPercent(
-        errorDegrees: Float,
-        toleranceDegrees: Int,
-        fullCorrectionDegrees: Int,
-        baseMagnitudePercent: Int,
-    ): Int {
-        val absError = abs(errorDegrees)
-        val tolerance = toleranceDegrees.toFloat()
-        if (absError <= tolerance) {
-            return 0
-        }
-        val cruiseRatio = headingCruiseRatio(baseMagnitudePercent)
-        val configuredFull = fullCorrectionDegrees.coerceAtLeast(toleranceDegrees + 1).toFloat()
-        val lowSpeedFull = maxOf(configuredFull, HEADING_LOCK_LOW_SPEED_FULL_CORRECTION_DEGREES)
-        val full = lerp(lowSpeedFull, configuredFull, cruiseRatio)
-            .coerceAtLeast(tolerance + 1f)
-        val maxCorrection = lerp(
-            HEADING_LOCK_LOW_SPEED_MAX_CORRECTION_PERCENT.toFloat(),
-            HEADING_LOCK_MAX_CORRECTION_PERCENT.toFloat(),
-            cruiseRatio,
-        ).roundToInt()
-        val activeError = (absError.coerceAtMost(full) - tolerance).coerceAtLeast(0f)
-        val activeRange = (full - tolerance).coerceAtLeast(1f)
-        val ratio = activeError / activeRange
-        val correction = HEADING_LOCK_MIN_CORRECTION_PERCENT +
-            ((maxCorrection - HEADING_LOCK_MIN_CORRECTION_PERCENT) * ratio).roundToInt()
-        return correction.coerceIn(HEADING_LOCK_MIN_CORRECTION_PERCENT, maxCorrection)
-            .let { if (errorDegrees < 0f) -it else it }
-    }
-
-    private fun headingBaseMagnitudePercent(leftBasePercent: Int, rightBasePercent: Int): Int {
-        return maxOf(abs(leftBasePercent), abs(rightBasePercent)).coerceIn(0, 100)
-    }
-
-    private fun appliedHeadingCorrectionPercent(
-        leftBasePercent: Int,
-        rightBasePercent: Int,
-        leftPercent: Int,
-        rightPercent: Int,
-    ): Int {
-        val leftDelta = leftPercent - leftBasePercent
-        val rightDelta = rightBasePercent - rightPercent
-        return ((leftDelta + rightDelta) / 2).coerceIn(-100, 100)
-    }
-
-    private fun updateAppHeadingAdaptiveBoost(
-        now: Long,
-        errorDegrees: Float,
-        toleranceDegrees: Int,
-    ): Int {
-        val sign = headingErrorSign(errorDegrees)
-        val absError = abs(errorDegrees)
-
-        if (sign == 0 || absError <= toleranceDegrees.toFloat()) {
-            appHeadingAdaptiveBoostPercent = (appHeadingAdaptiveBoostPercent - HEADING_LOCK_ADAPTIVE_DECAY_STEP_PERCENT)
-                .coerceAtLeast(0)
-            return 0
-        }
-
-        val windowStart = now - HEADING_LOCK_ADAPTIVE_WINDOW_MS
-        val windowSamples = appHeadingErrorSamples.filter { it.timeMs >= windowStart }
-        val oldest = windowSamples.firstOrNull()
-        if (oldest == null || now - oldest.timeMs < HEADING_LOCK_ADAPTIVE_MIN_WINDOW_MS) {
-            return appHeadingAdaptiveBoostPercent * sign
-        }
-
-        val sameDirection = windowSamples.all { sample ->
-            headingErrorSign(sample.errorDegrees) == sign &&
-                abs(sample.errorDegrees) > toleranceDegrees.toFloat()
-        }
-        val oldestAbsError = abs(oldest.errorDegrees)
-        val notImproving = absError >= oldestAbsError - HEADING_LOCK_ADAPTIVE_IMPROVEMENT_DEADBAND_DEGREES
-
-        appHeadingAdaptiveBoostPercent = when {
-            sameDirection && notImproving -> {
-                (appHeadingAdaptiveBoostPercent + HEADING_LOCK_ADAPTIVE_RISE_STEP_PERCENT)
-                    .coerceAtMost(HEADING_LOCK_ADAPTIVE_MAX_BOOST_PERCENT)
-            }
-            sameDirection -> appHeadingAdaptiveBoostPercent
-            else -> {
-                (appHeadingAdaptiveBoostPercent - HEADING_LOCK_ADAPTIVE_DECAY_STEP_PERCENT)
-                    .coerceAtLeast(0)
-            }
-        }
-        return appHeadingAdaptiveBoostPercent * sign
-    }
-
-    private fun recordAppHeadingErrorAndDetectDivergence(
-        now: Long,
-        errorDegrees: Float,
-        toleranceDegrees: Int,
-    ): Boolean {
-        appHeadingErrorSamples.addLast(AppHeadingErrorSample(now, errorDegrees))
-        trimAppHeadingErrorSamples(now)
-
-        val sign = headingErrorSign(errorDegrees)
-        val absError = abs(errorDegrees)
-        if (sign == 0 || absError <= toleranceDegrees.toFloat()) {
-            return false
-        }
-
-        val windowStart = now - HEADING_LOCK_DIVERGENCE_WINDOW_MS
-        val windowSamples = appHeadingErrorSamples.filter { it.timeMs >= windowStart }
-        val oldest = windowSamples.firstOrNull() ?: return false
-        if (now - oldest.timeMs < HEADING_LOCK_DIVERGENCE_MIN_WINDOW_MS) {
-            return false
-        }
-        val sameDirection = windowSamples.all { sample ->
-            headingErrorSign(sample.errorDegrees) == sign &&
-                abs(sample.errorDegrees) > toleranceDegrees.toFloat()
-        }
-        val errorGrowth = absError - abs(oldest.errorDegrees)
-        return sameDirection && errorGrowth >= HEADING_LOCK_DIVERGENCE_MIN_GROWTH_DEGREES
-    }
-
-    private fun trimAppHeadingErrorSamples(now: Long) {
-        val historyCutoff = now - maxOf(
-            HEADING_LOCK_ADAPTIVE_WINDOW_MS,
-            HEADING_LOCK_DIVERGENCE_WINDOW_MS,
-        ) - COMMAND_HEARTBEAT_MS
-        while (appHeadingErrorSamples.isNotEmpty() && appHeadingErrorSamples.first().timeMs < historyCutoff) {
-            appHeadingErrorSamples.removeFirst()
-        }
-    }
-
-    private fun resetAppHeadingAdaptiveBoost(): Int {
-        appHeadingErrorSamples.clear()
-        appHeadingAdaptiveBoostPercent = 0
-        return 0
-    }
-
-    private fun headingErrorSign(errorDegrees: Float): Int {
-        return when {
-            errorDegrees > 0f -> 1
-            errorDegrees < 0f -> -1
-            else -> 0
-        }
-    }
-
-    private fun headingCruiseRatio(baseMagnitudePercent: Int): Float {
-        val activeRange = (HEADING_LOCK_CRUISE_GAIN_FULL_PERCENT - HEADING_LOCK_CRUISE_GAIN_START_PERCENT)
-            .coerceAtLeast(1)
-        return ((baseMagnitudePercent - HEADING_LOCK_CRUISE_GAIN_START_PERCENT).toFloat() / activeRange)
-            .coerceIn(0f, 1f)
-    }
-
-    private fun lerp(start: Float, end: Float, ratio: Float): Float {
-        return start + (end - start) * ratio.coerceIn(0f, 1f)
-    }
-
-    private fun headingCorrectedThrottle(
-        leftBasePercent: Int,
-        rightBasePercent: Int,
-        errorDegrees: Float,
-        correction: Int,
-        adaptiveBoost: Int,
-        toleranceDegrees: Int,
-        fullCorrectionDegrees: Int,
-        neutralPivotMinDifferencePercent: Int,
-        neutralPivotMaxDifferencePercent: Int,
-        outputLimitPercent: Int,
-    ): Pair<Int, Int> {
-        val limit = outputLimitPercent.coerceIn(0, 100)
-        if (leftBasePercent == 0 && rightBasePercent == 0) {
-            val signedDifference = neutralPivotDifferencePercent(
-                errorDegrees = errorDegrees,
-                toleranceDegrees = toleranceDegrees,
-                fullCorrectionDegrees = fullCorrectionDegrees,
-                minDifferencePercent = neutralPivotMinDifferencePercent,
-                maxDifferencePercent = neutralPivotMaxDifferencePercent,
-                outputLimitPercent = limit,
-            )
-            val boostedDifference = (signedDifference + adaptiveBoost).coerceIn(-limit * 2, limit * 2)
-            return neutralPivotThrottle(
-                signedDifferencePercent = boostedDifference,
-                outputLimitPercent = limit,
-            )
-        }
-
-        val left = leftBasePercent + correction
-        val right = rightBasePercent - correction
-        val allowCounterThrust = allowsHeadingCounterThrust(leftBasePercent, rightBasePercent)
-        if (allowCounterThrust) {
-            return balancedHeadingThrottle(
-                leftPercent = left,
-                rightPercent = right,
-                minPercent = -limit,
-                maxPercent = limit,
-            )
-        }
-
-        val leftLimits = headingSideOutputLimits(leftBasePercent, outputLimitPercent)
-        val rightLimits = headingSideOutputLimits(rightBasePercent, outputLimitPercent)
-        if (leftBasePercent >= 0 && rightBasePercent >= 0) {
-            return forwardHeadingThrottle(
-                leftPercent = left,
-                rightPercent = right,
-                leftLimits = leftLimits,
-                rightLimits = rightLimits,
-            )
-        }
-        if (leftBasePercent <= 0 && rightBasePercent <= 0) {
-            return reverseHeadingThrottle(
-                leftPercent = left,
-                rightPercent = right,
-                leftLimits = leftLimits,
-                rightLimits = rightLimits,
-            )
-        }
-
-        return left.coerceIn(leftLimits.first, leftLimits.second) to
-            right.coerceIn(rightLimits.first, rightLimits.second)
-    }
-
-    private fun allowsHeadingCounterThrust(
-        leftBasePercent: Int,
-        rightBasePercent: Int,
-    ): Boolean {
-        return headingBaseMagnitudePercent(leftBasePercent, rightBasePercent) <
-            HEADING_LOCK_COUNTER_THRUST_MAX_BASE_PERCENT
-    }
-
-    private fun balancedHeadingThrottle(
-        leftPercent: Int,
-        rightPercent: Int,
-        minPercent: Int,
-        maxPercent: Int,
-    ): Pair<Int, Int> {
-        var left = leftPercent
-        var right = rightPercent
-
-        if (left > maxPercent) {
-            val overflow = left - maxPercent
-            left -= overflow
-            right -= overflow
-        }
-        if (right > maxPercent) {
-            val overflow = right - maxPercent
-            left -= overflow
-            right -= overflow
-        }
-        if (left < minPercent) {
-            val underflow = minPercent - left
-            left += underflow
-            right += underflow
-        }
-        if (right < minPercent) {
-            val underflow = minPercent - right
-            left += underflow
-            right += underflow
-        }
-        return left.coerceIn(minPercent, maxPercent) to
-            right.coerceIn(minPercent, maxPercent)
-    }
-
-    private fun forwardHeadingThrottle(
-        leftPercent: Int,
-        rightPercent: Int,
-        leftLimits: Pair<Int, Int>,
-        rightLimits: Pair<Int, Int>,
-    ): Pair<Int, Int> {
-        var left = leftPercent
-        var right = rightPercent
-
-        if (left < leftLimits.first) {
-            right += left - leftLimits.first
-            left = leftLimits.first
-        }
-        if (right < rightLimits.first) {
-            left += right - rightLimits.first
-            right = rightLimits.first
-        }
-
-        if (left > leftLimits.second) {
-            val overflow = left - leftLimits.second
-            left -= overflow
-            right -= overflow
-        }
-        if (right > rightLimits.second) {
-            val overflow = right - rightLimits.second
-            left -= overflow
-            right -= overflow
-        }
-        return left.coerceIn(leftLimits.first, leftLimits.second) to
-            right.coerceIn(rightLimits.first, rightLimits.second)
-    }
-
-    private fun reverseHeadingThrottle(
-        leftPercent: Int,
-        rightPercent: Int,
-        leftLimits: Pair<Int, Int>,
-        rightLimits: Pair<Int, Int>,
-    ): Pair<Int, Int> {
-        var left = leftPercent
-        var right = rightPercent
-
-        if (left > leftLimits.second) {
-            right += left - leftLimits.second
-            left = leftLimits.second
-        }
-        if (right > rightLimits.second) {
-            left += right - rightLimits.second
-            right = rightLimits.second
-        }
-
-        if (left < leftLimits.first) {
-            val underflow = leftLimits.first - left
-            left += underflow
-            right += underflow
-        }
-        if (right < rightLimits.first) {
-            val underflow = rightLimits.first - right
-            left += underflow
-            right += underflow
-        }
-        return left.coerceIn(leftLimits.first, leftLimits.second) to
-            right.coerceIn(rightLimits.first, rightLimits.second)
-    }
-
-    private fun neutralPivotThrottle(
-        signedDifferencePercent: Int,
-        outputLimitPercent: Int,
-    ): Pair<Int, Int> {
-        if (signedDifferencePercent == 0) {
-            return 0 to 0
-        }
-        val difference = abs(signedDifferencePercent).coerceIn(0, outputLimitPercent * 2)
-        val forward = ((difference + 1) / 2).coerceIn(0, outputLimitPercent)
-        val reverse = (difference / 2).coerceIn(0, outputLimitPercent)
-        return if (signedDifferencePercent > 0) {
-            forward to -reverse
-        } else {
-            -reverse to forward
-        }
-    }
-
-    private fun neutralPivotDifferencePercent(
-        errorDegrees: Float,
-        toleranceDegrees: Int,
-        fullCorrectionDegrees: Int,
-        minDifferencePercent: Int,
-        maxDifferencePercent: Int,
-        outputLimitPercent: Int,
-    ): Int {
-        val absError = abs(errorDegrees)
-        val tolerance = toleranceDegrees.toFloat()
-        if (absError <= tolerance) {
-            return 0
-        }
-        val minDifference = minDifferencePercent.coerceIn(0, outputLimitPercent * 2)
-        val maxDifference = maxDifferencePercent.coerceIn(minDifference, outputLimitPercent * 2)
-        val full = maxOf(
-            fullCorrectionDegrees.toFloat(),
-            HEADING_LOCK_LOW_SPEED_FULL_CORRECTION_DEGREES,
-        )
-            .coerceAtLeast((toleranceDegrees + 1).toFloat())
-            .coerceAtLeast(tolerance + 1f)
-        val activeError = (absError.coerceAtMost(full) - tolerance).coerceAtLeast(0f)
-        val activeRange = (full - tolerance).coerceAtLeast(1f)
-        val ratio = activeError / activeRange
-        val difference = minDifference + ((maxDifference - minDifference) * ratio).roundToInt()
-        return difference.coerceIn(minDifference, maxDifference)
-            .let { if (errorDegrees < 0f) -it else it }
-    }
-
-    private fun headingSideOutputLimits(
-        basePercent: Int,
-        outputLimitPercent: Int,
-    ): Pair<Int, Int> {
-        val limit = outputLimitPercent.coerceIn(0, 100)
-        val minPercent = when {
-            basePercent > 0 -> 0
-            basePercent < 0 -> -limit
-            else -> 0
-        }
-        val maxPercent = when {
-            basePercent > 0 -> limit
-            basePercent < 0 -> 0
-            else -> limit
-        }
-        return minPercent to maxPercent
-    }
-
-    private fun headingOutputLimitPercent(source: CommandSource, settings: SettingsUiState): Int {
-        val sourceLimit = if (source == CommandSource.Voice) {
-            settings.voicePowerLimitPercent
-        } else {
-            settings.maxThrottlePercent
-        }
-        return minOf(sourceLimit, HEADING_LOCK_MAX_OUTPUT_PERCENT).coerceIn(0, 100)
+        return neutralArmedCommand(CommandSource.App, settings)
     }
 
     private fun shortestCompassError(targetDegrees: Float, currentDegrees: Float): Float {
@@ -5286,11 +4628,66 @@ class ControlViewModel(application: Application) : AndroidViewModel(application)
         return delta
     }
 
-    private fun startAppHeadingLock(command: ControlCommand, targetHeadingDegrees: Float) {
+    private fun firmwareHeadingIntentCommand(
+        targetHeadingDegrees: Float,
+        basePercent: Int,
+        settings: SettingsUiState,
+        fullCorrectionDegrees: Int,
+        maxPivotDifferencePercent: Int = settings.headingLockNeutralPivotMaxDifferencePercent,
+    ): ControlCommand {
+        val normalizedTarget = normalizeCompassDegrees(targetHeadingDegrees)
+        val existing = activeHeadingLockCommand?.takeIf { it.headingLockEnabled }
+        val requestId = existing?.headingLockRequestId ?: nextHeadingLockRequestId()
+        val pivotMax = maxPivotDifferencePercent.coerceIn(
+            settings.headingLockNeutralPivotMinDifferencePercent,
+            HEADING_LOCK_NEUTRAL_PIVOT_MAX_REVERSE_PERCENT,
+        )
+        val command = ControlCommand(
+            armed = true,
+            source = CommandSource.App,
+            mode = ControlCommandMode.HeadingLock,
+            headingLockEnabled = true,
+            headingLockRequestId = requestId,
+            headingLockBaseThrottlePercent = coerceHeadingLockBasePercent(
+                percent = basePercent,
+                source = CommandSource.App,
+            ),
+            headingLockToleranceDegrees = settings.headingLockToleranceDegrees,
+            headingLockFullCorrectionDegrees = fullCorrectionDegrees.coerceIn(
+                settings.headingLockToleranceDegrees + 1,
+                180,
+            ),
+            headingLockNeutralPivotMinDifferencePercent = settings.headingLockNeutralPivotMinDifferencePercent,
+            headingLockNeutralPivotMaxDifferencePercent = pivotMax,
+            headingLockTargetDegrees = normalizedTarget,
+            voicePowerLimitPercent = settings.voicePowerLimitPercent,
+        )
+        activeHeadingLockStartPending = existing == null
+        activeHeadingLockOwnedByAutoNavigation = true
         activeHeadingLockCommand = command
-        appHeadingControlTargetDegrees = normalizeCompassDegrees(targetHeadingDegrees)
+        appHeadingControlTargetDegrees = normalizedTarget
+        mutableUiState.update {
+            it.copy(
+                headingLockEnabled = true,
+                appHeadingLockTargetDegrees = normalizedTarget,
+                appHeadingLockErrorDegrees = it.telemetry.statusFields["HERR"]?.toFloatOrNull(),
+                appHeadingLockCorrectionPercent = it.telemetry.statusFields["HCORR"]?.toIntOrNull() ?: 0,
+                appHeadingLeftOutputPercent = it.telemetry.leftOutputPercent,
+                appHeadingRightOutputPercent = it.telemetry.rightOutputPercent,
+                appHeadingLeftCommandPercent = null,
+                appHeadingRightCommandPercent = null,
+            )
+        }
+        return command
+    }
+
+    private fun startAppHeadingLock(command: ControlCommand, targetHeadingDegrees: Float) {
+        val normalizedTarget = normalizeCompassDegrees(targetHeadingDegrees)
+        activeHeadingLockCommand = command
+        activeHeadingLockStartPending = true
+        activeHeadingLockOwnedByAutoNavigation = false
+        appHeadingControlTargetDegrees = normalizedTarget
         appHeadingControlStartedAtMs = System.currentTimeMillis()
-        resetAppHeadingAdaptiveBoost()
         mutableUiState.update {
             it.copy(
                 headingLockEnabled = true,
@@ -5305,15 +4702,13 @@ class ControlViewModel(application: Application) : AndroidViewModel(application)
         }
     }
 
-    private fun startAppTurn(command: ControlCommand, targetHeadingDegrees: Float) {
+    private fun startAppTurn(command: ControlCommand) {
         activeTurnCommand = command
-        appHeadingControlTargetDegrees = normalizeCompassDegrees(targetHeadingDegrees)
         appHeadingControlStartedAtMs = System.currentTimeMillis()
-        resetAppHeadingAdaptiveBoost()
         mutableUiState.update {
             it.copy(
                 headingLockEnabled = false,
-                appHeadingLockTargetDegrees = appHeadingControlTargetDegrees,
+                appHeadingLockTargetDegrees = null,
                 appHeadingLockErrorDegrees = 0f,
                 appHeadingLockCorrectionPercent = 0,
                 appHeadingLeftOutputPercent = null,
@@ -5328,7 +4723,6 @@ class ControlViewModel(application: Application) : AndroidViewModel(application)
         clearAutonomousCommands()
         mutableUiState.update {
             it.copy(
-                armed = false,
                 leftThrottlePercent = 0,
                 rightThrottlePercent = 0,
                 commandSource = CommandSource.App,
@@ -5338,6 +4732,14 @@ class ControlViewModel(application: Application) : AndroidViewModel(application)
                 statusMessage = message,
             )
         }
+    }
+
+    private fun neutralArmedCommand(source: CommandSource, settings: SettingsUiState): ControlCommand {
+        return ControlCommand(
+            armed = true,
+            source = source,
+            voicePowerLimitPercent = settings.voicePowerLimitPercent,
+        )
     }
 
     private fun prepareRuntimeCommand(
@@ -5350,8 +4752,6 @@ class ControlViewModel(application: Application) : AndroidViewModel(application)
             return command.copy(
                 turnRequestId = if (allocateTurnRequestId) nextTurnRequestId() else previewTurnRequestId(),
                 voicePowerLimitPercent = settings.voicePowerLimitPercent,
-                leftEscReversed = settings.leftEscReversed,
-                rightEscReversed = settings.rightEscReversed,
             )
         }
         if (command.mode == ControlCommandMode.HeadingLock) {
@@ -5376,8 +4776,6 @@ class ControlViewModel(application: Application) : AndroidViewModel(application)
                 headingLockNeutralPivotMinDifferencePercent = settings.headingLockNeutralPivotMinDifferencePercent,
                 headingLockNeutralPivotMaxDifferencePercent = settings.headingLockNeutralPivotMaxDifferencePercent,
                 voicePowerLimitPercent = settings.voicePowerLimitPercent,
-                leftEscReversed = settings.leftEscReversed,
-                rightEscReversed = settings.rightEscReversed,
             )
         }
         if (!command.armed) {
@@ -5397,14 +4795,8 @@ class ControlViewModel(application: Application) : AndroidViewModel(application)
             source = command.source,
         )
         return command.copy(
-            leftThrottlePercent = applyEscDirection(
-                percent = leftPercent,
-                reversed = settings.leftEscReversed,
-            ),
-            rightThrottlePercent = applyEscDirection(
-                percent = rightPercent,
-                reversed = settings.rightEscReversed,
-            ),
+            leftThrottlePercent = leftPercent,
+            rightThrottlePercent = rightPercent,
             voicePowerLimitPercent = settings.voicePowerLimitPercent,
         )
     }
@@ -5412,21 +4804,24 @@ class ControlViewModel(application: Application) : AndroidViewModel(application)
     private fun formatCommandLine(command: ControlCommand): String {
         if (command.mode == ControlCommandMode.TurnAngle) {
             return if (command.source == CommandSource.Voice) {
-                "App 本地角度转向，语音限幅后发送普通 SRC=APP;ARM=1;L/R 心跳"
+                "主控角度转向，发送 MODE=TURN 指令"
             } else {
-                "App 本地角度转向，发送普通 SRC=APP;ARM=1;L/R 心跳"
+                "主控角度转向，发送 MODE=TURN 指令"
             }
         }
         if (command.mode == ControlCommandMode.HeadingLock) {
             return if (command.headingLockEnabled) {
                 if (command.source == CommandSource.Voice) {
-                    "固件航向锁定，语音限幅后发送 MODE=HEADING_LOCK 心跳"
+                    "固件航向锁定，发送启动请求"
                 } else {
-                    "固件航向锁定，发送 MODE=HEADING_LOCK 心跳"
+                    "固件航向锁定，发送启动请求"
                 }
             } else {
                 "退出固件航向锁定，回到普通 L/R 心跳"
             }
+        }
+        if (command.mode == ControlCommandMode.KeepAlive) {
+            return "控制保活，发送 MODE=KEEPALIVE"
         }
         return command.toWireLine()
     }
@@ -5493,9 +4888,9 @@ class ControlViewModel(application: Application) : AndroidViewModel(application)
         }
         if (command.mode == ControlCommandMode.HeadingLock) {
             return if (command.headingLockEnabled) {
-                replyWithDetail("航向已锁定")
+                replyWithDetail("已发送航向锁定请求")
             } else {
-                replyWithDetail("已取消航向锁定")
+                replyWithDetail("已发送取消航向锁定请求")
             }
         }
         if (!command.armed) {
@@ -5510,23 +4905,15 @@ class ControlViewModel(application: Application) : AndroidViewModel(application)
     private fun turnAngleReplyText(result: VoiceParseResult.Accepted, command: ControlCommand): String {
         val direction = command.turnDirection?.label ?: result.label.compactVoiceLabel()
         val angle = command.turnAngleDegrees ?: return randomVoiceAck()
-        val targetHeading = targetHeadingAfterTurn(command)
         val options = buildList {
             add(randomVoiceAck())
             add(replyWithDetail("${direction}${angle}度"))
             add("${randomVoiceAck()}，${direction}${angle}度")
             if (isHeadingLockActiveForState(mutableUiState.value)) {
                 add(replyWithDetail("锁航目标${direction}${angle}度"))
-                targetHeading?.let { add(replyWithDetail("已锁定${it}度")) }
             }
         }
         return options.random(Random.Default)
-    }
-
-    private fun targetHeadingAfterTurn(command: ControlCommand): Int? {
-        val currentHeading = currentHeadingForLockOrNull() ?: return null
-        val offset = headingLockOffsetDegrees(command)
-        return normalizeHeadingDegrees(currentHeading + offset)
     }
 
     private fun normalizeHeadingDegrees(degrees: Float): Int {
@@ -5681,25 +5068,16 @@ class ControlViewModel(application: Application) : AndroidViewModel(application)
 
     private fun clearActiveHeadingLockCommand() {
         activeHeadingLockCommand = null
+        activeHeadingLockStartPending = false
+        activeHeadingLockOwnedByAutoNavigation = false
         if (activeTurnCommand == null) {
             clearAppHeadingControlTarget()
         }
     }
 
-    private fun updateActiveHeadingLockSource(
-        source: CommandSource? = null,
-    ): Boolean {
-        val command = activeHeadingLockCommand ?: return false
-        if (!command.headingLockEnabled) {
-            return false
-        }
-        val nextSource = source ?: command.source
-        activeHeadingLockCommand = command.copy(
-            source = nextSource,
-            headingLockTargetOffsetDegrees = null,
-            voicePowerLimitPercent = mutableSettingsState.value.voicePowerLimitPercent,
-        )
-        return true
+    private fun clearPendingControllerArmedRequest() {
+        pendingControllerArmedRequest = null
+        pendingControllerArmedRequestUntilMs = 0L
     }
 
     private fun updateActiveHeadingLockBaseFromThrottle(
@@ -5723,26 +5101,26 @@ class ControlViewModel(application: Application) : AndroidViewModel(application)
             headingLockFullCorrectionDegrees = settings.headingLockFullCorrectionDegrees,
             headingLockNeutralPivotMinDifferencePercent = settings.headingLockNeutralPivotMinDifferencePercent,
             headingLockNeutralPivotMaxDifferencePercent = settings.headingLockNeutralPivotMaxDifferencePercent,
-            headingLockTargetOffsetDegrees = null,
             voicePowerLimitPercent = settings.voicePowerLimitPercent,
-            leftEscReversed = settings.leftEscReversed,
-            rightEscReversed = settings.rightEscReversed,
         )
         return true
     }
 
     private fun ControlCommand.asHeadingLockHeartbeat(): ControlCommand {
-        return if (mode == ControlCommandMode.HeadingLock) {
-            copy(headingLockTargetOffsetDegrees = null)
-        } else {
-            this
-        }
+        return ControlCommand(
+            armed = true,
+            source = source,
+            mode = ControlCommandMode.KeepAlive,
+            voicePowerLimitPercent = voicePowerLimitPercent,
+        )
     }
 
     private fun clearAutonomousCommands(autoNavigationMessage: String = "自动导航已取消") {
         realtimeVoiceActionToken++
         activeTurnCommand = null
         activeHeadingLockCommand = null
+        activeHeadingLockStartPending = false
+        activeHeadingLockOwnedByAutoNavigation = false
         clearAutoNavigationExecution(autoNavigationMessage)
         clearAppHeadingControlTarget()
     }
@@ -5768,6 +5146,9 @@ class ControlViewModel(application: Application) : AndroidViewModel(application)
     }
 
     private fun clearAutoNavigationExecution(message: String) {
+        if (activeHeadingLockOwnedByAutoNavigation) {
+            clearActiveHeadingLockCommand()
+        }
         autoNavigationFilteredPoint = null
         autoNavigationLastRawPoint = null
         stationKeepingFilteredPoint = null
@@ -5809,7 +5190,6 @@ class ControlViewModel(application: Application) : AndroidViewModel(application)
         clearAutoNavigationExecution(message)
         mutableUiState.update {
             it.copy(
-                armed = false,
                 leftThrottlePercent = 0,
                 rightThrottlePercent = 0,
                 commandSource = CommandSource.App,
@@ -5854,7 +5234,7 @@ class ControlViewModel(application: Application) : AndroidViewModel(application)
             !state.armed -> "定点保持拒绝：请先手动解锁"
             currentGpsPointOrNull() == null -> "定点保持拒绝：${navigationGpsUnavailableText()}"
             gpsSatelliteCount() < AUTO_NAVIGATION_MIN_SATELLITES -> "定点保持拒绝：GPS 卫星数不足"
-            currentPhoneHeadingDegreesOrNull() == null -> "定点保持拒绝：手机指南针暂无有效读数"
+            currentHeadingForLockOrNull() == null -> "定点保持拒绝：${headingSourceUnavailableText()}"
             else -> null
         }
     }
@@ -6239,7 +5619,6 @@ class ControlViewModel(application: Application) : AndroidViewModel(application)
     private fun clearAppHeadingControlTarget() {
         appHeadingControlTargetDegrees = null
         appHeadingControlStartedAtMs = 0L
-        resetAppHeadingAdaptiveBoost()
         mutableUiState.update {
             it.copy(
                 appHeadingLockTargetDegrees = null,
@@ -6269,10 +5648,6 @@ class ControlViewModel(application: Application) : AndroidViewModel(application)
                 voiceSampleLastMessage = "$messagePrefix：${target.label}",
             )
         }
-    }
-
-    private fun applyEscDirection(percent: Int, reversed: Boolean): Int {
-        return if (reversed) -percent else percent
     }
 
     private fun coerceSignedThrottle(percent: Int): Int {
@@ -6379,7 +5754,9 @@ class ControlViewModel(application: Application) : AndroidViewModel(application)
         }
         val activeTransport = transport ?: return false
         return runCatching {
-            activeTransport.send(command.withRuntimeHeadingSource())
+            val outgoingCommand = command.withRuntimeHeadingSource()
+            activeTransport.send(outgoingCommand)
+            appendSentCommandLog(outgoingCommand)
         }.onFailure { error ->
             handleTransportError(error)
         }.isSuccess
@@ -6503,6 +5880,7 @@ class ControlViewModel(application: Application) : AndroidViewModel(application)
         transport = null
         telemetryJob?.cancel()
         commandHeartbeatJob?.cancel()
+        clearPendingControllerArmedRequest()
         clearAutonomousCommands(autoNavigationDisconnectMessage)
         mutableUiState.update {
             it.copy(
@@ -6618,10 +5996,21 @@ class ControlViewModel(application: Application) : AndroidViewModel(application)
         telemetryJob?.cancel()
         telemetryJob = viewModelScope.launch {
             nextTransport.telemetry.collect { telemetry ->
+                appendTelemetryLog(telemetry)
+                handleControllerAuthorityLine(telemetry.lastReceivedStatus)
+                handleControllerTurnLine(telemetry.lastReceivedStatus)
+                handleControllerHeadingLockLine(telemetry.lastReceivedStatus)
                 handleControllerErrorLine(telemetry.lastReceivedStatus)
+                handleControllerFaultLine(telemetry.lastReceivedStatus)
                 handleOtaStatusLine(telemetry.lastReceivedStatus)
                 handleControllerInfoFields(telemetry.statusFields)
-                if (telemetry.ybImuAvailable == true && telemetry.ybYawDegrees != null) {
+                val receivedFields = parseControlLogFields(telemetry.lastReceivedStatus)
+                clearStaleHeadingLockUiIfNeeded(receivedFields)
+                if (
+                    receivedFields["HSRC"] == "YBIMU" &&
+                    receivedFields["YBIMU"] == "1" &&
+                    receivedFields["YBHDG"]?.toFloatOrNull() != null
+                ) {
                     ybImuHeadingLastUpdateMs = System.currentTimeMillis()
                 }
                 // IMU CSV 调试日志暂时关闭；新 IMU 到货后再打开。
@@ -6652,6 +6041,43 @@ class ControlViewModel(application: Application) : AndroidViewModel(application)
                     )
                 }
             }
+        }
+    }
+
+    private fun clearStaleHeadingLockUiIfNeeded(fields: Map<String, String>) {
+        val isFullStatus = fields.containsKey("L") || fields.containsKey("R") || fields.containsKey("LPWM")
+        if (!isFullStatus) {
+            return
+        }
+        val controllerHeadingLockActive = fields["HLOCK"] == "ACTIVE" || fields["MODE"] == "HEADING_LOCK"
+        if (controllerHeadingLockActive) {
+            return
+        }
+        if (activeHeadingLockCommand != null || activeTurnCommand != null || activeHeadingLockStartPending) {
+            return
+        }
+        val state = mutableUiState.value
+        if (
+            !state.headingLockEnabled &&
+            state.appHeadingLockTargetDegrees == null &&
+            state.appHeadingLockErrorDegrees == null &&
+            state.appHeadingLeftOutputPercent == null &&
+            state.appHeadingRightOutputPercent == null
+        ) {
+            return
+        }
+        mutableUiState.update {
+            it.copy(
+                headingLockEnabled = false,
+                appHeadingLockTargetDegrees = null,
+                appHeadingLockErrorDegrees = null,
+                appHeadingLockCorrectionPercent = 0,
+                appHeadingLeftOutputPercent = null,
+                appHeadingRightOutputPercent = null,
+                appHeadingLeftCommandPercent = null,
+                appHeadingRightCommandPercent = null,
+                statusMessage = "主控当前为普通油门，已清除本地锁航显示",
+            )
         }
     }
 
@@ -7024,16 +6450,761 @@ class ControlViewModel(application: Application) : AndroidViewModel(application)
         }
     }
 
+    private fun appendSentCommandLog(command: ControlCommand) {
+        val line = command.toWireLine()
+        if (line == lastLoggedSentCommand) {
+            return
+        }
+        lastLoggedSentCommand = line
+        appendControlLog(
+            level = ControlLogLevel.Info,
+            title = "下发命令",
+            message = summarizeCommandLine(line),
+            rawLine = line,
+        )
+    }
+
+    private fun appendTelemetryLog(telemetry: Telemetry) {
+        val line = telemetry.lastReceivedStatus
+        if (line.isBlank() || line == "--") {
+            return
+        }
+        val fields = parseControlLogFields(line)
+        val faultCode = fields["FAULT"]
+        if (line.startsWith("ERR;")) {
+            if (line != lastLoggedReceivedLine) {
+                lastLoggedReceivedLine = line
+                val errorCode = controllerErrorCode(line)
+                val detailText = controllerErrorDetailText(line)
+                appendControlLog(
+                    level = ControlLogLevel.Error,
+                    title = "主控错误",
+                    message = listOf(controllerFaultText(errorCode), detailText)
+                        .filter { it.isNotBlank() }
+                        .joinToString("；"),
+                    rawLine = line,
+                )
+            }
+            return
+        }
+        if (faultCode != null) {
+            if (line != lastLoggedReceivedLine) {
+                lastLoggedReceivedLine = line
+                val faultArmed = fields["ARMED"] == "1"
+                appendControlLog(
+                    level = ControlLogLevel.Error,
+                    title = if (faultArmed) "主控退出自主控制" else "主控退出/锁定",
+                    message = controllerFaultText(faultCode),
+                    rawLine = line,
+                )
+            }
+            return
+        }
+
+        fields["ARMED"]?.let { armedValue ->
+            val nextArmed = armedValue == "1"
+            val uiArmed = mutableUiState.value.armed
+            val unrequestedLock = !nextArmed &&
+                uiArmed &&
+                pendingControllerArmedRequest != false
+            val unrequestedUnlock = nextArmed &&
+                !uiArmed &&
+                pendingControllerArmedRequest != true
+            if (!unrequestedLock && !unrequestedUnlock && lastLoggedArmedState != nextArmed) {
+                lastLoggedArmedState = nextArmed
+                appendControlLog(
+                    level = if (nextArmed) ControlLogLevel.Info else ControlLogLevel.Warning,
+                    title = if (nextArmed) "主控已解锁" else "主控已锁定",
+                    message = if (nextArmed) "主控回传 ARMED=1" else "主控回传 ARMED=0，未携带 FAULT",
+                    rawLine = line,
+                )
+            }
+        }
+
+        fields["HSRC"]?.let { headingSource ->
+            if (lastLoggedHeadingSource != headingSource) {
+                lastLoggedHeadingSource = headingSource
+                val detailText = headingSourceDetailText(fields)
+                appendControlLog(
+                    level = ControlLogLevel.Info,
+                    title = "航向来源",
+                    message = listOf("主控当前航向来源：$headingSource", detailText)
+                        .filter { it.isNotBlank() }
+                        .joinToString("；"),
+                    rawLine = line,
+                )
+            }
+        }
+
+        val headingLockState = fields["HLOCK"]
+        if (headingLockState != null) {
+            val key = when (headingLockState) {
+                "ACTIVE" -> "ACTIVE:${fields["HID"].orEmpty()}"
+                else -> "$headingLockState:${fields["HID"].orEmpty()}:${fields["TARGET"].orEmpty()}"
+            }
+            val unrequestedHeadingLockOff = headingLockState == "OFF" &&
+                fields["FAULT"].isNullOrBlank() &&
+                (activeHeadingLockCommand != null || mutableUiState.value.headingLockEnabled)
+            if (!unrequestedHeadingLockOff && lastLoggedHeadingLockState != key) {
+                lastLoggedHeadingLockState = key
+                appendControlLog(
+                    level = if (headingLockState == "OFF") ControlLogLevel.Warning else ControlLogLevel.Info,
+                    title = "锁航状态",
+                    message = headingLockLogMessage(headingLockState, fields),
+                    rawLine = line,
+                )
+            }
+        }
+
+        fields["TURN"]?.let { turnState ->
+            val key = "TURN:$turnState:${fields["TID"].orEmpty()}:${fields["TARGET"].orEmpty()}:${fields["ERR"].orEmpty()}"
+            if (lastLoggedReceivedLine != key) {
+                lastLoggedReceivedLine = key
+                appendControlLog(
+                    level = if (turnState == "TIMEOUT") ControlLogLevel.Warning else ControlLogLevel.Info,
+                    title = "主控转向",
+                    message = when (turnState) {
+                        "START" -> "主控开始执行角度转向"
+                        "ACTIVE" -> listOfNotNull(
+                            fields["TARGET"]?.let { "目标=$it°" },
+                            fields["TERR"]?.let { "误差=$it°" },
+                        ).joinToString("；").ifBlank { "主控转向运行中" }
+                        "APPLIED" -> "主控已把角度转向应用到锁航目标"
+                        "DONE" -> "主控角度转向完成"
+                        "TIMEOUT" -> "主控角度转向超时"
+                        else -> "TURN=$turnState"
+                    },
+                    rawLine = line,
+                )
+            }
+        }
+
+        fields["HWARN"]?.let { warning ->
+            val warningKey = "$warning:${fields["HID"].orEmpty()}:${fields["HBOOST"].orEmpty()}:${fields["HERR"].orEmpty()}"
+            if (lastLoggedHeadingLockWarning != warningKey) {
+                lastLoggedHeadingLockWarning = warningKey
+                appendControlLog(
+                    level = ControlLogLevel.Warning,
+                    title = "锁航告警",
+                    message = headingLockWarningLogMessage(warning, fields),
+                    rawLine = line,
+                )
+            }
+        }
+
+        appendHeadingLockSampleLogIfNeeded(fields)
+
+        if (line.startsWith("INFO;") && line != lastLoggedReceivedLine) {
+            lastLoggedReceivedLine = line
+            appendControlLog(
+                level = ControlLogLevel.Info,
+                title = "主控信息",
+                message = listOfNotNull(
+                    fields["FW"]?.let { "FW=$it" },
+                    fields["ID"]?.let { "ID=$it" },
+                    fields["BT"]?.let { "BT=$it" },
+                ).joinToString("；").ifBlank { "收到主控信息" },
+                rawLine = line,
+            )
+        }
+    }
+
+    private fun appendHeadingLockSampleLogIfNeeded(fields: Map<String, String>) {
+        if (fields["HLOCK"] != "ACTIVE") {
+            lastHeadingLockSample = null
+            lastHeadingLockSampleLogMs = 0L
+            return
+        }
+
+        val state = mutableUiState.value
+        val userLeftPercent = fields["L"]?.toIntOrNull() ?: state.telemetry.leftOutputPercent
+        val userRightPercent = fields["R"]?.toIntOrNull() ?: state.telemetry.rightOutputPercent
+        val sample = HeadingLockSample(
+            hid = fields["HID"].orEmpty(),
+            headingDegrees = fields["YBHDG"]?.toFloatOrNull() ?: fields["HDG"]?.toFloatOrNull(),
+            targetDegrees = fields["TARGET"]?.toFloatOrNull(),
+            errorDegrees = fields["HERR"]?.toFloatOrNull(),
+            leftUserPercent = userLeftPercent,
+            rightUserPercent = userRightPercent,
+            gearLabel = state.selectedGear.label,
+            gearBasePercent = selectedGearThrottle(state.selectedGear, state.throttleTrimPercent),
+            phase = fields["HPHASE"].orEmpty(),
+            correctionPercent = fields["HCORR"]?.toIntOrNull(),
+            boostPercent = fields["HBOOST"]?.toIntOrNull(),
+            referenceRateDegS = fields["HREF"]?.toFloatOrNull(),
+            rateErrorDegS = fields["HRERR"]?.toFloatOrNull(),
+            rateDotDegS2 = fields["HRDOT"]?.toFloatOrNull(),
+            innerPercent = fields["HINNER"]?.toFloatOrNull(),
+            disturbancePercent = fields["HFHAT"]?.toFloatOrNull(),
+        )
+        val now = System.currentTimeMillis()
+        val previous = lastHeadingLockSample
+        val elapsedMs = now - lastHeadingLockSampleLogMs
+        val shouldLog = previous == null ||
+            elapsedMs >= HEADING_LOCK_SAMPLE_LOG_INTERVAL_MS ||
+            (
+                elapsedMs >= HEADING_LOCK_SAMPLE_LOG_MIN_CHANGE_INTERVAL_MS &&
+                    sample.hasMaterialChangeFrom(previous)
+                )
+        if (!shouldLog) {
+            return
+        }
+
+        lastHeadingLockSample = sample
+        lastHeadingLockSampleLogMs = now
+        appendControlLog(
+            level = ControlLogLevel.Info,
+            title = "锁航采样",
+            message = sample.toLogMessage(),
+            rawLine = sample.toCompactLine(),
+        )
+    }
+
+    private fun appendControlLog(
+        level: ControlLogLevel,
+        title: String,
+        message: String,
+        rawLine: String? = null,
+    ) {
+        val entry = ControlLogEntry(
+            id = nextControlLogId++,
+            timestampMs = System.currentTimeMillis(),
+            level = level,
+            title = title,
+            message = message,
+            rawLine = rawLine,
+        )
+        mutableUiState.update {
+            it.copy(controlLog = (listOf(entry) + it.controlLog).take(MAX_CONTROL_LOG_ENTRIES))
+        }
+        viewModelScope.launch(Dispatchers.IO) {
+            controlLogFileStore.append(entry)
+        }
+    }
+
+    private fun appendRateLimitedUnrequestedControllerLockLog(line: String) {
+        val now = System.currentTimeMillis()
+        if (now - lastUnrequestedControllerLockLogMs < UNREQUESTED_STATE_LOG_INTERVAL_MS) {
+            return
+        }
+        lastUnrequestedControllerLockLogMs = now
+        appendControlLog(
+            level = ControlLogLevel.Warning,
+            title = "拒绝无授权锁定",
+            message = "已解锁状态下收到无故 ARMED=0；继续维持用户解锁目标",
+            rawLine = line,
+        )
+    }
+
+    private fun appendRateLimitedUnrequestedControllerUnlockLog(line: String) {
+        val now = System.currentTimeMillis()
+        if (now - lastUnrequestedControllerUnlockLogMs < UNREQUESTED_STATE_LOG_INTERVAL_MS) {
+            return
+        }
+        lastUnrequestedControllerUnlockLogMs = now
+        appendControlLog(
+            level = ControlLogLevel.Warning,
+            title = "拒绝无授权解锁",
+            message = "锁定状态下收到无授权 ARMED=1；继续维持用户锁定目标",
+            rawLine = line,
+        )
+    }
+
+    private fun appendRateLimitedUnrequestedHeadingLockOffLog(line: String) {
+        val now = System.currentTimeMillis()
+        if (now - lastUnrequestedHeadingLockOffLogMs < UNREQUESTED_STATE_LOG_INTERVAL_MS) {
+            return
+        }
+        lastUnrequestedHeadingLockOffLogMs = now
+        appendControlLog(
+            level = ControlLogLevel.Warning,
+            title = "拒绝无授权退出锁航",
+            message = "锁航状态下收到无故 HLOCK=OFF；继续维持用户锁航目标",
+            rawLine = line,
+        )
+    }
+
+    private fun parseControlLogFields(line: String): Map<String, String> {
+        return line.split(';')
+            .drop(1)
+            .mapNotNull { token ->
+                val index = token.indexOf('=')
+                if (index <= 0) {
+                    null
+                } else {
+                    token.substring(0, index) to token.substring(index + 1)
+                }
+            }
+            .toMap()
+    }
+
+    private fun summarizeCommandLine(line: String): String {
+        val fields = parseControlLogFields("CMD;$line")
+        val mode = fields["MODE"] ?: "THROTTLE"
+        val source = fields["SRC"] ?: "APP"
+        val armed = fields["ARM"] ?: "0"
+        val parts = mutableListOf("SRC=$source", "ARM=$armed", "MODE=$mode")
+        fields["HLOCK"]?.let { parts += "HLOCK=$it" }
+        fields["BASE"]?.let { parts += "BASE=$it%" }
+        fields["HID"]?.let { parts += "HID=$it" }
+        fields["H_SRC"]?.let { parts += "H_SRC=$it" }
+        if (mode == "THROTTLE") {
+            fields["L"]?.let { parts += "L=$it%" }
+            fields["R"]?.let { parts += "R=$it%" }
+        }
+        return parts.joinToString("；")
+    }
+
+    private fun headingLockLogMessage(
+        state: String,
+        fields: Map<String, String>,
+    ): String {
+        return when (state) {
+            "START" -> listOfNotNull(
+                "锁航开始",
+                fields["HID"]?.let { "HID=$it" },
+                fields["TARGET"]?.let { "目标=$it°" },
+            ).joinToString("；")
+            "ACTIVE" -> listOfNotNull(
+                "锁航运行中",
+                fields["HID"]?.let { "HID=$it" },
+                fields["TARGET"]?.let { "目标=$it°" },
+                fields["HERR"]?.let { "误差=$it°" },
+                fields["HREF"]?.let { "目标角速=$it°/s" },
+                fields["HRATE"]?.let { "角速=$it°/s" },
+                fields["HFHAT"]?.let { "扰动=$it%" },
+                fields["HCORR"]?.let { "修正=$it%" },
+            ).joinToString("；")
+            "OFF" -> "锁航关闭，主控回传 HLOCK=OFF"
+            else -> "锁航状态：$state"
+        }
+    }
+
+    private fun headingLockWarningLogMessage(
+        warning: String,
+        fields: Map<String, String>,
+    ): String {
+        return when (warning) {
+            "HEADING_LOCK_DIVERGED" -> listOfNotNull(
+                "锁航误差扩大，主控继续锁航并回到保守差速",
+                fields["HERR"]?.let { "误差=$it°" },
+                fields["HCORR"]?.let { "修正=$it%" },
+                fields["HFHAT"]?.let { "扰动=$it%" },
+            ).joinToString("；")
+            else -> listOfNotNull(
+                "锁航告警：$warning",
+                fields["HERR"]?.let { "误差=$it°" },
+                fields["HFHAT"]?.let { "扰动=$it%" },
+            ).joinToString("；")
+        }
+    }
+
+    private data class HeadingLockSample(
+        val hid: String,
+        val headingDegrees: Float?,
+        val targetDegrees: Float?,
+        val errorDegrees: Float?,
+        val leftUserPercent: Int?,
+        val rightUserPercent: Int?,
+        val gearLabel: String,
+        val gearBasePercent: Int,
+        val phase: String,
+        val correctionPercent: Int?,
+        val boostPercent: Int?,
+        val referenceRateDegS: Float?,
+        val rateErrorDegS: Float?,
+        val rateDotDegS2: Float?,
+        val innerPercent: Float?,
+        val disturbancePercent: Float?,
+    ) {
+        fun hasMaterialChangeFrom(previous: HeadingLockSample): Boolean {
+            return hid != previous.hid ||
+                gearLabel != previous.gearLabel ||
+                phase != previous.phase ||
+                floatDeltaAtLeast(errorDegrees, previous.errorDegrees, 3.0f) ||
+                intDeltaAtLeast(leftUserPercent, previous.leftUserPercent, 5) ||
+                intDeltaAtLeast(rightUserPercent, previous.rightUserPercent, 5) ||
+                intDeltaAtLeast(correctionPercent, previous.correctionPercent, 5) ||
+                intDeltaAtLeast(boostPercent, previous.boostPercent, 5) ||
+                floatDeltaAtLeast(referenceRateDegS, previous.referenceRateDegS, 5.0f) ||
+                floatDeltaAtLeast(disturbancePercent, previous.disturbancePercent, 5.0f)
+        }
+
+        fun toLogMessage(): String {
+            return listOf(
+                "船头=${headingDegrees.degreesText()}",
+                "目标=${targetDegrees.degreesText()}",
+                "误差=${errorDegrees.signedDegreesText()}",
+                "左=${leftUserPercent.signedPercentText()}",
+                "右=${rightUserPercent.signedPercentText()}",
+                "档位=$gearLabel(${gearBasePercent.signedPercentText()})",
+                if (phase.isNotBlank()) "阶段=$phase" else null,
+                referenceRateDegS?.let { "目标角速=${it.signedRateText()}" },
+                rateErrorDegS?.let { "角速误差=${it.signedRateText()}" },
+                rateDotDegS2?.let { "角加速=${it.signedAccelText()}" },
+                innerPercent?.let { "内环=${it.signedPercentFloatText()}" },
+                disturbancePercent?.let { "扰动=${it.signedPercentFloatText()}" },
+                correctionPercent?.let { "修正=${it.signedPercentText()}" },
+            ).filterNotNull().joinToString("；")
+        }
+
+        fun toCompactLine(): String {
+            return listOf(
+                "HLOCK_SAMPLE",
+                "HID=${hid.ifBlank { "--" }}",
+                "HDG=${headingDegrees.numberText()}",
+                "TARGET=${targetDegrees.numberText()}",
+                "HERR=${errorDegrees.numberText()}",
+                "L_USER=${leftUserPercent?.toString() ?: "--"}",
+                "R_USER=${rightUserPercent?.toString() ?: "--"}",
+                "GEAR=$gearLabel",
+                "GBASE=$gearBasePercent",
+                "HPHASE=${phase.ifBlank { "--" }}",
+                "HREF=${referenceRateDegS.numberText()}",
+                "HRERR=${rateErrorDegS.numberText()}",
+                "HRDOT=${rateDotDegS2.numberText()}",
+                "HINNER=${innerPercent.numberText()}",
+                "HFHAT=${disturbancePercent.numberText()}",
+                "HCORR=${correctionPercent?.toString() ?: "--"}",
+                "HBOOST=${boostPercent?.toString() ?: "--"}",
+            ).joinToString(";")
+        }
+
+        private fun Float?.degreesText(): String {
+            return this?.let { "%.1f°".format(Locale.US, it) } ?: "--"
+        }
+
+        private fun Float?.signedDegreesText(): String {
+            return this?.let {
+                if (it > 0f) "+%.1f°".format(Locale.US, it) else "%.1f°".format(Locale.US, it)
+            } ?: "--"
+        }
+
+        private fun Float?.numberText(): String {
+            return this?.let { "%.1f".format(Locale.US, it) } ?: "--"
+        }
+
+        private fun Int?.signedPercentText(): String {
+            return this?.let { if (it > 0) "+$it%" else "$it%" } ?: "--"
+        }
+
+        private fun Float.signedPercentFloatText(): String {
+            return if (this > 0f) "+%.1f%%".format(Locale.US, this) else "%.1f%%".format(Locale.US, this)
+        }
+
+        private fun Float.signedRateText(): String {
+            return if (this > 0f) "+%.1f°/s".format(Locale.US, this) else "%.1f°/s".format(Locale.US, this)
+        }
+
+        private fun Float.signedAccelText(): String {
+            return if (this > 0f) "+%.1f°/s²".format(Locale.US, this) else "%.1f°/s²".format(Locale.US, this)
+        }
+
+        private fun floatDeltaAtLeast(left: Float?, right: Float?, threshold: Float): Boolean {
+            if (left == null || right == null) {
+                return left != right
+            }
+            return abs(left - right) >= threshold
+        }
+
+        private fun intDeltaAtLeast(left: Int?, right: Int?, threshold: Int): Boolean {
+            if (left == null || right == null) {
+                return left != right
+            }
+            return abs(left - right) >= threshold
+        }
+    }
+
+    private fun handleControllerAuthorityLine(line: String) {
+        if (!line.startsWith("STATUS;")) {
+            return
+        }
+        val fields = parseControlLogFields(line)
+        val armedValue = fields["ARMED"] ?: return
+        val controllerArmed = when (armedValue) {
+            "1" -> true
+            "0" -> false
+            else -> return
+        }
+        val currentState = mutableUiState.value
+        val pendingRequest = pendingControllerArmedRequest
+        if (pendingRequest != null) {
+            val now = System.currentTimeMillis()
+            if (controllerArmed == pendingRequest) {
+                pendingControllerArmedRequest = null
+                pendingControllerArmedRequestUntilMs = 0L
+                applyControllerArmedState(
+                    controllerArmed = controllerArmed,
+                    fields = fields,
+                    announce = true,
+                )
+                return
+            }
+            if (now <= pendingControllerArmedRequestUntilMs) {
+                mutableUiState.update {
+                    it.copy(
+                        statusMessage = if (pendingRequest) {
+                            "等待主控解锁确认：当前仍回传 ARMED=0"
+                        } else {
+                            "等待主控锁定确认：当前仍回传 ARMED=1"
+                        },
+                    )
+                }
+                return
+            }
+            pendingControllerArmedRequest = null
+            pendingControllerArmedRequestUntilMs = 0L
+            mutableUiState.update {
+                it.copy(
+                    statusMessage = if (pendingRequest) {
+                        "主控未确认解锁，当前仍为锁定"
+                    } else {
+                        "主控未确认锁定，当前仍为解锁"
+                    },
+                )
+            }
+            speakVoiceReply(if (pendingRequest) "主控未确认解锁" else "主控未确认锁定")
+        }
+
+        val faultText = fields["FAULT"]?.let(::controllerFaultText)
+        if (!controllerArmed && currentState.armed && pendingControllerArmedRequest != false && faultText == null) {
+            handleUnrequestedControllerLock(line)
+            return
+        }
+        if (controllerArmed && !currentState.armed && pendingControllerArmedRequest != true) {
+            handleUnrequestedControllerUnlock(line)
+            return
+        }
+
+        if (controllerArmed == currentState.armed) {
+            return
+        }
+
+        applyControllerArmedState(
+            controllerArmed = controllerArmed,
+            fields = fields,
+            announce = false,
+        )
+    }
+
+    private fun handleUnrequestedControllerLock(line: String) {
+        pendingControllerArmedRequest = true
+        pendingControllerArmedRequestUntilMs = System.currentTimeMillis() + CONTROLLER_ARM_CONFIRM_TIMEOUT_MS
+        appendRateLimitedUnrequestedControllerLockLog(line)
+        mutableUiState.update {
+            it.copy(
+                statusMessage = "主控无授权回传 ARMED=0；按用户规则继续维持解锁目标",
+            )
+        }
+        sendCurrentCommand()
+    }
+
+    private fun handleUnrequestedControllerUnlock(line: String) {
+        pendingControllerArmedRequest = false
+        pendingControllerArmedRequestUntilMs = System.currentTimeMillis() + CONTROLLER_ARM_CONFIRM_TIMEOUT_MS
+        appendRateLimitedUnrequestedControllerUnlockLog(line)
+        mutableUiState.update {
+            it.copy(
+                statusMessage = "主控无授权回传 ARMED=1；按用户规则继续维持锁定目标",
+            )
+        }
+        sendCurrentCommand()
+    }
+
+    private fun applyControllerArmedState(
+        controllerArmed: Boolean,
+        fields: Map<String, String>,
+        announce: Boolean,
+    ) {
+        if (!controllerArmed) {
+            clearAutonomousCommands()
+            val faultText = fields["FAULT"]?.let(::controllerFaultText)
+            mutableUiState.update {
+                it.copy(
+                    armed = false,
+                    leftThrottlePercent = 0,
+                    rightThrottlePercent = 0,
+                    commandSource = CommandSource.App,
+                    headingLockEnabled = false,
+                    selectedGear = ThrottleGear.Neutral,
+                    throttleTrimPercent = 0,
+                    appHeadingLockTargetDegrees = null,
+                    appHeadingLockErrorDegrees = null,
+                    appHeadingLockCorrectionPercent = 0,
+                    appHeadingLeftOutputPercent = null,
+                    appHeadingRightOutputPercent = null,
+                    appHeadingLeftCommandPercent = null,
+                    appHeadingRightCommandPercent = null,
+                    statusMessage = faultText?.let { reason ->
+                        "主控已锁定：$reason"
+                    } ?: "主控回传 ARMED=0，App 已同步为锁定",
+                )
+            }
+            if (announce) {
+                speakVoiceReply(faultText?.let { "主控已锁定，$it" } ?: "主控已锁定")
+            }
+            return
+        }
+
+        if (mutableUiState.value.connectionState == ConnectionState.Connected) {
+            mutableUiState.update {
+                it.copy(
+                    armed = true,
+                    statusMessage = "主控回传 ARMED=1，App 已同步为解锁",
+                )
+            }
+            if (announce) {
+                speakVoiceReply("主控已解锁")
+            }
+        }
+    }
+
+    private fun handleControllerHeadingLockLine(line: String) {
+        if (!line.startsWith("STATUS;")) {
+            return
+        }
+        val fields = parseControlLogFields(line)
+        val headingLockState = fields["HLOCK"] ?: return
+        when (headingLockState) {
+            "START",
+            "ACTIVE" -> {
+                val target = fields["TARGET"]?.toFloatOrNull()
+                val error = fields["HERR"]?.toFloatOrNull()
+                val correction = fields["HCORR"]?.toFloatOrNull()?.roundToInt()
+                mutableUiState.update {
+                    it.copy(
+                        headingLockEnabled = true,
+                        appHeadingLockTargetDegrees = target ?: it.appHeadingLockTargetDegrees,
+                        appHeadingLockErrorDegrees = error ?: it.appHeadingLockErrorDegrees,
+                        appHeadingLockCorrectionPercent = correction ?: it.appHeadingLockCorrectionPercent,
+                        statusMessage = if (headingLockState == "START") {
+                            "主控已开始航向锁定"
+                        } else {
+                            "主控航向锁定运行中"
+                        },
+                    )
+                }
+            }
+            "OFF" -> {
+                if (activeHeadingLockCommand == null && !mutableUiState.value.headingLockEnabled) {
+                    return
+                }
+                if (fields["FAULT"].isNullOrBlank()) {
+                    appendRateLimitedUnrequestedHeadingLockOffLog(line)
+                    mutableUiState.update {
+                        it.copy(
+                            headingLockEnabled = true,
+                            statusMessage = "主控无故回传 HLOCK=OFF；按用户规则继续维持航向锁定目标",
+                        )
+                    }
+                    sendCurrentCommand()
+                    return
+                }
+                clearActiveHeadingLockCommand()
+                mutableUiState.update {
+                    it.copy(
+                        commandSource = CommandSource.App,
+                        headingLockEnabled = false,
+                        appHeadingLockTargetDegrees = null,
+                        appHeadingLockErrorDegrees = null,
+                        appHeadingLockCorrectionPercent = 0,
+                        appHeadingLeftOutputPercent = null,
+                        appHeadingRightOutputPercent = null,
+                        appHeadingLeftCommandPercent = null,
+                        appHeadingRightCommandPercent = null,
+                        statusMessage = "主控回传 HLOCK=OFF，App 已同步为未锁航",
+                    )
+                }
+            }
+        }
+    }
+
+    private fun handleControllerTurnLine(line: String) {
+        if (!line.startsWith("STATUS;")) {
+            return
+        }
+        val fields = parseControlLogFields(line)
+        val turnState = fields["TURN"] ?: return
+        when (turnState) {
+            "START" -> {
+                mutableUiState.update {
+                    it.copy(
+                        commandSource = CommandSource.Voice,
+                        statusMessage = "主控已开始角度转向",
+                    )
+                }
+            }
+            "APPLIED" -> {
+                clearActiveTurnCommand()
+                mutableUiState.update {
+                    it.copy(
+                        commandSource = CommandSource.Voice,
+                        headingLockEnabled = true,
+                        appHeadingLockTargetDegrees = fields["TARGET"]?.toFloatOrNull() ?: it.appHeadingLockTargetDegrees,
+                        statusMessage = "主控已更新锁航目标",
+                    )
+                }
+            }
+            "DONE" -> {
+                clearActiveTurnCommand()
+                mutableUiState.update {
+                    it.copy(
+                        leftThrottlePercent = 0,
+                        rightThrottlePercent = 0,
+                        commandSource = CommandSource.Voice,
+                        selectedGear = ThrottleGear.Neutral,
+                        throttleTrimPercent = 0,
+                        appHeadingLockErrorDegrees = fields["ERR"]?.toFloatOrNull() ?: it.appHeadingLockErrorDegrees,
+                        appHeadingLeftOutputPercent = 0,
+                        appHeadingRightOutputPercent = 0,
+                        statusMessage = "主控角度转向完成",
+                    )
+                }
+            }
+            "TIMEOUT" -> {
+                clearActiveTurnCommand()
+                mutableUiState.update {
+                    it.copy(
+                        leftThrottlePercent = 0,
+                        rightThrottlePercent = 0,
+                        commandSource = CommandSource.Voice,
+                        selectedGear = ThrottleGear.Neutral,
+                        throttleTrimPercent = 0,
+                        statusMessage = "主控角度转向超时，已回空挡",
+                    )
+                }
+            }
+        }
+    }
+
     private fun handleControllerErrorLine(line: String) {
-        if (!line.startsWith("ERR;") || line == lastHandledControllerErrorLine) {
+        if (!line.startsWith("ERR;")) {
+            return
+        }
+        val errorCode = controllerErrorCode(line)
+        val detailText = controllerErrorDetailText(line)
+        if (activeHeadingLockCommand != null && errorCode == "YB_HEADING_UNAVAILABLE") {
+            lastHandledControllerErrorLine = line
+            mutableUiState.update {
+                it.copy(
+                    headingLockEnabled = true,
+                    appHeadingLockCorrectionPercent = 0,
+                    statusMessage = "主控暂时没有 IMU 航向${detailText.prependIfNotBlank("，")}；按用户规则继续维持锁航目标",
+                )
+            }
+            sendCurrentCommand()
+            return
+        }
+
+        val hadAutonomousCommand = activeTurnCommand != null || activeHeadingLockCommand != null
+        if (!hadAutonomousCommand && line == lastHandledControllerErrorLine) {
             return
         }
         lastHandledControllerErrorLine = line
 
-        val hadAutonomousCommand = activeTurnCommand != null || activeHeadingLockCommand != null
         if (!hadAutonomousCommand) {
             mutableUiState.update {
-                it.copy(statusMessage = "主控错误：${line.removePrefix("ERR;")}")
+                it.copy(statusMessage = "主控错误：$errorCode${detailText.prependIfNotBlank("，")}")
             }
             return
         }
@@ -7045,10 +7216,116 @@ class ControlViewModel(application: Application) : AndroidViewModel(application)
                 headingLockEnabled = false,
                 selectedGear = ThrottleGear.Neutral,
                 throttleTrimPercent = 0,
-                statusMessage = "主控拒绝自主控制：${line.removePrefix("ERR;")}，已回到手动心跳",
+                statusMessage = "主控拒绝自主控制：$errorCode${detailText.prependIfNotBlank("，")}，已回到手动心跳",
             )
         }
         sendCurrentCommand()
+    }
+
+    private fun handleControllerFaultLine(line: String) {
+        if (!line.startsWith("STATUS;") || !line.contains("FAULT=")) {
+            return
+        }
+        val faultCode = line.substringAfter("FAULT=", missingDelimiterValue = "")
+            .substringBefore(';')
+            .trim()
+        if (faultCode.isBlank()) {
+            return
+        }
+        if (faultCode == "HEADING_LOCK_DIVERGED") {
+            appendRateLimitedUnrequestedHeadingLockOffLog(line)
+            mutableUiState.update {
+                it.copy(
+                    headingLockEnabled = isHeadingLockActiveForState(it) || it.headingLockEnabled,
+                    statusMessage = "主控报告锁航误差扩大；按用户规则继续维持锁航，不退出",
+                )
+            }
+            sendCurrentCommand()
+            return
+        }
+
+        val hadAutonomousCommand = activeTurnCommand != null ||
+            activeHeadingLockCommand != null ||
+            mutableUiState.value.headingLockEnabled
+        if (!hadAutonomousCommand && line == lastHandledControllerFaultLine) {
+            return
+        }
+        lastHandledControllerFaultLine = line
+
+        val statusArmed = when {
+            line.startsWith("STATUS;ARMED=0") || line.contains(";ARMED=0") -> false
+            line.startsWith("STATUS;ARMED=1") || line.contains(";ARMED=1") -> true
+            else -> mutableUiState.value.armed
+        }
+        val faultText = controllerFaultText(faultCode)
+        if (!hadAutonomousCommand) {
+            mutableUiState.update {
+                it.copy(
+                    armed = statusArmed,
+                    statusMessage = "主控故障：$faultText",
+                )
+            }
+            return
+        }
+
+        clearAutonomousCommands()
+        mutableUiState.update {
+            it.copy(
+                armed = statusArmed,
+                leftThrottlePercent = 0,
+                rightThrottlePercent = 0,
+                commandSource = CommandSource.App,
+                headingLockEnabled = false,
+                selectedGear = ThrottleGear.Neutral,
+                throttleTrimPercent = 0,
+                appHeadingLockTargetDegrees = null,
+                appHeadingLockErrorDegrees = null,
+                appHeadingLockCorrectionPercent = 0,
+                appHeadingLeftOutputPercent = null,
+                appHeadingRightOutputPercent = null,
+                appHeadingLeftCommandPercent = null,
+                appHeadingRightCommandPercent = null,
+                statusMessage = "主控退出自主控制：$faultText，已回空挡",
+            )
+        }
+        sendCurrentCommand()
+    }
+
+    private fun controllerFaultText(faultCode: String): String {
+        return when (faultCode) {
+            "YB_HEADING_UNAVAILABLE" -> "主控 IMU 航向中断"
+            "HEADING_LOCK_DIVERGED" -> "锁航误差扩大警告"
+            "HEADING_UNAVAILABLE" -> "航向暂无有效读数"
+            "PHONE_HEADING_TIMEOUT" -> "手机航向超时"
+            "BT_TIMEOUT" -> "蓝牙控制心跳超时"
+            "YB_IMU_READ_FAILED" -> "主控 IMU 读取失败"
+            "IMU_MOTION_READ_FAILED" -> "运动传感器读取失败"
+            "IMU_MAG_READ_FAILED" -> "磁力计读取失败"
+            else -> faultCode
+        }
+    }
+
+    private fun controllerErrorCode(line: String): String {
+        return line.removePrefix("ERR;").substringBefore(';')
+    }
+
+    private fun controllerErrorDetailText(line: String): String {
+        val fields = parseControlLogFields(line)
+        return headingSourceDetailText(fields)
+    }
+
+    private fun headingSourceDetailText(fields: Map<String, String>): String {
+        return listOfNotNull(
+            fields["HSRC"]?.let { "HSRC=$it" },
+            fields["YBIMU"]?.let { "YBIMU=$it" },
+            fields["YBINIT"]?.let { "YBINIT=$it" },
+            fields["YBAGE"]?.let { "YBAGE=${it}ms" },
+            fields["YBHDG"]?.let { "YBHDG=$it°" },
+        ).joinToString("，")
+    }
+
+    private fun String.prependIfNotBlank(prefix: String): String {
+        return if (isBlank()) "" else prefix + this
     }
 
     private fun saveBluetoothDevice(deviceInfo: BluetoothDeviceInfo) {
@@ -7089,22 +7366,6 @@ class ControlViewModel(application: Application) : AndroidViewModel(application)
             savedHeadingLockFullCorrection
         }
         val headingLockTolerance = loadHeadingLockToleranceDegrees(headingLockFullCorrection)
-        val savedYbImuHeadingMode = preferences.getInt(KEY_YB_IMU_HEADING_MODE, YB_IMU_HEADING_MODE_DEFAULT)
-        val ybImuHeadingMode = if (
-            !preferences.getBoolean(KEY_YB_IMU_HEADING_INVERTED_DEFAULT_MIGRATED, false) &&
-            savedYbImuHeadingMode == YB_IMU_HEADING_MODE_YBY
-        ) {
-            preferences.edit()
-                .putInt(KEY_YB_IMU_HEADING_MODE, YB_IMU_HEADING_MODE_YBY_INVERTED)
-                .putBoolean(KEY_YB_IMU_HEADING_INVERTED_DEFAULT_MIGRATED, true)
-                .apply()
-            YB_IMU_HEADING_MODE_YBY_INVERTED
-        } else {
-            preferences.edit()
-                .putBoolean(KEY_YB_IMU_HEADING_INVERTED_DEFAULT_MIGRATED, true)
-                .apply()
-            savedYbImuHeadingMode
-        }
         return SettingsUiState(
             bluetoothAvailable = BluetoothClassicTransport.isBluetoothAvailable(),
             bluetoothEnabled = BluetoothClassicTransport.isBluetoothEnabled(),
@@ -7146,13 +7407,7 @@ class ControlViewModel(application: Application) : AndroidViewModel(application)
                     AUTO_NAVIGATION_GPS_JUMP_RESET_DEFAULT_METERS,
                 ),
             ),
-            usePhoneHeading = preferences.getBoolean(KEY_USE_PHONE_HEADING, true),
-            ybImuHeadingMode = coerceYbImuHeadingModeId(
-                ybImuHeadingMode,
-            ),
-            ybImuHeadingOffsetDegrees = normalizeCompassDegrees(
-                preferences.getFloat(KEY_YB_IMU_HEADING_OFFSET_CHIP_DOWN_DEGREES, YB_IMU_HEADING_OFFSET_DEFAULT_DEGREES),
-            ),
+            usePhoneHeading = false,
             realtimeVoiceEndpoint = preferences.getString(KEY_REALTIME_VOICE_ENDPOINT, null)
                 ?.ifBlank { REALTIME_VOICE_ENDPOINT_DEFAULT }
                 ?: REALTIME_VOICE_ENDPOINT_DEFAULT,
@@ -7274,10 +7529,6 @@ class ControlViewModel(application: Application) : AndroidViewModel(application)
         private const val KEY_LEFT_ESC_REVERSED = "left_esc_reversed"
         private const val KEY_RIGHT_ESC_REVERSED = "right_esc_reversed"
         private const val KEY_USE_PHONE_HEADING = "use_phone_heading"
-        private const val KEY_YB_IMU_HEADING_MODE = "yb_imu_heading_mode"
-        private const val KEY_YB_IMU_HEADING_INVERTED_DEFAULT_MIGRATED =
-            "yb_imu_heading_inverted_default_migrated"
-        private const val KEY_YB_IMU_HEADING_OFFSET_CHIP_DOWN_DEGREES = "yb_imu_heading_offset_chip_down_degrees"
         private const val KEY_REALTIME_VOICE_ENDPOINT = "realtime_voice_endpoint"
         private const val KEY_REALTIME_VOICE_APP_ID = "realtime_voice_app_id"
         private const val KEY_REALTIME_VOICE_API_KEY = "realtime_voice_api_key"
@@ -7287,7 +7538,12 @@ class ControlViewModel(application: Application) : AndroidViewModel(application)
         private const val KEY_REALTIME_WAKE_WORD_REQUIRED = "realtime_wake_word_required"
         private const val KEY_GITHUB_TOKEN = "github_token"
         private const val KEY_GEAR_PREFIX = "gear_percent_"
+        private const val MAX_CONTROL_LOG_ENTRIES = 200
+        private const val HEADING_LOCK_SAMPLE_LOG_INTERVAL_MS = 1_000L
+        private const val HEADING_LOCK_SAMPLE_LOG_MIN_CHANGE_INTERVAL_MS = 300L
         private const val COMMAND_HEARTBEAT_MS = 100L
+        private const val CONTROLLER_ARM_CONFIRM_TIMEOUT_MS = 2_000L
+        private const val UNREQUESTED_STATE_LOG_INTERVAL_MS = 2_000L
         private const val OTA_RECONNECT_INTERVAL_MS = 3_000L
         private const val TRACK_LOG_READ_LIMIT = 256
         private const val TRACK_LOG_READ_DELAY_MS = 10L
@@ -7297,43 +7553,20 @@ class ControlViewModel(application: Application) : AndroidViewModel(application)
         private const val PHONE_GPS_MIN_UPDATE_METERS = 0f
         private const val PHONE_GPS_MAX_ACCURACY_METERS = 25f
         private const val YB_IMU_HEADING_STALE_MS = 500L
-        private const val YB_IMU_HEADING_OFFSET_DEFAULT_DEGREES = 0f
-        private const val APP_TURN_TIMEOUT_MS = 8_000L
-        private const val APP_TURN_DONE_DEGREES = 3.0f
         private const val PIVOT_TURN_NEUTRAL_DELAY_MS = 1_000L
-        private const val HEADING_LOCK_MIN_CORRECTION_PERCENT = 3
-        private const val HEADING_LOCK_LOW_SPEED_MAX_CORRECTION_PERCENT = 25
-        private const val HEADING_LOCK_MAX_CORRECTION_PERCENT = 70
-        private const val HEADING_LOCK_MAX_OUTPUT_PERCENT = 70
-        private const val HEADING_LOCK_CRUISE_GAIN_START_PERCENT = 10
-        private const val HEADING_LOCK_CRUISE_GAIN_FULL_PERCENT = 50
-        private const val HEADING_LOCK_LOW_SPEED_FULL_CORRECTION_DEGREES = 45f
-        private const val HEADING_LOCK_ADAPTIVE_WINDOW_MS = 3_000L
-        private const val HEADING_LOCK_ADAPTIVE_MIN_WINDOW_MS = 2_700L
-        private const val HEADING_LOCK_ADAPTIVE_MAX_BOOST_PERCENT = 20
-        private const val HEADING_LOCK_ADAPTIVE_RISE_STEP_PERCENT = 1
-        private const val HEADING_LOCK_ADAPTIVE_DECAY_STEP_PERCENT = 2
-        private const val HEADING_LOCK_ADAPTIVE_IMPROVEMENT_DEADBAND_DEGREES = 1.0f
-        private const val HEADING_LOCK_COUNTER_THRUST_MAX_BASE_PERCENT = 70
-        private const val HEADING_LOCK_DIVERGENCE_WINDOW_MS = 3_000L
-        private const val HEADING_LOCK_DIVERGENCE_MIN_WINDOW_MS = 2_700L
-        private const val HEADING_LOCK_DIVERGENCE_MIN_GROWTH_DEGREES = 8.0f
         private const val HEADING_LOCK_TOLERANCE_DEFAULT = 2
         private const val HEADING_LOCK_FULL_CORRECTION_DEFAULT = 45
         private const val HEADING_LOCK_NEUTRAL_PIVOT_MIN_DIFFERENCE_DEFAULT = 20
         private const val HEADING_LOCK_NEUTRAL_PIVOT_MAX_DIFFERENCE_DEFAULT = 60
         private const val HEADING_LOCK_NEUTRAL_PIVOT_MIN_EFFECTIVE_DIFFERENCE_PERCENT = 20
+        private const val HEADING_LOCK_NEUTRAL_PIVOT_MAX_REVERSE_PERCENT = 60
         private const val AUTO_NAVIGATION_MIN_SATELLITES = 4
         private const val AUTO_NAVIGATION_ARRIVAL_RADIUS_METERS = 8.0
         private const val AUTO_NAVIGATION_GPS_FILTER_ALPHA = 0.35
         private const val AUTO_NAVIGATION_GPS_JUMP_RESET_MIN_METERS = 3
         private const val AUTO_NAVIGATION_GPS_JUMP_RESET_MAX_METERS = 30
         private const val AUTO_NAVIGATION_GPS_JUMP_RESET_DEFAULT_METERS = 5
-        private const val AUTO_NAVIGATION_MAX_CORRECTION_PERCENT = 25
         private const val AUTO_NAVIGATION_MAX_OUTPUT_PERCENT = 70
-        private const val AUTO_NAVIGATION_FULL_CORRECTION_DEGREES = 45f
-        private const val AUTO_NAVIGATION_PIVOT_HEADING_DEGREES = 30f
-        private const val AUTO_NAVIGATION_PIVOT_PERCENT = 25
         private const val TRACK_LINE_LOOKAHEAD_METERS = 12.0
         private const val TRACK_LINE_MAX_CORRECTION_DEGREES = 25f
         private const val TRACK_LINE_MAX_CROSS_TRACK_METERS = 15.0
@@ -7404,31 +7637,30 @@ class ControlViewModel(application: Application) : AndroidViewModel(application)
 
     private fun coerceHeadingLockNeutralPivotMinDifferencePercent(percent: Int, maxDifferencePercent: Int): Int {
         val minAllowed = HEADING_LOCK_NEUTRAL_PIVOT_MIN_EFFECTIVE_DIFFERENCE_PERCENT
-        val maxAllowed = maxDifferencePercent.coerceIn(minAllowed, 100)
+        val maxAllowed = maxDifferencePercent.coerceIn(minAllowed, HEADING_LOCK_NEUTRAL_PIVOT_MAX_REVERSE_PERCENT)
         return percent.coerceIn(minAllowed, maxAllowed)
     }
 
     private fun coerceHeadingLockNeutralPivotMaxDifferencePercent(percent: Int, minDifferencePercent: Int): Int {
         return percent.coerceIn(
             minDifferencePercent.coerceAtLeast(HEADING_LOCK_NEUTRAL_PIVOT_MIN_EFFECTIVE_DIFFERENCE_PERCENT),
-            100,
+            HEADING_LOCK_NEUTRAL_PIVOT_MAX_REVERSE_PERCENT,
         )
     }
 
-    private fun lockForDirectionChange(message: String) {
+    private fun lockForDirectionChange(message: String, onNeutralSent: (() -> Unit)? = null) {
         mutableUiState.update {
             it.copy(
-                armed = false,
                 leftThrottlePercent = 0,
                 rightThrottlePercent = 0,
                 commandSource = CommandSource.App,
                 headingLockEnabled = false,
                 selectedGear = ThrottleGear.Neutral,
                 throttleTrimPercent = 0,
-                statusMessage = "$message，已锁定并回空挡",
+                statusMessage = "$message，已回空挡，主控保持当前解锁状态",
             )
         }
-        sendIdle()
+        sendCurrentCommand(onNeutralSent)
     }
 
     private fun gearPercent(gear: ThrottleGear): Int {

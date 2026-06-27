@@ -12,6 +12,7 @@ import androidx.compose.foundation.layout.padding
 import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.outlined.Explore
 import androidx.compose.material.icons.outlined.Mic
+import androidx.compose.material.icons.outlined.ReportProblem
 import androidx.compose.material.icons.outlined.Settings
 import androidx.compose.material.icons.outlined.Tune
 import androidx.compose.material3.AlertDialog
@@ -48,7 +49,6 @@ import com.smartsup.controller.model.ControlUiState
 import com.smartsup.controller.model.RealtimeVoiceMode
 import com.smartsup.controller.model.SettingsUiState
 import com.smartsup.controller.service.ControlForegroundService
-import com.smartsup.controller.model.YB_IMU_HEADING_MODE_YBY_INVERTED
 import com.smartsup.controller.voice.ArkAudioAgentConfig
 import com.smartsup.controller.voice.ArkAudioAgentSession
 import com.smartsup.controller.voice.QwenAsrSession
@@ -147,9 +147,6 @@ fun AppScreen(viewModel: ControlViewModel) {
                 state = controlState,
                 navigationGpsSource = settingsState.navigationGpsSource,
                 usePhoneHeading = settingsState.usePhoneHeading,
-                phoneHeadingOffsetDegrees = 0f,
-                ybImuHeadingOffsetDegrees = 0f,
-                ybImuHeadingMode = YB_IMU_HEADING_MODE_YBY_INVERTED,
                 modifier = modifier,
                 onSyncTrack = viewModel::requestTrackLogSync,
                 onPlaybackIndexChange = viewModel::setGpsPlaybackIndex,
@@ -182,12 +179,7 @@ fun AppScreen(viewModel: ControlViewModel) {
                 maxThrottlePercent = settingsState.maxThrottlePercent,
                 fineTuneStepPercent = settingsState.fineTuneStepPercent,
                 gearPercents = settingsState.gearPercents,
-                leftEscReversed = settingsState.leftEscReversed,
-                rightEscReversed = settingsState.rightEscReversed,
                 usePhoneHeading = settingsState.usePhoneHeading,
-                phoneHeadingOffsetDegrees = 0f,
-                ybImuHeadingOffsetDegrees = 0f,
-                ybImuHeadingMode = YB_IMU_HEADING_MODE_YBY_INVERTED,
                 modifier = modifier,
                 onArm = { viewModel.setArmed(true) },
                 onDisarm = { viewModel.setArmed(false) },
@@ -220,6 +212,12 @@ fun AppScreen(viewModel: ControlViewModel) {
                 onNextVoiceSampleTarget = viewModel::nextVoiceSampleTarget,
                 onSaveVoiceSample = viewModel::savePendingVoiceSample,
                 onDiscardVoiceSample = viewModel::discardPendingVoiceSample,
+            )
+            AppTab.Log -> ControlLogScreen(
+                entries = controlState.controlLog,
+                logFilePath = controlState.controlLogFilePath,
+                modifier = modifier,
+                onClear = viewModel::clearControlLog,
             )
             AppTab.Settings -> SettingsScreen(
                 controlState = controlState,
@@ -636,6 +634,7 @@ private fun AppTab.icon() = when (this) {
     AppTab.Navigation -> Icons.Outlined.Explore
     AppTab.Control -> Icons.Outlined.Tune
     AppTab.Voice -> Icons.Outlined.Mic
+    AppTab.Log -> Icons.Outlined.ReportProblem
     AppTab.Settings -> Icons.Outlined.Settings
 }
 
@@ -643,5 +642,6 @@ private fun AppTab.color() = when (this) {
     AppTab.Navigation -> Color(0xFF1565C0)
     AppTab.Control -> Color(0xFF2E7D32)
     AppTab.Voice -> Color(0xFFE65100)
+    AppTab.Log -> Color(0xFF6D4C41)
     AppTab.Settings -> Color(0xFF546E7A)
 }

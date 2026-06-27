@@ -84,8 +84,8 @@
   <text x="770" y="350" class="label">ESP32 控制器</text>
   <text x="725" y="380" class="pin">5V/VIN  ← DC-DC OUT+</text>
   <text x="725" y="405" class="pin">GND     ← DC-DC OUT- / 系统地</text>
-  <text x="725" y="430" class="pin">GPIO25  → 左 ESC PWM</text>
-  <text x="725" y="455" class="pin">GPIO26  → 右 ESC PWM</text>
+  <text x="725" y="430" class="pin">GPIO26  → 左 ESC PWM</text>
+  <text x="725" y="455" class="pin">GPIO25  → 右 ESC PWM</text>
   <text x="725" y="480" class="pin">GPIO2   → 状态 LED</text>
 
   <line x1="585" y1="380" x2="700" y2="380" class="red" />
@@ -122,14 +122,14 @@
 
   <rect x="410" y="560" width="220" height="155" class="box-power" />
   <text x="465" y="595" class="label">左 100A 电调</text>
-  <text x="445" y="625" class="pin">S  ← GPIO25</text>
+  <text x="445" y="625" class="pin">S  ← GPIO26</text>
   <text x="445" y="650" class="pin">G  ← ESP32 GND</text>
   <text x="445" y="675" class="pin">粗红线 ← 左 ACS IP-</text>
   <text x="445" y="700" class="pin">粗黑线 ← 主负母线</text>
 
   <rect x="410" y="760" width="220" height="155" class="box-power" />
   <text x="465" y="795" class="label">右 100A 电调</text>
-  <text x="445" y="825" class="pin">S  ← GPIO26</text>
+  <text x="445" y="825" class="pin">S  ← GPIO25</text>
   <text x="445" y="850" class="pin">G  ← ESP32 GND</text>
   <text x="445" y="875" class="pin">粗红线 ← 右 ACS IP-</text>
   <text x="445" y="900" class="pin">粗黑线 ← 主负母线</text>

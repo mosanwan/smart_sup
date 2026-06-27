@@ -52,11 +52,28 @@ data class ControlUiState(
     val voiceSampleLastMessage: String = "采样模式未开启",
     val voiceSampleSavedCount: Int = 0,
     val voiceSampleDirectory: String = "",
+    val controlLog: List<ControlLogEntry> = emptyList(),
+    val controlLogFilePath: String = "",
     val statusMessage: String = "未连接，推进输出保持空闲",
 ) {
     val canSendThrottle: Boolean
         get() = connectionState == ConnectionState.Connected && armed
 }
+
+enum class ControlLogLevel {
+    Info,
+    Warning,
+    Error,
+}
+
+data class ControlLogEntry(
+    val id: Long,
+    val timestampMs: Long,
+    val level: ControlLogLevel,
+    val title: String,
+    val message: String,
+    val rawLine: String? = null,
+)
 
 enum class VoiceAsrState {
     Stopped,

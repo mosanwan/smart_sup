@@ -46,9 +46,8 @@ object VoiceCommandParser {
     private const val FORWARD_GEAR_3 = 60
     private const val FORWARD_GEAR_4 = 80
     private const val REVERSE_GEAR_1 = -15
-    private const val TURN_INNER = 10
-    private const val TURN_OUTER = 25
-    private const val MAX_TURN_ANGLE_DEGREES = 90
+    private const val DEFAULT_TURN_ANGLE_DEGREES = 15
+    private const val MAX_TURN_ANGLE_DEGREES = 180
     private const val MIN_STOP_SCORE = 76
     private const val MIN_MOVE_SCORE = 78
     private const val MIN_GATE_SCORE = 86
@@ -234,13 +233,13 @@ object VoiceCommandParser {
         CommandSpec(
             label = "左转",
             minScore = MIN_MOVE_SCORE,
-            command = command(armed = true, left = TURN_INNER, right = TURN_OUTER),
+            command = turnAngleCommand(TurnDirection.Left, DEFAULT_TURN_ANGLE_DEGREES),
             phrases = leftWords,
         ),
         CommandSpec(
             label = "右转",
             minScore = MIN_MOVE_SCORE,
-            command = command(armed = true, left = TURN_OUTER, right = TURN_INNER),
+            command = turnAngleCommand(TurnDirection.Right, DEFAULT_TURN_ANGLE_DEGREES),
             phrases = rightWords,
         ),
         CommandSpec(
@@ -616,6 +615,17 @@ object VoiceCommandParser {
             mode = ControlCommandMode.HeadingLock,
             headingLockEnabled = enabled,
             headingLockRequestId = if (enabled) 1 else null,
+        )
+    }
+
+    private fun turnAngleCommand(direction: TurnDirection, angleDegrees: Int): ControlCommand {
+        return ControlCommand(
+            armed = true,
+            source = CommandSource.Voice,
+            mode = ControlCommandMode.TurnAngle,
+            turnDirection = direction,
+            turnAngleDegrees = angleDegrees.coerceIn(1, MAX_TURN_ANGLE_DEGREES),
+            turnRequestId = 1,
         )
     }
 

@@ -191,7 +191,7 @@ class BluetoothClassicTransport(
         stream.write("$visibleLine\n".toByteArray(Charsets.US_ASCII))
         stream.flush()
         Log.d(TAG, "tx $visibleLine")
-        if (visibleLine != lastVisibleCommandLine) {
+        if (!visibleLine.isInternalConfigLine() && visibleLine != lastVisibleCommandLine) {
             lastVisibleCommandLine = visibleLine
             telemetryState.value = telemetryState.value.copy(
                 lastSentCommand = visibleLine,
@@ -517,6 +517,10 @@ class BluetoothClassicTransport(
     }
 
     private fun Telemetry.withStatusLine(line: String): Telemetry {
+        if (line.startsWith("ESC_CFG;")) {
+            return this
+        }
+
         if (line.startsWith("OTA;")) {
             return copy(
                 controllerMessage = otaStatusMessage(line),
@@ -543,6 +547,7 @@ class BluetoothClassicTransport(
             imuAvailable = fields["IMU"]?.let { it == "1" } ?: imuAvailable,
             ybImuAvailable = fields["YBIMU"]?.let { it == "1" } ?: ybImuAvailable,
             headingDegrees = fields["HDG"]?.toFloatOrNull() ?: headingDegrees,
+            ybHeadingDegrees = fields["YBHDG"]?.toFloatOrNull() ?: ybHeadingDegrees,
             targetHeadingDegrees = when {
                 fields.containsKey("TARGET") -> fields["TARGET"]?.toFloatOrNull()
                 isFullStatus && fields["TURN"] != "ACTIVE" && fields["HLOCK"] != "ACTIVE" -> null
@@ -588,6 +593,10 @@ class BluetoothClassicTransport(
             return emptyMap()
         }
         return parseSemicolonFields()
+    }
+
+    private fun String.isInternalConfigLine(): Boolean {
+        return startsWith("ESC_CFG;") || this == "ESC_CFG"
     }
 
     private fun parseTrackLogEvent(line: String): TrackLogEvent? {

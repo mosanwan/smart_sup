@@ -68,10 +68,8 @@ import androidx.compose.ui.unit.dp
 import com.smartsup.controller.model.ConnectionState
 import com.smartsup.controller.model.ControlUiState
 import com.smartsup.controller.model.ThrottleGear
-import com.smartsup.controller.model.YB_IMU_HEADING_MODE_YBY_INVERTED
 import com.smartsup.controller.model.VoiceAsrState
 import com.smartsup.controller.model.ybImuHeadingDegrees
-import com.smartsup.controller.model.ybImuUncalibratedHeadingDegrees
 import kotlin.math.abs
 import kotlin.math.asin
 import kotlin.math.cos
@@ -84,12 +82,7 @@ fun ControlScreen(
     maxThrottlePercent: Int,
     fineTuneStepPercent: Int,
     gearPercents: Map<ThrottleGear, Int>,
-    leftEscReversed: Boolean,
-    rightEscReversed: Boolean,
     usePhoneHeading: Boolean,
-    phoneHeadingOffsetDegrees: Float,
-    ybImuHeadingOffsetDegrees: Float,
-    ybImuHeadingMode: Int,
     modifier: Modifier = Modifier,
     onArm: () -> Unit,
     onDisarm: () -> Unit,
@@ -110,14 +103,14 @@ fun ControlScreen(
     val showingHeadingLockOutput = state.headingLockEnabled
     val leftDisplayThrottle = if (showingHeadingLockOutput) {
         state.appHeadingLeftOutputPercent
-            ?: state.telemetry.leftOutputPercent?.toUserFacingThrottle(leftEscReversed)
+            ?: state.telemetry.leftOutputPercent
             ?: state.leftThrottlePercent
     } else {
         state.leftThrottlePercent
     }
     val rightDisplayThrottle = if (showingHeadingLockOutput) {
         state.appHeadingRightOutputPercent
-            ?: state.telemetry.rightOutputPercent?.toUserFacingThrottle(rightEscReversed)
+            ?: state.telemetry.rightOutputPercent
             ?: state.rightThrottlePercent
     } else {
         state.rightThrottlePercent
@@ -185,9 +178,6 @@ fun ControlScreen(
                 fineTuneStepPercent = fineTuneStepPercent,
                 gearPercents = gearPercents,
                 usePhoneHeading = usePhoneHeading,
-                phoneHeadingOffsetDegrees = phoneHeadingOffsetDegrees,
-                ybImuHeadingOffsetDegrees = ybImuHeadingOffsetDegrees,
-                ybImuHeadingMode = ybImuHeadingMode,
                 modifier = Modifier
                     .weight(1f)
                     .fillMaxHeight(),
@@ -273,7 +263,7 @@ private fun CompactStatusRow(
         IconStatusChip(
             icon = Icons.Outlined.Explore,
             contentDescription = "航向锁定状态，点击切换",
-            value = if (state.headingLockEnabled) "锁航" else "未锁",
+            value = if (state.headingLockEnabled) "锁航中" else "未锁航",
             color = if (state.headingLockEnabled) Color(0xFF1565C0) else MaterialTheme.colorScheme.onSurfaceVariant,
             modifier = Modifier.weight(1f),
             enabled = true,
@@ -478,8 +468,9 @@ private fun VerticalThrottleTrack(
             (value.toFloat() / visualMaxThrottlePercent.toFloat()).coerceIn(-1f, 1f)
         }
         val thumbY = centerY - (trackHeight / 2f) * normalized
-        val activeTop = minOf(centerY, thumbY)
-        val activeHeight = abs(centerY - thumbY).coerceAtLeast(1f)
+        val activeTop = if (value >= 0) thumbY else centerY
+        val activeBottom = if (value >= 0) centerY else thumbY
+        val activeHeight = abs(activeBottom - activeTop).coerceAtLeast(1f)
         val segmentCount = 8
         val segmentGap = 4.dp.toPx()
         val segmentHeight = (trackHeight - segmentGap * (segmentCount - 1)) / segmentCount
@@ -572,9 +563,6 @@ private fun CenterControlPanel(
     fineTuneStepPercent: Int,
     gearPercents: Map<ThrottleGear, Int>,
     usePhoneHeading: Boolean,
-    phoneHeadingOffsetDegrees: Float,
-    ybImuHeadingOffsetDegrees: Float,
-    ybImuHeadingMode: Int,
     modifier: Modifier = Modifier,
     onArm: () -> Unit,
     onDisarm: () -> Unit,
@@ -621,18 +609,12 @@ private fun CenterControlPanel(
                 HeadingValueRow(
                     state = state,
                     usePhoneHeading = usePhoneHeading,
-                    phoneHeadingOffsetDegrees = phoneHeadingOffsetDegrees,
-                    ybImuHeadingOffsetDegrees = ybImuHeadingOffsetDegrees,
-                    ybImuHeadingMode = ybImuHeadingMode,
                     onEnableHeadingLock = onEnableHeadingLock,
                     onDisableHeadingLock = onDisableHeadingLock,
                 )
                 TargetHeadingValueRow(
                     state = state,
                     usePhoneHeading = usePhoneHeading,
-                    phoneHeadingOffsetDegrees = phoneHeadingOffsetDegrees,
-                    ybImuHeadingOffsetDegrees = ybImuHeadingOffsetDegrees,
-                    ybImuHeadingMode = ybImuHeadingMode,
                     onSetTargetHeading = onSetTargetHeading,
                 )
                 CompactInfoRow("航向误差", state.appHeadingErrorText())
@@ -649,9 +631,9 @@ private fun CenterControlPanel(
                 verticalArrangement = Arrangement.spacedBy(7.dp),
             ) {
                 CompactInfoRow("主控 IMU", state.ybImuModuleText())
-                CompactInfoRow("IMU 航向", state.ybHeadingText(ybImuHeadingOffsetDegrees, ybImuHeadingMode))
+                CompactInfoRow("IMU 航向", state.ybHeadingText())
                 CompactInfoRow("磁偏角", state.magneticDeclinationText())
-                CompactInfoRow("IMU YBY 原始", state.ybRawHeadingText())
+                CompactInfoRow("原始 YBY", state.ybRawHeadingText())
                 CompactInfoRow("欧拉角 Yaw", state.telemetry.ybYawDegrees.formatDegrees())
                 CompactInfoRow("欧拉角 Roll", state.telemetry.ybRollDegrees.formatDegrees())
                 CompactInfoRow("欧拉角 Pitch", state.telemetry.ybPitchDegrees.formatDegrees())
@@ -703,9 +685,6 @@ private fun CenterControlPanel(
                     "船头航向",
                     state.runtimeHeadingText(
                         usePhoneHeading = usePhoneHeading,
-                        phoneHeadingOffsetDegrees = phoneHeadingOffsetDegrees,
-                        ybImuHeadingOffsetDegrees = ybImuHeadingOffsetDegrees,
-                        ybImuHeadingMode = ybImuHeadingMode,
                     ),
                 )
                 CompactInfoRow("App 目标航向", state.targetHeadingText())
@@ -724,9 +703,6 @@ private fun CenterControlPanel(
 private fun HeadingValueRow(
     state: ControlUiState,
     usePhoneHeading: Boolean,
-    phoneHeadingOffsetDegrees: Float,
-    ybImuHeadingOffsetDegrees: Float,
-    ybImuHeadingMode: Int,
     onEnableHeadingLock: () -> Unit,
     onDisableHeadingLock: () -> Unit,
 ) {
@@ -763,9 +739,6 @@ private fun HeadingValueRow(
                 Text(
                     state.runtimeHeadingText(
                         usePhoneHeading = usePhoneHeading,
-                        phoneHeadingOffsetDegrees = phoneHeadingOffsetDegrees,
-                        ybImuHeadingOffsetDegrees = ybImuHeadingOffsetDegrees,
-                        ybImuHeadingMode = ybImuHeadingMode,
                     ),
                     fontWeight = FontWeight.Medium,
                     style = MaterialTheme.typography.bodySmall,
@@ -794,18 +767,12 @@ private fun HeadingValueRow(
 private fun TargetHeadingValueRow(
     state: ControlUiState,
     usePhoneHeading: Boolean,
-    phoneHeadingOffsetDegrees: Float,
-    ybImuHeadingOffsetDegrees: Float,
-    ybImuHeadingMode: Int,
     onSetTargetHeading: (Float) -> Unit,
 ) {
     val haptic = LocalHapticFeedback.current
     val dialogAnchor = remember { mutableStateOf<TargetHeadingDialogAnchor?>(null) }
     val currentHeading = state.runtimeHeadingDegrees(
         usePhoneHeading = usePhoneHeading,
-        phoneHeadingOffsetDegrees = phoneHeadingOffsetDegrees,
-        ybImuHeadingOffsetDegrees = ybImuHeadingOffsetDegrees,
-        ybImuHeadingMode = ybImuHeadingMode,
     )
     val actionEnabled = state.connectionState == ConnectionState.Connected &&
         state.armed &&
@@ -1140,8 +1107,10 @@ private fun ArmToggleButton(
 ) {
     val enabled = state.connectionState == ConnectionState.Connected
     val color = if (state.armed) Color(0xFF2E7D32) else Color(0xFFC62828)
-    val label = if (state.armed) "锁定推进" else "解锁推进"
+    val label = if (state.armed) "锁定主控推进" else "解锁主控推进"
     Surface(
+        onClick = { if (state.armed) onDisarm() else onArm() },
+        enabled = enabled,
         shape = RoundedCornerShape(8.dp),
         color = color.copy(alpha = if (enabled) 0.14f else 0.08f),
         modifier = Modifier.fillMaxWidth(),
@@ -1151,21 +1120,29 @@ private fun ArmToggleButton(
             horizontalArrangement = Arrangement.SpaceBetween,
             verticalAlignment = Alignment.CenterVertically,
         ) {
-            Column(verticalArrangement = Arrangement.spacedBy(2.dp)) {
+            Column(
+                modifier = Modifier.weight(1f),
+                verticalArrangement = Arrangement.spacedBy(2.dp),
+            ) {
                 Text(
-                    if (state.armed) "推进器已解锁" else "推进器已经锁定",
+                    if (state.armed) "推进已解锁" else "推进已锁定",
                     style = MaterialTheme.typography.bodyMedium,
                     fontWeight = FontWeight.SemiBold,
+                    maxLines = 1,
+                    overflow = TextOverflow.Ellipsis,
                 )
                 Text(
-                    if (state.connectionState == ConnectionState.Connected) "点击右侧图标切换" else "连接主控后可解锁",
+                    if (state.connectionState == ConnectionState.Connected) "点击此处切换主控解锁状态" else "连接主控后可解锁",
                     style = MaterialTheme.typography.labelSmall,
                     color = MaterialTheme.colorScheme.onSurfaceVariant,
+                    maxLines = 2,
+                    overflow = TextOverflow.Ellipsis,
                 )
             }
             FilledTonalIconButton(
                 onClick = { if (state.armed) onDisarm() else onArm() },
                 enabled = enabled,
+                modifier = Modifier.padding(start = 8.dp),
                 colors = IconButtonDefaults.filledTonalIconButtonColors(
                     containerColor = color.copy(alpha = 0.2f),
                     contentColor = color,
@@ -1407,16 +1384,12 @@ private fun Int.signedPercentText(): String {
     return if (this > 0) "+$this%" else "$this%"
 }
 
-private fun Int.toUserFacingThrottle(reversed: Boolean): Int {
-    return if (reversed) -this else this
-}
-
 private fun throttleHeatColor(value: Int, maxThrottlePercent: Int): Color {
     if (value == 0 || maxThrottlePercent <= 0) {
         return Color(0xFF6B7280)
     }
     val baseColor = if (value > 0) Color(0xFF2E7D32) else Color(0xFF1565C0)
-    val hotColor = Color(0xFFD32F2F)
+    val hotColor = if (value > 0) Color(0xFFD84315) else Color(0xFF08306B)
     val ratio = (abs(value).toFloat() / maxThrottlePercent.toFloat()).coerceIn(0f, 1f)
     val heat = ((ratio - 0.2f) / 0.65f).coerceIn(0f, 1f)
     return blendColor(baseColor, hotColor, heat)
@@ -1461,9 +1434,6 @@ private const val TARGET_HEADING_ARC_DEGREES = 90f
 
 private fun ControlUiState.runtimeHeadingDegrees(
     usePhoneHeading: Boolean,
-    phoneHeadingOffsetDegrees: Float,
-    ybImuHeadingOffsetDegrees: Float,
-    ybImuHeadingMode: Int,
 ): Float? {
     return if (usePhoneHeading) {
         phoneHeadingDegrees
@@ -1475,8 +1445,7 @@ private fun ControlUiState.runtimeHeadingDegrees(
             ?.let {
                 ybImuHeadingDegrees(
                     telemetry = it,
-                    offsetDegrees = magneticDeclinationDegrees ?: 0f,
-                    modeId = YB_IMU_HEADING_MODE_YBY_INVERTED,
+                    magneticDeclinationDegrees = magneticDeclinationDegrees ?: 0f,
                 )
             }
     }
@@ -1484,15 +1453,9 @@ private fun ControlUiState.runtimeHeadingDegrees(
 
 private fun ControlUiState.runtimeHeadingText(
     usePhoneHeading: Boolean,
-    phoneHeadingOffsetDegrees: Float,
-    ybImuHeadingOffsetDegrees: Float,
-    ybImuHeadingMode: Int,
 ): String {
     return runtimeHeadingDegrees(
         usePhoneHeading = usePhoneHeading,
-        phoneHeadingOffsetDegrees = phoneHeadingOffsetDegrees,
-        ybImuHeadingOffsetDegrees = ybImuHeadingOffsetDegrees,
-        ybImuHeadingMode = ybImuHeadingMode,
     ).formatDegrees()
 }
 
@@ -1544,11 +1507,10 @@ private fun ControlUiState.ybImuModuleText(): String {
     }
 }
 
-private fun ControlUiState.ybHeadingText(ybImuHeadingOffsetDegrees: Float, ybImuHeadingMode: Int): String {
+private fun ControlUiState.ybHeadingText(): String {
     return ybImuHeadingDegrees(
         telemetry = telemetry,
-        offsetDegrees = magneticDeclinationDegrees ?: 0f,
-        modeId = YB_IMU_HEADING_MODE_YBY_INVERTED,
+        magneticDeclinationDegrees = magneticDeclinationDegrees ?: 0f,
     ).formatDegrees()
 }
 
@@ -1557,10 +1519,7 @@ private fun ControlUiState.magneticDeclinationText(): String {
 }
 
 private fun ControlUiState.ybRawHeadingText(): String {
-    return ybImuUncalibratedHeadingDegrees(
-        telemetry = telemetry,
-        modeId = YB_IMU_HEADING_MODE_YBY_INVERTED,
-    ).formatDegrees()
+    return telemetry.ybYawDegrees.formatDegrees()
 }
 
 private fun ControlUiState.ybGyroZText(): String {
