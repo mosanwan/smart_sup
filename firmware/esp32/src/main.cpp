@@ -113,8 +113,8 @@ constexpr int8_t HEADING_LOCK_MAX_BRAKE_PERCENT = 35;
 constexpr uint16_t HEADING_LOCK_MIN_BRAKE_HOLD_MS = 250;
 constexpr uint16_t HEADING_LOCK_MAX_BRAKE_HOLD_MS = 800;
 constexpr float HEADING_LOCK_SETTLE_RATE_DEG_S = 3.0f;
-constexpr uint32_t HEADING_LOCK_DIVERGENCE_WINDOW_MS = 3000;
-constexpr float HEADING_LOCK_DIVERGENCE_DEGREES = 8.0f;
+constexpr uint32_t HEADING_LOCK_DIVERGENCE_WINDOW_MS = 1500;
+constexpr float HEADING_LOCK_DIVERGENCE_DEGREES = 5.0f;
 constexpr int8_t HEADING_LOCK_STEER_SIGN = 1;
 constexpr uint32_t YB_IMU_HEADING_TIMEOUT_MS = 500;
 constexpr uint16_t MAX_VOICE_TURN_ANGLE_DEGREES = 180;
@@ -244,6 +244,7 @@ enum class HeadingLockPhase : uint8_t {
   Correct,
   Brake,
   Settle,
+  Guard,
 };
 
 struct __attribute__((packed)) TrackLogRecord {
@@ -629,6 +630,8 @@ const char* headingLockPhaseName(HeadingLockPhase phase) {
       return "BRAKE";
     case HeadingLockPhase::Settle:
       return "SETTLE";
+    case HeadingLockPhase::Guard:
+      return "GUARD";
     case HeadingLockPhase::Correct:
     default:
       return "CORRECT";
@@ -3724,7 +3727,7 @@ void updateHeadingLockControl(uint32_t now) {
     headingLockDivergenceWarningActive = true;
     headingLockDivergenceStartedMs = now;
     headingLockDivergenceStartAbsError = absError;
-    Serial.println("Heading lock diverged; warning only, continuing heading lock");
+    Serial.println("Heading lock diverged; freezing correction and continuing heading lock");
   }
 
   const float pdPercent = innerPercent;
@@ -3780,6 +3783,7 @@ void updateHeadingLockControl(uint32_t now) {
   }
 
   const bool observerCanUpdate =
+    !headingLockDivergenceWarningActive &&
     !brakeActive &&
     headingDtSeconds > 0.0f &&
     fabs(rateDotDegS2) <= HEADING_LOCK_MAX_RATE_DOT_DEG_S2 &&
@@ -3802,6 +3806,7 @@ void updateHeadingLockControl(uint32_t now) {
   }
 
   const bool boostCanUpdate =
+    !headingLockDivergenceWarningActive &&
     !brakeActive &&
     headingDtSeconds > 0.0f &&
     headingDtSeconds <= 0.2f &&
@@ -3837,6 +3842,9 @@ void updateHeadingLockControl(uint32_t now) {
   if (inQuietHoldBand && absRate <= HEADING_LOCK_SETTLE_RATE_DEG_S) {
     headingLockAdaptiveBoostFloatPercent = 0.0f;
   }
+  if (headingLockDivergenceWarningActive) {
+    headingLockAdaptiveBoostFloatPercent = 0.0f;
+  }
   headingLockAdaptiveBoostPercent = static_cast<int8_t>(roundf(constrain(
     headingLockAdaptiveBoostFloatPercent,
     -HEADING_LOCK_ADAPTIVE_BOOST_MAX_PERCENT,
@@ -3845,7 +3853,13 @@ void updateHeadingLockControl(uint32_t now) {
 
   float correctionFloat = 0.0f;
   lastHeadingLockBrakePercent = 0.0f;
-  if (brakeActive) {
+  if (headingLockDivergenceWarningActive) {
+    headingLockPhase = HeadingLockPhase::Guard;
+    headingLockBrakeStartedMs = 0;
+    headingLockBrakeStartRateSign = 0.0f;
+    headingLockBrakeHoldTargetMs = 0;
+    correctionFloat = 0.0f;
+  } else if (brakeActive) {
     correctionFloat = -headingLockBrakeStartRateSign * brakePercent;
     lastHeadingLockBrakePercent = correctionFloat;
   } else if (inQuietHoldBand && absRate <= HEADING_LOCK_SETTLE_RATE_DEG_S) {

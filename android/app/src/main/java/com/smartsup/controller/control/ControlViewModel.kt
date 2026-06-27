@@ -6787,7 +6787,7 @@ class ControlViewModel(application: Application) : AndroidViewModel(application)
     ): String {
         return when (warning) {
             "HEADING_LOCK_DIVERGED" -> listOfNotNull(
-                "锁航误差扩大，主控继续锁航并回到保守差速",
+                "锁航误差扩大，主控继续锁航并冻结转向修正",
                 fields["HERR"]?.let { "误差=$it°" },
                 fields["HCORR"]?.let { "修正=$it%" },
                 fields["HFHAT"]?.let { "扰动=$it%" },
