@@ -622,7 +622,10 @@ private fun CenterControlPanel(
                     phoneHeadingOffsetDegrees = phoneHeadingOffsetDegrees,
                     onSetTargetHeading = onSetTargetHeading,
                 )
-                CompactInfoRow("航向误差", state.appHeadingErrorText())
+                CompactInfoRow("船头偏离", state.headingDeviationText())
+                CompactInfoRow("目标方向", state.headingTargetSideText())
+                CompactInfoRow("HERR 原始", state.appHeadingErrorText())
+                CompactInfoRow("推力差", state.thrustBiasText())
                 CompactInfoRow("手机指南针", state.phoneHeadingStatusText())
             }
         }
@@ -1480,6 +1483,59 @@ private fun ControlUiState.appHeadingErrorText(): String {
     return appHeadingLockErrorDegrees.formatDegrees()
 }
 
+private fun ControlUiState.headingDeviationText(): String {
+    val error = headingErrorDegreesOrNull() ?: return "--"
+    val magnitude = abs(error)
+    if (magnitude < HEADING_DEVIATION_DEADBAND_DEGREES) {
+        return "对准 ${magnitude.formatDegreesValue()}"
+    }
+    return if (error > 0f) {
+        "左偏 ${magnitude.formatDegreesValue()}"
+    } else {
+        "右偏 ${magnitude.formatDegreesValue()}"
+    }
+}
+
+private fun ControlUiState.headingTargetSideText(): String {
+    val error = headingErrorDegreesOrNull() ?: return "--"
+    val magnitude = abs(error)
+    if (magnitude < HEADING_DEVIATION_DEADBAND_DEGREES) {
+        return "正前方 ${magnitude.formatDegreesValue()}"
+    }
+    return if (error > 0f) {
+        "右侧 ${magnitude.formatDegreesValue()}"
+    } else {
+        "左侧 ${magnitude.formatDegreesValue()}"
+    }
+}
+
+private fun ControlUiState.thrustBiasText(): String {
+    val left = semanticLeftOutputPercentOrNull() ?: return "--"
+    val right = semanticRightOutputPercentOrNull() ?: return "--"
+    val delta = right - left
+    return when {
+        delta > 0 -> "右大 ${delta}%"
+        delta < 0 -> "左大 ${-delta}%"
+        else -> "左右相同"
+    }
+}
+
+private fun ControlUiState.headingErrorDegreesOrNull(): Float? {
+    return appHeadingLockErrorDegrees ?: telemetry.statusFields["HERR"]?.toFloatOrNull()
+}
+
+private fun ControlUiState.semanticLeftOutputPercentOrNull(): Int? {
+    return appHeadingLeftOutputPercent ?: telemetry.leftOutputPercent ?: telemetry.statusFields["L"]?.toIntOrNull()
+}
+
+private fun ControlUiState.semanticRightOutputPercentOrNull(): Int? {
+    return appHeadingRightOutputPercent ?: telemetry.rightOutputPercent ?: telemetry.statusFields["R"]?.toIntOrNull()
+}
+
+private fun Float.formatDegreesValue(): String {
+    return "%.1f°".format(this)
+}
+
 private fun ControlUiState.appHeadingCorrectionText(): String {
     return if (headingLockEnabled || appHeadingLockTargetDegrees != null) {
         appHeadingLockCorrectionPercent.signedPercentText()
@@ -1510,6 +1566,8 @@ private fun normalizeCompassDegrees(degrees: Float): Float {
     val normalized = degrees % 360f
     return if (normalized < 0f) normalized + 360f else normalized
 }
+
+private const val HEADING_DEVIATION_DEADBAND_DEGREES = 0.5f
 
 private fun ControlUiState.ybImuModuleText(): String {
     val quality = telemetry.statusFields["IQUAL"]?.takeIf { it.isNotBlank() }
