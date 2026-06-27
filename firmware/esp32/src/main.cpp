@@ -117,9 +117,9 @@ constexpr uint32_t HEADING_LOCK_DIVERGENCE_WINDOW_MS = 1500;
 constexpr float HEADING_LOCK_DIVERGENCE_DEGREES = 5.0f;
 constexpr float HEADING_LOCK_DIVERGENCE_MIN_AWAY_RATE_DEG_S = 3.0f;
 // Semantic steering: negative heading error means target is to port/left.
-// The current thruster layout turns left by increasing left thrust and
-// decreasing right thrust, so the internal correction sign is inverted here.
-constexpr int8_t HEADING_LOCK_STEER_SIGN = -1;
+// The current thruster layout turns left by increasing right thrust and
+// decreasing left thrust; positive/right correction does the opposite.
+constexpr int8_t HEADING_LOCK_STEER_SIGN = 1;
 constexpr uint32_t YB_IMU_HEADING_TIMEOUT_MS = 500;
 constexpr uint32_t PHONE_HEADING_TIMEOUT_MS = 1500;
 constexpr uint16_t MAX_VOICE_TURN_ANGLE_DEGREES = 180;
