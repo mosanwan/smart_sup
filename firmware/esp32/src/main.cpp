@@ -115,6 +115,7 @@ constexpr uint16_t HEADING_LOCK_MAX_BRAKE_HOLD_MS = 800;
 constexpr float HEADING_LOCK_SETTLE_RATE_DEG_S = 3.0f;
 constexpr uint32_t HEADING_LOCK_DIVERGENCE_WINDOW_MS = 1500;
 constexpr float HEADING_LOCK_DIVERGENCE_DEGREES = 5.0f;
+constexpr float HEADING_LOCK_DIVERGENCE_MIN_AWAY_RATE_DEG_S = 3.0f;
 constexpr int8_t HEADING_LOCK_STEER_SIGN = 1;
 constexpr uint32_t YB_IMU_HEADING_TIMEOUT_MS = 500;
 constexpr uint16_t MAX_VOICE_TURN_ANGLE_DEGREES = 180;
@@ -3687,6 +3688,11 @@ void updateHeadingLockControl(uint32_t now) {
   lastHeadingLockRateDotDegS2 = rateDotDegS2;
   const float absRate = fabs(headingRateDegS);
   const float rateSign = signOrZero(headingRateDegS);
+  const bool movingAwayFromTarget =
+    errorSign != 0.0f &&
+    rateSign != 0.0f &&
+    rateSign != errorSign &&
+    absRate >= HEADING_LOCK_DIVERGENCE_MIN_AWAY_RATE_DEG_S;
 
   const float fullCorrectionDegrees = max(
     static_cast<float>(headingLockFullCorrectionDegrees),
@@ -3713,6 +3719,14 @@ void updateHeadingLockControl(uint32_t now) {
     headingLockDivergenceStartedMs = 0;
     headingLockDivergenceStartAbsError = 0.0f;
     headingLockDivergenceErrorSign = 0.0f;
+  } else if (!movingAwayFromTarget) {
+    if (headingLockDivergenceWarningActive) {
+      Serial.println("Heading lock divergence cleared; resuming correction");
+    }
+    headingLockDivergenceWarningActive = false;
+    headingLockDivergenceStartedMs = now;
+    headingLockDivergenceStartAbsError = absError;
+    headingLockDivergenceErrorSign = errorSign;
   } else if (
     headingLockDivergenceStartedMs == 0 ||
     headingLockDivergenceErrorSign != errorSign
