@@ -119,6 +119,9 @@ class MockControlTransport : ControlTransport {
                         "模拟指令：${command.source.wireValue} 取消航向锁定"
                     }
                 }
+                command.mode == ControlCommandMode.StationKeep -> {
+                    "模拟指令：${command.source.wireValue} 定点保持 限幅 ±${command.stationOutputLimitPercent}%"
+                }
                 command.armed -> {
                     "模拟指令：${command.source.wireValue} 左 ${command.leftThrottlePercent}% / 右 ${command.rightThrottlePercent}%"
                 }

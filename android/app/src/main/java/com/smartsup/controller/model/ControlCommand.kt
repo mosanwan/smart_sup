@@ -21,6 +21,11 @@ data class ControlCommand(
     val headingLockNeutralPivotMinDifferencePercent: Int = 10,
     val headingLockNeutralPivotMaxDifferencePercent: Int = 60,
     val headingLockTargetDegrees: Float? = null,
+    val stationTargetLatitude: Double? = null,
+    val stationTargetLongitude: Double? = null,
+    val stationCurrentLatitude: Double? = null,
+    val stationCurrentLongitude: Double? = null,
+    val stationOutputLimitPercent: Int = 40,
     val voicePowerLimitPercent: Int = 70,
 ) {
     init {
@@ -60,6 +65,19 @@ data class ControlCommand(
                 require(it in 0f..360f) { "航向锁定目标航向只允许 0..360 度" }
             }
         }
+        if (mode == ControlCommandMode.StationKeep) {
+            require(armed) { "定点保持命令必须在已解锁状态下发送" }
+            require(source == CommandSource.App) { "定点保持命令只允许 App 来源" }
+            require(stationOutputLimitPercent in 0..40) { "定点保持输出限幅只允许 0..40%" }
+            val targetLatitude = requireNotNull(stationTargetLatitude) { "定点保持缺少目标纬度" }
+            val targetLongitude = requireNotNull(stationTargetLongitude) { "定点保持缺少目标经度" }
+            val currentLatitude = requireNotNull(stationCurrentLatitude) { "定点保持缺少当前纬度" }
+            val currentLongitude = requireNotNull(stationCurrentLongitude) { "定点保持缺少当前经度" }
+            require(targetLatitude in -90.0..90.0) { "定点保持目标纬度超出范围" }
+            require(currentLatitude in -90.0..90.0) { "定点保持当前纬度超出范围" }
+            require(targetLongitude in -180.0..180.0) { "定点保持目标经度超出范围" }
+            require(currentLongitude in -180.0..180.0) { "定点保持当前经度超出范围" }
+        }
         if (mode == ControlCommandMode.KeepAlive) {
             require(armed) { "保活命令必须在已解锁状态下发送" }
         }
@@ -96,6 +114,13 @@ data class ControlCommand(
                     headingSourceToken +
                     voiceLimitToken
             }
+            ControlCommandMode.StationKeep -> {
+                "SRC=${source.wireValue};ARM=1;MODE=${mode.wireValue};" +
+                    "TLAT=${formatLatLon(stationTargetLatitude!!)};TLON=${formatLatLon(stationTargetLongitude!!)};" +
+                    "CLAT=${formatLatLon(stationCurrentLatitude!!)};CLON=${formatLatLon(stationCurrentLongitude!!)};" +
+                    "SLIM=$stationOutputLimitPercent" +
+                    headingSourceToken
+            }
             ControlCommandMode.KeepAlive -> {
                 "SRC=${source.wireValue};ARM=1;MODE=${mode.wireValue}" +
                     headingSourceToken +
@@ -106,6 +131,9 @@ data class ControlCommand(
 
     companion object {
         val Idle = ControlCommand()
+
+        private fun formatLatLon(value: Double): String =
+            String.format(Locale.US, "%.6f", value)
     }
 }
 

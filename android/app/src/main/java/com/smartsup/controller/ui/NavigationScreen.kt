@@ -453,8 +453,7 @@ fun NavigationScreen(
             NavigationActionBar(
                 syncing = gpsTrack.syncing,
                 stationKeepingEnabled = autoNavigation.stationKeepingEnabled,
-                stationKeepingEnabledForClick = !gpsTrack.syncing &&
-                    !autoNavigation.editing &&
+                stationKeepingEnabledForClick = !autoNavigation.editing &&
                     !autoNavigation.executing &&
                     !autoNavigation.trackLineLockEnabled,
                 onSyncTrack = onSyncTrack,
@@ -1224,8 +1223,8 @@ private fun StationKeepingControls(
                 CompactMetric("距离", autoState.distanceToTargetMeters?.let { "${it.roundToInt()}m" } ?: "--")
                 CompactMetric("前后", autoState.stationKeepingForwardErrorMeters?.signedMetersText() ?: "--")
                 CompactMetric("左右", autoState.stationKeepingLateralErrorMeters?.signedMetersText() ?: "--")
-                CompactMetric("目标航向", autoState.stationKeepingTargetHeadingDegrees?.let { "${it.roundToInt()}°" } ?: "--")
-                CompactMetric("误差", autoState.headingErrorDegrees?.let { "${it.roundToInt()}°" } ?: "--")
+                CompactMetric("阶段", if (autoState.stationKeepingPositionActive) "纠偏" else "保持")
+                CompactMetric("限幅档", "${autoState.gearIndex + 1}")
             }
 
             Row(

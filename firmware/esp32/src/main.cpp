@@ -57,6 +57,7 @@ constexpr uint16_t ESC_NEUTRAL_US = 1500;
 constexpr uint16_t ESC_FORWARD_US = 2000;
 constexpr int8_t ESC_MIN_EFFECTIVE_THROTTLE_PERCENT = 9;
 constexpr uint16_t THROTTLE_RAMP_US_PER_TICK = 5;
+constexpr uint16_t STATION_KEEP_RAMP_US_PER_TICK = 10;
 constexpr uint32_t CONTROL_TICK_MS = 20;
 constexpr uint32_t ESC_BOOT_NEUTRAL_HOLD_MS = 3000;
 constexpr uint32_t ARM_HOLD_MS = 1500;
@@ -131,6 +132,11 @@ constexpr int8_t HEADING_LOCK_STEER_SIGN = 1;
 constexpr uint32_t YB_IMU_HEADING_TIMEOUT_MS = 500;
 constexpr uint32_t PHONE_HEADING_TIMEOUT_MS = 1500;
 constexpr uint16_t MAX_VOICE_TURN_ANGLE_DEGREES = 180;
+constexpr float STATION_KEEP_HOLD_RADIUS_METERS = 2.5f;
+constexpr float STATION_KEEP_REENGAGE_RADIUS_METERS = 3.5f;
+constexpr float STATION_KEEP_FULL_OUTPUT_RADIUS_METERS = 7.5f;
+constexpr int8_t STATION_KEEP_MAX_OUTPUT_PERCENT = 40;
+constexpr int8_t STATION_KEEP_MIN_EFFECTIVE_OUTPUT_PERCENT = 12;
 constexpr float ICM20948_GYRO_250DPS_LSB_PER_DPS = 131.0f;
 constexpr float IMU_YAW_SIGN = 1.0f;
 constexpr float RADIANS_TO_DEGREES = 57.2957795f;
@@ -251,6 +257,7 @@ enum class CommandMode : uint8_t {
   Throttle,
   TurnAngle,
   HeadingLock,
+  StationKeep,
   KeepAlive,
 };
 
@@ -419,6 +426,19 @@ uint16_t completedTurnRequestId = 0;
 float turnTargetHeadingDegrees = 0.0f;
 uint32_t turnStartedMs = 0;
 bool headingLockActive = false;
+bool stationKeepingActive = false;
+bool stationKeepingPositionActive = false;
+HeadingSource stationKeepingHeadingSource = HeadingSource::YbImu;
+float stationKeepingTargetLat = 0.0f;
+float stationKeepingTargetLon = 0.0f;
+float stationKeepingCurrentLat = 0.0f;
+float stationKeepingCurrentLon = 0.0f;
+float stationKeepingDistanceMeters = 0.0f;
+float stationKeepingForwardMeters = 0.0f;
+float stationKeepingRightMeters = 0.0f;
+float stationKeepingHeadingDegrees = 0.0f;
+int8_t stationKeepingOutputLimitPercent = STATION_KEEP_MAX_OUTPUT_PERCENT;
+const char* stationKeepingWarning = nullptr;
 uint16_t activeHeadingLockRequestId = 0;
 float headingLockTargetDegrees = 0.0f;
 float lastHeadingLockErrorDegrees = 0.0f;
@@ -632,12 +652,12 @@ uint16_t signedPercentToPulseUs(int8_t percent) {
   return ESC_NEUTRAL_US - (span * abs(constrainedPercent)) / 100;
 }
 
-uint16_t rampToward(uint16_t current, uint16_t target) {
+uint16_t rampToward(uint16_t current, uint16_t target, uint16_t stepUs) {
   if (current < target) {
-    return min<uint16_t>(current + THROTTLE_RAMP_US_PER_TICK, target);
+    return min<uint16_t>(current + stepUs, target);
   }
   if (current > target) {
-    return max<int>(current - THROTTLE_RAMP_US_PER_TICK, target);
+    return max<int>(current - stepUs, target);
   }
   return current;
 }
@@ -652,6 +672,8 @@ const char* commandModeName(CommandMode mode) {
       return "TURN";
     case CommandMode::HeadingLock:
       return "HEADING_LOCK";
+    case CommandMode::StationKeep:
+      return "STATION_KEEP";
     case CommandMode::KeepAlive:
       return "KEEPALIVE";
     case CommandMode::Throttle:
@@ -868,9 +890,12 @@ float currentHeadingRateDegS(HeadingSource source) {
 }
 
 const char* activeHeadingSourceName(uint32_t now) {
-  const HeadingSource source = headingLockActive || turnControlActive
-    ? headingLockHeadingSource
-    : requestedHeadingSource;
+  const HeadingSource source =
+    headingLockActive || turnControlActive
+      ? headingLockHeadingSource
+      : stationKeepingActive
+        ? stationKeepingHeadingSource
+        : requestedHeadingSource;
   return hasUsableHeadingSource(source, now) ? headingSourceName(source) : "NONE";
 }
 
@@ -2634,9 +2659,26 @@ void cancelHeadingLockControl() {
   lastCommandMode = CommandMode::Throttle;
 }
 
+void resetStationKeepingRuntimeState() {
+  stationKeepingActive = false;
+  stationKeepingPositionActive = false;
+  stationKeepingDistanceMeters = 0.0f;
+  stationKeepingForwardMeters = 0.0f;
+  stationKeepingRightMeters = 0.0f;
+  stationKeepingHeadingDegrees = 0.0f;
+  stationKeepingOutputLimitPercent = STATION_KEEP_MAX_OUTPUT_PERCENT;
+  stationKeepingWarning = nullptr;
+}
+
+void cancelStationKeepingControl() {
+  resetStationKeepingRuntimeState();
+  lastCommandMode = CommandMode::Throttle;
+}
+
 void cancelAutonomousControl() {
   cancelTurnControl();
   cancelHeadingLockControl();
+  cancelStationKeepingControl();
 }
 
 void cancelHeadingLockFaultKeepArmed(const char* faultCode) {
@@ -2664,6 +2706,7 @@ void forceNeutralAndDisarm() {
   turnControlActive = false;
   turnControlCompleted = false;
   headingLockActive = false;
+  resetStationKeepingRuntimeState();
   resetHeadingLockRuntimeState();
   leftPulseUs = ESC_NEUTRAL_US;
   rightPulseUs = ESC_NEUTRAL_US;
@@ -2980,6 +3023,10 @@ bool parseModeToken(const char* token, CommandMode& outMode) {
     outMode = CommandMode::HeadingLock;
     return true;
   }
+  if (strcmp(token, "MODE=STATION_KEEP") == 0) {
+    outMode = CommandMode::StationKeep;
+    return true;
+  }
   if (strcmp(token, "MODE=KEEPALIVE") == 0) {
     outMode = CommandMode::KeepAlive;
     return true;
@@ -3028,6 +3075,28 @@ bool parseHeadingDegreesToken(const char* token, const char* prefix, float& outV
   }
 
   outValue = normalizeCompass360(parsed);
+  return true;
+}
+
+bool parseCoordinateToken(const char* token, const char* prefix, float minValue, float maxValue, float& outValue) {
+  const size_t prefixLen = strlen(prefix);
+  if (strncmp(token, prefix, prefixLen) != 0) {
+    return false;
+  }
+
+  char* end = nullptr;
+  const float parsed = strtof(token + prefixLen, &end);
+  if (
+    end == token + prefixLen ||
+    *end != '\0' ||
+    !isfinite(parsed) ||
+    parsed < minValue ||
+    parsed > maxValue
+  ) {
+    return false;
+  }
+
+  outValue = parsed;
   return true;
 }
 
@@ -3562,6 +3631,7 @@ void applyTurnAngleCommand(
   lastCommandSource = CommandSource::Voice;
   lastCommandMode = CommandMode::TurnAngle;
   requestedHeadingSource = headingSource;
+  resetStationKeepingRuntimeState();
 
   if (turnControlActive && requestId == activeTurnRequestId) {
     return;
@@ -3683,6 +3753,7 @@ void applyHeadingLockCommand(
 
   lastCommandMode = CommandMode::HeadingLock;
   turnControlActive = false;
+  resetStationKeepingRuntimeState();
   headingLockSource = source;
   const HeadingSource previousHeadingLockHeadingSource = headingLockHeadingSource;
   headingLockHeadingSource = headingSource;
@@ -3745,6 +3816,167 @@ void applyHeadingLockCommand(
   SerialBT.print(headingLockFullCorrectionDegrees);
   SerialBT.print(";HREV=");
   SerialBT.println(headingLockNeutralReversePercent);
+}
+
+void computeStationKeepingError(
+  float targetLat,
+  float targetLon,
+  float currentLat,
+  float currentLon,
+  float headingDegrees,
+  float& outDistanceMeters,
+  float& outForwardMeters,
+  float& outRightMeters
+) {
+  constexpr float earthRadiusMeters = 6371000.0f;
+  const float targetLatRad = targetLat * DEG_TO_RAD;
+  const float currentLatRad = currentLat * DEG_TO_RAD;
+  const float avgLatRad = (targetLatRad + currentLatRad) * 0.5f;
+  const float northMeters = (targetLat - currentLat) * DEG_TO_RAD * earthRadiusMeters;
+  const float eastMeters = (targetLon - currentLon) * DEG_TO_RAD * cosf(avgLatRad) * earthRadiusMeters;
+  const float headingRad = normalizeCompass360(headingDegrees) * DEG_TO_RAD;
+  const float forwardEast = sinf(headingRad);
+  const float forwardNorth = cosf(headingRad);
+  const float rightEast = cosf(headingRad);
+  const float rightNorth = -sinf(headingRad);
+
+  outDistanceMeters = sqrtf(eastMeters * eastMeters + northMeters * northMeters);
+  outForwardMeters = eastMeters * forwardEast + northMeters * forwardNorth;
+  outRightMeters = eastMeters * rightEast + northMeters * rightNorth;
+}
+
+int8_t zeroSmallStationKeepOutput(int value) {
+  const int constrained = constrain(
+    value,
+    -static_cast<int>(STATION_KEEP_MAX_OUTPUT_PERCENT),
+    static_cast<int>(STATION_KEEP_MAX_OUTPUT_PERCENT)
+  );
+  return abs(constrained) < ESC_MIN_EFFECTIVE_THROTTLE_PERCENT
+    ? 0
+    : static_cast<int8_t>(constrained);
+}
+
+void applyStationKeepingCommand(
+  float targetLat,
+  float targetLon,
+  float currentLat,
+  float currentLon,
+  uint8_t outputLimitPercent,
+  CommandSource source,
+  HeadingSource headingSource
+) {
+  const uint32_t now = millis();
+  lastValidBtCommandMs = now;
+  lastCommandSource = source;
+  lastCommandMode = CommandMode::StationKeep;
+  requestedHeadingSource = headingSource;
+  stationKeepingActive = true;
+  stationKeepingHeadingSource = headingSource;
+  stationKeepingTargetLat = targetLat;
+  stationKeepingTargetLon = targetLon;
+  stationKeepingCurrentLat = currentLat;
+  stationKeepingCurrentLon = currentLon;
+  stationKeepingOutputLimitPercent = static_cast<int8_t>(constrain(
+    static_cast<int>(outputLimitPercent),
+    0,
+    static_cast<int>(STATION_KEEP_MAX_OUTPUT_PERCENT)
+  ));
+  stationKeepingWarning = nullptr;
+
+  turnControlActive = false;
+  turnControlCompleted = false;
+  headingLockActive = false;
+  resetHeadingLockRuntimeState();
+
+  if (!hasUsableHeadingSource(headingSource, now)) {
+    stationKeepingWarning = headingSource == HeadingSource::Phone
+      ? "PHONE_HEADING_UNAVAILABLE"
+      : "YB_HEADING_UNAVAILABLE";
+    requestedLeftPercent = 0;
+    requestedRightPercent = 0;
+    reportedLeftPercent = 0;
+    reportedRightPercent = 0;
+    Serial.println("Station keep paused: heading source unavailable");
+    return;
+  }
+
+  stationKeepingHeadingDegrees = currentHeadingDegrees(headingSource);
+  computeStationKeepingError(
+    targetLat,
+    targetLon,
+    currentLat,
+    currentLon,
+    stationKeepingHeadingDegrees,
+    stationKeepingDistanceMeters,
+    stationKeepingForwardMeters,
+    stationKeepingRightMeters
+  );
+
+  if (stationKeepingPositionActive) {
+    if (stationKeepingDistanceMeters <= STATION_KEEP_HOLD_RADIUS_METERS) {
+      stationKeepingPositionActive = false;
+    }
+  } else if (stationKeepingDistanceMeters >= STATION_KEEP_REENGAGE_RADIUS_METERS) {
+    stationKeepingPositionActive = true;
+  }
+
+  if (
+    !stationKeepingPositionActive ||
+    stationKeepingDistanceMeters <= 0.1f ||
+    stationKeepingOutputLimitPercent <= 0
+  ) {
+    requestedLeftPercent = 0;
+    requestedRightPercent = 0;
+    reportedLeftPercent = 0;
+    reportedRightPercent = 0;
+    return;
+  }
+
+  const float denominator = max(
+    0.1f,
+    STATION_KEEP_FULL_OUTPUT_RADIUS_METERS - STATION_KEEP_HOLD_RADIUS_METERS
+  );
+  const float ratio = constrain(
+    (stationKeepingDistanceMeters - STATION_KEEP_HOLD_RADIUS_METERS) / denominator,
+    0.0f,
+    1.0f
+  );
+  const float minEffectivePercent = min(
+    static_cast<float>(STATION_KEEP_MIN_EFFECTIVE_OUTPUT_PERCENT),
+    static_cast<float>(stationKeepingOutputLimitPercent)
+  );
+  const float magnitudePercent = constrain(
+    minEffectivePercent +
+      (static_cast<float>(stationKeepingOutputLimitPercent) - minEffectivePercent) * ratio,
+    0.0f,
+    static_cast<float>(stationKeepingOutputLimitPercent)
+  );
+  const float forwardPercent =
+    magnitudePercent * stationKeepingForwardMeters / stationKeepingDistanceMeters;
+  const float turnPercent =
+    magnitudePercent * stationKeepingRightMeters / stationKeepingDistanceMeters;
+
+  const int rawLeft = static_cast<int>(roundf(forwardPercent + turnPercent));
+  const int rawRight = static_cast<int>(roundf(forwardPercent - turnPercent));
+  const int limit = static_cast<int>(stationKeepingOutputLimitPercent);
+  const int8_t nextLeft = zeroSmallStationKeepOutput(constrain(rawLeft, -limit, limit));
+  const int8_t nextRight = zeroSmallStationKeepOutput(constrain(rawRight, -limit, limit));
+
+  requestedLeftPercent = nextLeft;
+  requestedRightPercent = nextRight;
+  reportedLeftPercent = nextLeft;
+  reportedRightPercent = nextRight;
+
+  Serial.print("Station keep d=");
+  Serial.print(stationKeepingDistanceMeters, 1);
+  Serial.print(" f=");
+  Serial.print(stationKeepingForwardMeters, 1);
+  Serial.print(" r=");
+  Serial.print(stationKeepingRightMeters, 1);
+  Serial.print(" out=");
+  Serial.print(nextLeft);
+  Serial.print("/");
+  Serial.println(nextRight);
 }
 
 void updateHeadingLockControl(uint32_t now) {
@@ -4420,6 +4652,7 @@ void applyBluetoothLine(char* line) {
   bool badVoiceLimitToken = false;
   bool badHeadingSourceToken = false;
   bool badEscConfigToken = false;
+  bool badStationKeepToken = false;
   bool nextArmed = false;
   int8_t nextLeftPercent = 0;
   int8_t nextRightPercent = 0;
@@ -4435,9 +4668,19 @@ void applyBluetoothLine(char* line) {
   uint16_t nextHeadingLockFullCorrectionDegrees = DEFAULT_HEADING_LOCK_FULL_CORRECTION_DEGREES;
   uint16_t nextHeadingLockNeutralReversePercent = DEFAULT_HEADING_LOCK_NEUTRAL_REVERSE_PERCENT;
   float nextHeadingLockTargetDegrees = 0.0f;
+  float nextStationKeepTargetLat = 0.0f;
+  float nextStationKeepTargetLon = 0.0f;
+  float nextStationKeepCurrentLat = 0.0f;
+  float nextStationKeepCurrentLon = 0.0f;
   float nextPhoneHeadingDegrees = 0.0f;
+  uint16_t nextStationKeepLimitPercent = STATION_KEEP_MAX_OUTPUT_PERCENT;
   HeadingSource nextHeadingSource = HeadingSource::YbImu;
   bool nextHeadingLockEnabled = false;
+  bool sawStationKeepTargetLat = false;
+  bool sawStationKeepTargetLon = false;
+  bool sawStationKeepCurrentLat = false;
+  bool sawStationKeepCurrentLon = false;
+  bool sawStationKeepLimit = false;
 
   char* token = strtok(line, ";");
   while (token != nullptr) {
@@ -4508,6 +4751,29 @@ void applyBluetoothLine(char* line) {
     ) {
       badHeadingLockToken = badHeadingLockToken || sawHeadingLockTarget;
       sawHeadingLockTarget = true;
+    } else if (parseCoordinateToken(token, "TLAT=", -90.0f, 90.0f, nextStationKeepTargetLat)) {
+      badStationKeepToken = badStationKeepToken || sawStationKeepTargetLat;
+      sawStationKeepTargetLat = true;
+    } else if (parseCoordinateToken(token, "TLON=", -180.0f, 180.0f, nextStationKeepTargetLon)) {
+      badStationKeepToken = badStationKeepToken || sawStationKeepTargetLon;
+      sawStationKeepTargetLon = true;
+    } else if (parseCoordinateToken(token, "CLAT=", -90.0f, 90.0f, nextStationKeepCurrentLat)) {
+      badStationKeepToken = badStationKeepToken || sawStationKeepCurrentLat;
+      sawStationKeepCurrentLat = true;
+    } else if (parseCoordinateToken(token, "CLON=", -180.0f, 180.0f, nextStationKeepCurrentLon)) {
+      badStationKeepToken = badStationKeepToken || sawStationKeepCurrentLon;
+      sawStationKeepCurrentLon = true;
+    } else if (
+      parseUnsignedToken(
+        token,
+        "SLIM=",
+        0,
+        STATION_KEEP_MAX_OUTPUT_PERCENT,
+        nextStationKeepLimitPercent
+      )
+    ) {
+      badStationKeepToken = badStationKeepToken || sawStationKeepLimit;
+      sawStationKeepLimit = true;
     } else if (
       parseUnsignedToken(
         token,
@@ -4547,6 +4813,14 @@ void applyBluetoothLine(char* line) {
       strncmp(token, "TARGET=", 7) == 0
     ) {
       badHeadingLockToken = true;
+    } else if (
+      strncmp(token, "TLAT=", 5) == 0 ||
+      strncmp(token, "TLON=", 5) == 0 ||
+      strncmp(token, "CLAT=", 5) == 0 ||
+      strncmp(token, "CLON=", 5) == 0 ||
+      strncmp(token, "SLIM=", 5) == 0
+    ) {
+      badStationKeepToken = true;
     } else if (strncmp(token, "VMAX=", 5) == 0) {
       badVoiceLimitToken = true;
     } else if (strncmp(token, "H_SRC=", 6) == 0 || strncmp(token, "PHDG=", 5) == 0) {
@@ -4576,6 +4850,12 @@ void applyBluetoothLine(char* line) {
   if (badVoiceLimitToken) {
     SerialBT.println("ERR;BAD_VOICE_LIMIT");
     Serial.println("Bluetooth command rejected: bad voice power limit");
+    return;
+  }
+
+  if (badStationKeepToken) {
+    SerialBT.println("ERR;BAD_STATION_KEEP_COMMAND");
+    Serial.println("Bluetooth command rejected: bad station keep token");
     return;
   }
 
@@ -4612,7 +4892,7 @@ void applyBluetoothLine(char* line) {
     }
     lastValidBtCommandMs = commandNow;
     lastCommandSource = nextSource;
-    if (!headingLockActive && !turnControlActive) {
+    if (!headingLockActive && !turnControlActive && !stationKeepingActive) {
       lastCommandMode = CommandMode::KeepAlive;
     }
     return;
@@ -4644,6 +4924,44 @@ void applyBluetoothLine(char* line) {
       nextAngleDegrees,
       nextTurnRequestId,
       static_cast<uint8_t>(nextVoicePowerLimitPercent),
+      nextHeadingSource
+    );
+    return;
+  }
+
+  if (nextMode == CommandMode::StationKeep) {
+    if (nextSource != CommandSource::App) {
+      SerialBT.println("ERR;STATION_KEEP_REQUIRES_APP_SRC");
+      Serial.println("Station keep rejected: source is not app");
+      return;
+    }
+    if (!sawArm || !nextArmed) {
+      SerialBT.println("ERR;STATION_KEEP_REQUIRES_ARM");
+      Serial.println("Station keep rejected: missing ARM=1");
+      return;
+    }
+    if (!armed) {
+      SerialBT.println("ERR;VOICE_CANNOT_ARM");
+      Serial.println("Station keep rejected: cannot arm from locked state");
+      return;
+    }
+    if (
+      !sawStationKeepTargetLat ||
+      !sawStationKeepTargetLon ||
+      !sawStationKeepCurrentLat ||
+      !sawStationKeepCurrentLon
+    ) {
+      SerialBT.println("ERR;BAD_STATION_KEEP_COMMAND");
+      Serial.println("Station keep rejected: missing coordinates");
+      return;
+    }
+    applyStationKeepingCommand(
+      nextStationKeepTargetLat,
+      nextStationKeepTargetLon,
+      nextStationKeepCurrentLat,
+      nextStationKeepCurrentLon,
+      static_cast<uint8_t>(nextStationKeepLimitPercent),
+      nextSource,
       nextHeadingSource
     );
     return;
@@ -5010,6 +5328,24 @@ void publishBluetoothStatus(uint32_t now) {
   SerialBT.print(trackLogCount);
   SerialBT.print(";TRK_NEWEST=");
   SerialBT.print(trackLogNewestSeq);
+  if (stationKeepingActive) {
+    SerialBT.print(";SK=ACTIVE;SKD=");
+    SerialBT.print(stationKeepingDistanceMeters, 1);
+    SerialBT.print(";SKF=");
+    SerialBT.print(stationKeepingForwardMeters, 1);
+    SerialBT.print(";SKR=");
+    SerialBT.print(stationKeepingRightMeters, 1);
+    SerialBT.print(";SKPOS=");
+    SerialBT.print(stationKeepingPositionActive ? 1 : 0);
+    SerialBT.print(";SKHDG=");
+    SerialBT.print(stationKeepingHeadingDegrees, 1);
+    SerialBT.print(";SKLIM=");
+    SerialBT.print(stationKeepingOutputLimitPercent);
+    if (stationKeepingWarning != nullptr) {
+      SerialBT.print(";SKWARN=");
+      SerialBT.print(stationKeepingWarning);
+    }
+  }
   if (turnControlActive) {
     SerialBT.print(";TURN=ACTIVE;TID=");
     SerialBT.print(activeTurnRequestId);
@@ -5151,9 +5487,12 @@ void loop() {
   const int8_t rightEscOutputPercent = rightSemanticPercentToEscPercent(requestedRightPercent);
   const uint16_t leftTarget = canApplyBluetoothThrottle ? signedPercentToPulseUs(leftEscOutputPercent) : ESC_NEUTRAL_US;
   const uint16_t rightTarget = canApplyBluetoothThrottle ? signedPercentToPulseUs(rightEscOutputPercent) : ESC_NEUTRAL_US;
+  const uint16_t rampStepUs = lastCommandMode == CommandMode::StationKeep
+    ? STATION_KEEP_RAMP_US_PER_TICK
+    : THROTTLE_RAMP_US_PER_TICK;
 
-  leftPulseUs = rampToward(leftPulseUs, constrain(leftTarget, ESC_REVERSE_US, ESC_FORWARD_US));
-  rightPulseUs = rampToward(rightPulseUs, constrain(rightTarget, ESC_REVERSE_US, ESC_FORWARD_US));
+  leftPulseUs = rampToward(leftPulseUs, constrain(leftTarget, ESC_REVERSE_US, ESC_FORWARD_US), rampStepUs);
+  rightPulseUs = rampToward(rightPulseUs, constrain(rightTarget, ESC_REVERSE_US, ESC_FORWARD_US), rampStepUs);
 
   writeEsc(LEFT_ESC_CHANNEL, leftPulseUs);
   writeEsc(RIGHT_ESC_CHANNEL, rightPulseUs);

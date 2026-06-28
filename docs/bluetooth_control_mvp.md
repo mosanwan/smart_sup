@@ -63,7 +63,7 @@ SRC=APP;ARM=1;L=28;R=12
 | `ARM` | `0` 或 `1` | `1` 表示 App 明确解锁，`0` 表示锁定 |
 | `L` | `-100..100` | 左侧 ESC 有符号油门百分比，正值前进，负值后退 |
 | `R` | `-100..100` | 右侧 ESC 有符号油门百分比，正值前进，负值后退 |
-| `MODE` | `THROTTLE`、`HEADING_LOCK` 或 `KEEPALIVE` | 普通油门直接使用 `L/R`；航向锁定由 ESP32 固件快速闭环计算最终 `L/R`；`KEEPALIVE` 只刷新失联保护，不改变当前锁航/转向状态 |
+| `MODE` | `THROTTLE`、`HEADING_LOCK`、`STATION_KEEP` 或 `KEEPALIVE` | 普通油门直接使用 `L/R`；航向锁定由 ESP32 固件快速闭环计算最终 `L/R`；定点保持由 ESP32 根据目标/当前坐标计算最终 `L/R`；`KEEPALIVE` 只刷新失联保护，不改变当前锁航/转向状态 |
 | `VMAX` | `5..100` | `SRC=VOICE` 时的声控功率限制，正反向使用同一绝对值上限；省略时默认 `70%` |
 | `H_SRC` / `PHDG` | `IMU` 或 `PHONE`；`PHDG=0..360` | 当前航向源。`PHONE` 模式下 App 每个控制心跳发送校准后的手机船头航向，ESP32 仍负责锁航差速和最终 `L/R` |
 
@@ -83,6 +83,15 @@ SRC=APP;ARM=1;MODE=HEADING_LOCK;HLOCK=1;HID=12;BASE=20;TARGET=123.4;HTOL=2;HFULL
 SRC=APP;ARM=1;MODE=KEEPALIVE;H_SRC=PHONE;PHDG=302.0
 SRC=APP;ARM=1;MODE=THROTTLE;HLOCK=0;L=0;R=0
 ```
+
+定点保持命令建议形态：
+
+```text
+SRC=APP;ARM=1;MODE=STATION_KEEP;TLAT=22.123456;TLON=113.123456;CLAT=22.123400;CLON=113.123500;SLIM=40;H_SRC=PHONE;PHDG=123.4
+```
+
+- `TLAT/TLON` 为定点目标坐标，`CLAT/CLON` 为当前滤波坐标，`SLIM` 为单侧自动输出限幅，当前上限为 `40%`。
+- 定点保持不修目标航向；航向源只用于把 GPS 误差转换成船体前后/左右方向。
 
 协议约束：
 
